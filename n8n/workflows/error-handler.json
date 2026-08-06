@@ -1,0 +1,53 @@
+{
+  "name": "Herald - System Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.EMAIL_ALLOWED_SENDERS.split(',')[0] }}",
+        "subject": "=Alert: Herald Workflow Execution Error",
+        "message": "=An error occurred during Herald workflow execution:\n\nWorkflow Name: {{ $json.workflow.name }}\nNode Name: {{ $json.execution.error.node.name }}\nError Message: {{ $json.execution.error.message }}\nTimestamp: {{ $json.execution.lastNodeExecuted }}\n\nPlease check system logs and job status.",
+        "options": {}
+      },
+      "name": "Send Diagnostic Alert Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send Diagnostic Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

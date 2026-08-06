@@ -1,0 +1,109 @@
+import uuid
+from datetime import UTC, datetime
+from enum import Enum as PyEnum
+
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import relationship
+
+from packages.herald.db.connection import Base
+
+
+class JobState(str, PyEnum):
+    RECEIVED = "RECEIVED"
+    VALIDATING = "VALIDATING"
+    EXTRACTING = "EXTRACTING"
+    SOURCE_READY = "SOURCE_READY"
+    SCRIPTING = "SCRIPTING"
+    SCRIPT_READY = "SCRIPT_READY"
+    QUEUED = "QUEUED"
+    SYNTHESIZING = "SYNTHESIZING"
+    ENCODING = "ENCODING"
+    AUDIO_READY = "AUDIO_READY"
+    UPLOADING = "UPLOADING"
+    DELIVERING = "DELIVERING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class RequestMode(str, PyEnum):
+    BRIEF = "BRIEF"
+    STANDARD = "STANDARD"
+    DETAILED = "DETAILED"
+
+
+class SourceType(str, PyEnum):
+    EMAIL_BODY = "EMAIL_BODY"
+    URL = "URL"
+
+
+class PodcastJob(Base):
+    __tablename__ = "podcast_jobs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    gmail_message_id = Column(String(255), unique=True, nullable=False, index=True)
+    gmail_thread_id = Column(String(255), nullable=True)
+    sender_email = Column(String(255), nullable=False, index=True)
+    request_mode = Column(String(50), nullable=False, default=RequestMode.STANDARD.value)
+    source_type = Column(String(50), nullable=False, default=SourceType.EMAIL_BODY.value)
+    source_url = Column(Text, nullable=True)
+    source_hash = Column(String(64), nullable=False, index=True)
+    source_text = Column(Text, nullable=False)
+    script_json = Column(JSON, nullable=True)
+    status = Column(String(50), nullable=False, default=JobState.RECEIVED.value, index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    completed_chunk_index = Column(Integer, nullable=False, default=0)
+    local_audio_path = Column(Text, nullable=True)
+    audio_sha256 = Column(String(64), nullable=True)
+    audio_bytes = Column(BigInteger, nullable=True)
+    audio_duration_seconds = Column(Integer, nullable=True)
+    drive_file_id = Column(String(255), nullable=True, unique=True)
+    drive_web_link = Column(Text, nullable=True)
+    error_code = Column(String(100), nullable=True)
+    error_detail = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    transitions = relationship(
+        "JobStateTransition", back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class JobStateTransition(Base):
+    __tablename__ = "job_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(
+        String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    from_state = Column(String(50), nullable=True)
+    to_state = Column(String(50), nullable=False)
+    component = Column(String(100), nullable=False)
+    message = Column(Text, nullable=True)
+    error_category = Column(String(100), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    job = relationship("PodcastJob", back_populates="transitions")
+
+
+Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)

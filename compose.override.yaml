@@ -1,0 +1,12 @@
+services:
+  herald-api:
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+      - ./prompts:/app/prompts
+
+  herald-worker:
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+      - ./prompts:/app/prompts

@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Environment & Secrets
+.env
+.env.local
+*.pem
+*.key
+*.crt
+
+# Database & Runtime Data
+*.sqlite
+*.sqlite3
+*.db
+/data/
+/data/*
+/models/
+/models/*
+*.mp3
+*.wav
+*.ogg
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Design doc extraction scratch file if any
+design_doc_extracted.txt

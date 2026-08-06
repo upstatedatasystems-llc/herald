@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system dependencies (FFmpeg, libpq-dev for postgres, gcc)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pyproject.toml and source code
+COPY pyproject.toml README.md ./
+COPY packages/ ./packages/
+COPY apps/ ./apps/
+COPY prompts/ ./prompts/
+
+# Install python dependencies
+RUN pip install --no-cache-dir -e .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

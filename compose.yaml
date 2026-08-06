@@ -1,0 +1,112 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: herald-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-herald}
+      POSTGRES_USER: ${POSTGRES_USER:-herald}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - herald-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-herald} -d ${POSTGRES_DB:-herald}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:1.50.0
+    container_name: herald-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-herald}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-herald}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-this-to-a-32-char-random-key}
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      TZ: ${TZ:-America/New_York}
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
+      EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS}
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.3
+    container_name: herald-kokoro
+    restart: unless-stopped
+    volumes:
+      - kokoro_models:/app/api/src/models
+    networks:
+      - herald-backend
+    # Private internal port 8880 only; do not expose publicly
+
+  herald-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: herald-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      HERALD_WORK_DIR: /data/herald
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  herald-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: herald-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kokoro:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      HERALD_WORK_DIR: /data/herald
+    volumes:
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+
+networks:
+  herald-backend:
+    driver: bridge
+    internal: false
+
+volumes:
+  postgres_data:
+  n8n_data:
+  kokoro_models:
+  work_data:

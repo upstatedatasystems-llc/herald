@@ -1,0 +1,124 @@
+{
+  "name": "Herald - Email Intake & Script Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "q": "subject:(Podcast:)"
+        }
+      },
+      "name": "Gmail Trigger - Herald Intake",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/intake",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"gmail_message_id\": \"{{ $json.id }}\",\n  \"gmail_thread_id\": \"{{ $json.threadId }}\",\n  \"sender_email\": \"{{ $json.from.value[0].address }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body_text\": \"{{ $json.text }}\",\n  \"body_html\": \"{{ $json.html }}\"\n}",
+        "options": {}
+      },
+      "name": "Call Herald API - Intake",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_duplicate }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "name": "Check If New Job",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://herald-api:8000/api/v1/script/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\"\n}",
+        "options": {}
+      },
+      "name": "Call Herald API - Generate Script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1000,
+        250
+      ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger - Herald Intake": {
+      "main": [
+        [
+          {
+            "node": "Call Herald API - Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Herald API - Intake": {
+      "main": [
+        [
+          {
+            "node": "Check If New Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If New Job": {
+      "main": [
+        [
+          {
+            "node": "Call Herald API - Generate Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

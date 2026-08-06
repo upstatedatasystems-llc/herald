@@ -1,0 +1,211 @@
+{
+  "name": "Herald - Audio Completion & Delivery Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger - 1 Min Poll",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, gmail_message_id, gmail_thread_id, sender_email, local_audio_path, audio_bytes, audio_duration_seconds, script_json FROM podcast_jobs WHERE status = 'AUDIO_READY' ORDER BY updated_at ASC LIMIT 1;"
+      },
+      "name": "Query AUDIO_READY Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Herald Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check If Job Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $json.local_audio_path }}",
+        "options": {}
+      },
+      "name": "Read Local MP3 File",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "upload",
+        "fileContentKey": "data",
+        "name": "={{ JSON.parse($json.script_json).episode_title }}.mp3",
+        "parents": [
+          "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+        ],
+        "options": {}
+      },
+      "name": "Upload to Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1250,
+        250
+      ],
+      "credentials": {
+        "googleDriveOAuth2": {
+          "id": "1",
+          "name": "Herald Google Drive Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Query AUDIO_READY Jobs').item.json.id }}/delivery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\",\n  \"completed_delivery\": true\n}",
+        "options": {}
+      },
+      "name": "Update Job Delivery Metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1500,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $('Query AUDIO_READY Jobs').item.json.gmail_message_id }}",
+        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Query AUDIO_READY Jobs').item.json.script_json).episode_title }}\nDuration: {{ Math.floor($('Query AUDIO_READY Jobs').item.json.audio_duration_seconds / 60) }}m {{ $('Query AUDIO_READY Jobs').item.json.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Query AUDIO_READY Jobs').item.json.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Query AUDIO_READY Jobs').item.json.id }}",
+        "options": {}
+      },
+      "name": "Send Gmail Completion Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1750,
+        250
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger - 1 Min Poll": {
+      "main": [
+        [
+          {
+            "node": "Query AUDIO_READY Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query AUDIO_READY Jobs": {
+      "main": [
+        [
+          {
+            "node": "Check If Job Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If Job Found": {
+      "main": [
+        [
+          {
+            "node": "Read Local MP3 File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Local MP3 File": {
+      "main": [
+        [
+          {
+            "node": "Upload to Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Update Job Delivery Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Job Delivery Metadata": {
+      "main": [
+        [
+          {
+            "node": "Send Gmail Completion Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

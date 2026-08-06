@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "herald"
+version = "0.1.0"
+description = "Herald Email-to-Podcast Automation System"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Upstate Data Systems LLC" }
+]
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "sqlalchemy>=2.0.28",
+    "alembic>=1.13.1",
+    "psycopg2-binary>=2.9.9",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.3",
+    "google-genai>=0.1.1",
+    "python-dotenv>=1.0.1",
+    "mutagen>=1.47.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.5",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "types-beautifulsoup4>=4.12.0.20240229"
+]
+
+[tool.setuptools.packages.find]
+where = ["packages", "apps"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
