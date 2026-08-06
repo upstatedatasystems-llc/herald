@@ -3,25 +3,26 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class PodcastSegment(BaseModel):
-    sequence: int = Field(..., description="1-indexed sequence number of narration segment")
-    speaker: str = Field(default="host", description="Speaker identifier, default 'host'")
-    text: str = Field(..., description="Spoken text for this narration segment")
+    order: int = Field(..., description="1-indexed sequence number of narration segment", ge=1)
+    heading: str = Field(default="Section", description="Section heading or topic title")
+    narration: str = Field(..., description="Spoken narration text for TTS synthesis")
 
-    @field_validator("text")
-    def validate_text_not_empty(cls, v: str) -> str:
+    @field_validator("narration")
+    def validate_narration_not_empty(cls, v: str) -> str:
         s = v.strip()
         if not s:
-            raise ValueError("Segment text must not be empty.")
+            raise ValueError("Segment narration text must not be empty.")
         return s
 
 
 class PodcastScriptResponse(BaseModel):
     episode_title: str = Field(..., description="Catchy descriptive title for podcast episode")
     episode_description: str = Field(..., description="Summary overview of the episode")
+    estimated_minutes: int = Field(..., description="Estimated spoken duration in minutes", ge=1)
     source_title: str | None = Field(default=None, description="Title of source article or email")
     source_url: str | None = Field(default=None, description="Canonical source URL if available")
-    requested_mode: str = Field(..., description="Requested depth: brief, standard, or detailed")
     segments: list[PodcastSegment] = Field(..., min_length=1, description="Ordered narration segments")
+    warnings: list[str] = Field(default_factory=list, description="Any content warnings or extraction notes")
 
     @field_validator("episode_title")
     def validate_title_not_empty(cls, v: str) -> str:
@@ -31,13 +32,13 @@ class PodcastScriptResponse(BaseModel):
         return s
 
     @field_validator("segments")
-    def validate_segment_sequence(cls, v: list[PodcastSegment]) -> list[PodcastSegment]:
+    def validate_segment_order(cls, v: list[PodcastSegment]) -> list[PodcastSegment]:
         if not v:
             raise ValueError("Script must contain at least one narration segment.")
 
         expected = 1
         for seg in v:
-            if seg.sequence != expected:
-                raise ValueError(f"Segment sequence error: expected {expected}, got {seg.sequence}")
+            if seg.order != expected:
+                raise ValueError(f"Segment order error: expected {expected}, got {seg.order}")
             expected += 1
         return v

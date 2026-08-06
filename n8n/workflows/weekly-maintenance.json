@@ -1,0 +1,60 @@
+{
+  "name": "Herald - Weekly Maintenance & Pruning",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger - Weekly Sunday 3 AM",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*) as total_completed FROM podcast_jobs WHERE status = 'COMPLETE';"
+      },
+      "name": "Query Maintenance Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Herald Postgres Database"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron Trigger - Weekly Sunday 3 AM": {
+      "main": [
+        [
+          {
+            "node": "Query Maintenance Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

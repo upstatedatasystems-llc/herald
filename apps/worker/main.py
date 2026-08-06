@@ -1,7 +1,7 @@
 import logging
 import shutil
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from packages.herald.db.connection import SessionLocal
 from packages.herald.db.models import JobState, PodcastJob
 from packages.herald.db.state_machine import transition_job_state
 from packages.herald.tts.chunker import chunk_podcast_script
-from packages.herald.tts.kokoro_client import KokoroClient
+from packages.herald.tts.kokoro_client import KokoroClient, KokoroTTSError
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -29,16 +29,46 @@ def slugify(text: str, max_len: int = 30) -> str:
     return clean[:max_len] or "episode"
 
 
+def recover_stale_claims(db: Session, stale_minutes: int = 15):
+    """
+    Detect jobs stuck in SYNTHESIZING or ENCODING without heartbeat past stale_minutes timeout,
+    and reset them back to QUEUED_TTS for retry.
+    """
+    cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
+    stale_jobs = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.status.in_([JobState.SYNTHESIZING.value, JobState.ENCODING.value]),
+            PodcastJob.claimed_at < cutoff,
+        )
+        .all()
+    )
+
+    for job in stale_jobs:
+        logger.warning(f"Recovering stale worker claim for job '{job.id}' (last claimed at {job.claimed_at})")
+        job.claimed_at = None
+        job.claim_owner = None
+        db.commit()
+        transition_job_state(
+            db,
+            job,
+            JobState.QUEUED_TTS.value,
+            component="herald-worker-recovery",
+            message="Recovered stale worker claim after crash or timeout",
+            force=True,
+        )
+
+
 def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     """
-    Acquire 1 QUEUED job using SELECT ... FOR UPDATE SKIP LOCKED, synthesize TTS chunks,
+    Acquire 1 QUEUED_TTS job using SELECT ... FOR UPDATE SKIP LOCKED, synthesize TTS chunks,
     assemble with FFmpeg, and transition status to AUDIO_READY.
     Returns True if a job was processed, False otherwise.
     """
     # Exclusive database lock to acquire single job safely
     job = (
         db.query(PodcastJob)
-        .filter(PodcastJob.status == JobState.QUEUED.value)
+        .filter(PodcastJob.status == JobState.QUEUED_TTS.value)
         .order_by(PodcastJob.created_at.asc())
         .with_for_update(skip_locked=True)
         .first()
@@ -48,6 +78,10 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         return False
 
     logger.info(f"Worker claimed job ID: '{job.id}' (Message ID: '{job.gmail_message_id}')")
+    job.claimed_at = datetime.now(UTC)
+    job.claim_owner = "herald-worker"
+    job.synthesis_attempt_count += 1
+    db.commit()
 
     transition_job_state(db, job, JobState.SYNTHESIZING.value, component="herald-worker")
 
@@ -62,14 +96,17 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     try:
         script = job.script_json or {}
         segments = script.get("segments", [])
-        title = script.get("episode_title", "Herald Episode")
+        title = job.custom_title or script.get("episode_title", "Herald Episode")
         description = script.get("episode_description", "")
+
+        voice = job.custom_voice or settings.KOKORO_VOICE
+        speed = job.custom_speed if job.custom_speed is not None else settings.KOKORO_SPEED
 
         if not segments:
             raise ValueError("Job script_json contains no segments to synthesize.")
 
         chunks = chunk_podcast_script(segments, max_chars=settings.TTS_MAX_CHUNK_CHARS)
-        logger.info(f"Script split into {len(chunks)} TTS chunks for job '{job.id}'")
+        logger.info(f"Script split into {len(chunks)} TTS chunks for job '{job.id}' (Voice: {voice}, Speed: {speed})")
 
         generated_chunk_paths = []
 
@@ -82,15 +119,27 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                 generated_chunk_paths.append(chunk_file)
                 continue
 
-            # Synthesize chunk
-            kokoro_client.synthesize_chunk(
-                text=chunk.text,
-                output_path=chunk_file,
-                voice=settings.KOKORO_VOICE,
-                speed=settings.KOKORO_SPEED,
-            )
+            # Per-chunk retry up to 2 retries per chunk
+            chunk_success = False
+            for chunk_attempt in range(1, 3):
+                try:
+                    kokoro_client.synthesize_chunk(
+                        text=chunk.text,
+                        output_path=chunk_file,
+                        voice=voice,
+                        speed=speed,
+                    )
+                    chunk_success = True
+                    break
+                except Exception as ce:
+                    logger.warning(f"Chunk {chunk.index} attempt {chunk_attempt} failed: {ce}")
+                    time.sleep(1.0)
+
+            if not chunk_success:
+                raise KokoroTTSError(f"Failed to synthesize chunk {chunk.index} after 2 attempts.")
 
             job.completed_chunk_index = chunk.index
+            job.last_heartbeat_at = datetime.now(UTC)
             db.commit()
             generated_chunk_paths.append(chunk_file)
 
@@ -104,16 +153,26 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         mp3_filename = f"{now_str}_{title_slug}_{short_id}.mp3"
         output_mp3_path = output_dir / mp3_filename
 
-        # Assemble and normalize audio
-        audio_info = join_and_normalize_audio(
-            chunk_paths=generated_chunk_paths,
-            output_mp3_path=output_mp3_path,
-            episode_title=title,
-            episode_description=description,
-            job_id=job.id,
-        )
+        # FFmpeg assembly with 1 retry after cleaning partial output
+        audio_info = None
+        for ffmpeg_attempt in range(1, 3):
+            try:
+                audio_info = join_and_normalize_audio(
+                    chunk_paths=generated_chunk_paths,
+                    output_mp3_path=output_mp3_path,
+                    episode_title=title,
+                    episode_description=description,
+                    job_id=job.id,
+                )
+                break
+            except Exception as fe:
+                logger.warning(f"FFmpeg assembly attempt {ffmpeg_attempt} failed: {fe}")
+                if output_mp3_path.exists():
+                    output_mp3_path.unlink(missing_ok=True)
+                if ffmpeg_attempt == 2:
+                    raise
 
-        job.local_audio_path = str(output_mp3_path)
+        job.local_audio_path = audio_info["output_path"]
         job.audio_bytes = audio_info["file_bytes"]
         job.audio_duration_seconds = audio_info["duration_seconds"]
         job.audio_sha256 = audio_info["sha256"]
@@ -132,13 +191,17 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Error processing job '{job.id}': {e}", exc_info=True)
+        logger.error(f"Error processing job '{job.id}': {e}")
         job.attempt_count += 1
         db.commit()
+
+        target_failed_state = (
+            JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.FAILED_RETRYABLE.value
+        )
         transition_job_state(
             db,
             job,
-            JobState.FAILED.value,
+            target_failed_state,
             component="herald-worker",
             message=str(e),
             error_category="WORKER_PROCESSING_FAILURE",
@@ -151,7 +214,6 @@ def run_worker_loop():
     logger.info("Starting Herald Worker daemon...")
     kokoro_client = KokoroClient()
 
-    # Log health check status on startup
     h_status = kokoro_client.health_check()
     logger.info(f"Startup Kokoro/FFmpeg Health Status: {h_status}")
 
@@ -161,6 +223,8 @@ def run_worker_loop():
         try:
             db = SessionLocal()
             try:
+                # Recover any stale claims every loop
+                recover_stale_claims(db)
                 job_processed = process_next_job(db, kokoro_client)
             finally:
                 db.close()

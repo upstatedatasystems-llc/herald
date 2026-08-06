@@ -2,21 +2,21 @@ import re
 
 
 class TTSChunk:
-    def __init__(self, index: int, text: str, segment_sequence: int):
+    def __init__(self, index: int, text: str, segment_order: int, is_section_end: bool = False):
         self.index = index
         self.text = text
-        self.segment_sequence = segment_sequence
+        self.segment_order = segment_order
+        self.is_section_end = is_section_end
 
 
 def split_text_into_sentences(text: str) -> list[str]:
     """
     Split text into sentences preserving sentence-ending punctuation.
-    Avoids splitting on common abbreviations like Mr., Mrs., Dr., vs., etc.
+    Avoids splitting on common abbreviations.
     """
     if not text:
         return []
 
-    # Pattern protecting common abbreviations
     protected = re.sub(r"\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|e\.g|i\.e|Inc|Ltd|Co)\.", r"\1<DOT>", text)
     sentences = re.split(r"(?<=[.!?])\s+", protected)
 
@@ -32,14 +32,16 @@ def split_text_into_sentences(text: str) -> list[str]:
 def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> list[TTSChunk]:
     """
     Chunk podcast script segments into safe TTS chunks under max_chars limit,
-    preserving sentence and paragraph boundaries.
+    preserving sentence and paragraph boundaries, using Appendix C 'narration' field.
     """
     chunks: list[TTSChunk] = []
     chunk_index = 0
+    total_segments = len(script_segments)
 
-    for seg in script_segments:
-        seg_seq = seg.get("sequence", 1)
-        text = seg.get("text", "").strip()
+    for i, seg in enumerate(script_segments):
+        seg_order = seg.get("order", i + 1)
+        text = seg.get("narration", seg.get("text", "")).strip()
+        is_last_segment = (i == total_segments - 1)
 
         if not text:
             continue
@@ -61,15 +63,14 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                         TTSChunk(
                             index=chunk_index,
                             text=" ".join(current_chunk_sentences),
-                            segment_sequence=seg_seq,
+                            segment_order=seg_order,
+                            is_section_end=False,
                         )
                     )
                     current_chunk_sentences = []
                     current_len = 0
 
-                # Handle exceptionally long single sentences
                 if sentence_len > max_chars:
-                    # Break long sentence on space boundaries
                     words = sentence.split(" ")
                     sub_words: list[str] = []
                     sub_len = 0
@@ -84,7 +85,8 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                                     TTSChunk(
                                         index=chunk_index,
                                         text=" ".join(sub_words),
-                                        segment_sequence=seg_seq,
+                                        segment_order=seg_order,
+                                        is_section_end=False,
                                     )
                                 )
                             sub_words = [word]
@@ -95,7 +97,8 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                             TTSChunk(
                                 index=chunk_index,
                                 text=" ".join(sub_words),
-                                segment_sequence=seg_seq,
+                                segment_order=seg_order,
+                                is_section_end=False,
                             )
                         )
                 else:
@@ -108,7 +111,8 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                 TTSChunk(
                     index=chunk_index,
                     text=" ".join(current_chunk_sentences),
-                    segment_sequence=seg_seq,
+                    segment_order=seg_order,
+                    is_section_end=True if not is_last_segment else False,
                 )
             )
 

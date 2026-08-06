@@ -3,6 +3,8 @@ services:
     image: postgres:16-alpine
     container_name: herald-postgres
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-herald}
       POSTGRES_USER: ${POSTGRES_USER:-herald}
@@ -21,6 +23,8 @@ services:
     image: docker.n8n.io/n8nio/n8n:1.50.0
     container_name: herald-n8n
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,6 +39,7 @@ services:
       N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
       TZ: ${TZ:-America/New_York}
+      HERALD_API_KEY: ${HERALD_API_KEY}
       GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
       EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS}
     ports:
@@ -49,11 +54,13 @@ services:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.3
     container_name: herald-kokoro
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - kokoro_models:/app/api/src/models
     networks:
       - herald-backend
-    # Private internal port 8880 only; do not expose publicly
+    # Internal Docker network port 8880 only; do not publish publicly
 
   herald-api:
     build:
@@ -61,6 +68,8 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: herald-api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,7 +84,7 @@ services:
     networks:
       - herald-backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -86,6 +95,8 @@ services:
       dockerfile: docker/Dockerfile.worker
     container_name: herald-worker
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy

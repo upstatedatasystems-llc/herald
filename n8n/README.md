@@ -1,23 +1,25 @@
-# Herald n8n Workflow Instructions
+# Herald n8n Workflows Documentation
 
-This directory contains version-controlled JSON workflow exports for n8n:
+This directory contains 7 version-controlled JSON workflow exports for n8n:
 
 1. `workflows/email-intake.json`: Polling Gmail trigger, email validation, Herald API intake call, Gemini script generation.
-2. `workflows/completion-dispatcher.json`: Schedule trigger polling Postgres for `AUDIO_READY` jobs, reading MP3, uploading to Google Drive, sending completion email with link and optional attachment.
-3. `workflows/error-handler.json`: Error trigger capturing workflow execution failures and alerting administrators.
+2. `workflows/completion-dispatcher.json`: Schedule trigger calling atomic `/delivery/claim`, uploading MP3 to Google Drive, calling `/drive-complete`, sending Gmail reply with Drive link and optional attachment, and calling `/delivery-complete`.
+3. `workflows/error-handler.json`: Global error trigger workflow capturing execution failures and sending diagnostic alert emails.
+4. `workflows/daily-cleanup.json`: Automated daily cleanup of temporary local MP3 files for `COMPLETE` jobs older than 48 hours.
+5. `workflows/stale-job-recovery.json`: Hourly check detecting stuck or abandoned active worker claims.
+6. `workflows/daily-health-report.json`: Daily status summary report checking system readiness and queue metrics.
+7. `workflows/weekly-maintenance.json`: Weekly execution pruning and database maintenance.
 
 ## Importing Workflows into n8n
 
-1. Open the n8n UI in your browser (e.g. `http://localhost:5678` or via Tailscale).
+1. Open the n8n UI in your browser (`http://localhost:5678` or via Tailscale).
 2. Go to **Workflows** -> **Import from File**.
-3. Select and import each of the three JSON files in `n8n/workflows/`.
+3. Import each of the 7 JSON files in `n8n/workflows/`.
 4. Configure required credentials:
-   - **Gmail OAuth2 Credential**: Connect to your dedicated Gmail inbox account (`https://developers.google.com/gmail/api/quickstart`).
-   - **Google Drive OAuth2 Credential**: Connect to your Google Drive account with folder access.
-   - **Postgres Credential**:
-     - Host: `postgres`
-     - Database: `${POSTGRES_DB}` (default `herald`)
-     - User: `${POSTGRES_USER}` (default `herald`)
-     - Password: `${POSTGRES_PASSWORD}`
-     - Port: `5432`
-5. Toggle all workflows to **Active**.
+   - **Gmail OAuth2 Credential**: Connect to your dedicated Gmail inbox account.
+   - **Google Drive OAuth2 Credential**: Connect to your Google Drive account with folder write access.
+   - **Postgres Credential**: Connect to the internal `postgres` container database.
+5. Associate the Error Workflow:
+   - Open **Workflow Settings** in `email-intake` and `completion-dispatcher`.
+   - Set **Error Workflow** to `Herald - System Error Handler`.
+6. Toggle all workflows to **Active**.

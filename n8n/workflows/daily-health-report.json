@@ -1,0 +1,55 @@
+{
+  "name": "Herald - Daily System Health Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger - Daily 8 AM",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://herald-api:8000/readiness",
+        "options": {}
+      },
+      "name": "Check API Readiness",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        500,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Cron Trigger - Daily 8 AM": {
+      "main": [
+        [
+          {
+            "node": "Check API Readiness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

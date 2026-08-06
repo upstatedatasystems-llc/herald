@@ -54,18 +54,21 @@ def embed_id3_metadata(
     Embed ID3v2 tags into the finished MP3 file.
     """
     try:
-        tags = ID3(mp3_path)
-    except Exception:
-        tags = ID3()
+        try:
+            tags = ID3(mp3_path)
+        except Exception:
+            tags = ID3()
 
-    tags["TIT2"] = TIT2(encoding=3, text=title)
-    tags["TPE1"] = TPE1(encoding=3, text="Herald Podcast Generator")
-    tags["TALB"] = TALB(encoding=3, text="Herald Audio Episodes")
-    if description or job_id:
-        comment_text = f"{description or ''}\nJob ID: {job_id or ''}".strip()
-        tags["COMM"] = COMM(encoding=3, lang="eng", desc="Episode Info", text=comment_text)
+        tags["TIT2"] = TIT2(encoding=3, text=title)
+        tags["TPE1"] = TPE1(encoding=3, text="Herald Podcast Generator")
+        tags["TALB"] = TALB(encoding=3, text="Herald Audio Episodes")
+        if description or job_id:
+            comment_text = f"{description or ''}\nJob ID: {job_id or ''}".strip()
+            tags["COMM"] = COMM(encoding=3, lang="eng", desc="Episode Info", text=comment_text)
 
-    tags.save(mp3_path)
+        tags.save(mp3_path)
+    except Exception as e:
+        logger.warning(f"Failed to embed ID3 tags on '{mp3_path}': {e}")
 
 
 def compute_file_sha256(file_path: Path) -> str:
@@ -99,7 +102,6 @@ def join_and_normalize_audio(
     # Write concat manifest file
     with open(concat_list_path, "w", encoding="utf-8") as f:
         for chunk in chunk_paths:
-            # Escape single quotes for ffmpeg concat format
             escaped_path = str(chunk.resolve()).replace("'", "'\\''")
             f.write(f"file '{escaped_path}'\n")
 
@@ -125,12 +127,11 @@ def join_and_normalize_audio(
         ]
 
         logger.info(f"Executing FFmpeg audio assembly command for job '{job_id}'")
-        
+
         # Check if ffmpeg binary exists; if missing and mock mode enabled, create synthetic MP3
         if not shutil.which("ffmpeg"):
             if os.environ.get("HERALD_MOCK_TTS") == "1":
                 logger.warning("FFmpeg binary not found in PATH. Generating mock MP3 file for testing...")
-                # Write simple placeholder audio bytes
                 with open(output_mp3_path, "wb") as f:
                     f.write(b"ID3\x03\x00\x00\x00\x00\x00\x00HERALD_MOCK_AUDIO_DATA_FOR_TESTING_1234567890")
                 return {
@@ -141,7 +142,7 @@ def join_and_normalize_audio(
                 }
             raise FFmpegExecutionError("FFmpeg binary is not found in PATH.")
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
         if res.returncode != 0:
             raise FFmpegExecutionError(f"FFmpeg failed with exit code {res.returncode}: {res.stderr}")

@@ -16,7 +16,7 @@ COPY packages/ ./packages/
 COPY apps/ ./apps/
 COPY prompts/ ./prompts/
 
-# Install python dependencies
+# Install python dependencies and herald package
 RUN pip install --no-cache-dir -e .
 
-CMD ["python", "apps/worker/main.py"]
+CMD ["python", "-m", "apps.worker.main"]

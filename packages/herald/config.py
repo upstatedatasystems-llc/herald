@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     TZ: str = "America/New_York"
     HERALD_API_PORT: int = 8000
-    HERALD_API_KEY: str = "default-insecure-api-key"
+    HERALD_API_KEY: str = ""
     HERALD_MAX_SOURCE_CHARS: int = 100000
     HERALD_WORK_DIR: str = "/data/herald"
 
@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     MAX_ACTIVE_TTS_JOBS: int = 1
     TTS_MAX_CHUNK_CHARS: int = 500
 
+    # Directives Bounds
+    ALLOWED_VOICES: str = "af_heart,af_bella,af_sarah,am_adam,am_michael"
+    MIN_SPEED: float = 0.8
+    MAX_SPEED: float = 1.2
+
     # Audio & FFmpeg
     AUDIO_OUTPUT_BITRATE: str = "64k"
     AUDIO_SAMPLE_RATE: int = 24000
@@ -62,6 +67,19 @@ class Settings(BaseSettings):
         if not self.EMAIL_ALLOWED_SENDERS:
             return []
         return [email.strip().lower() for email in self.EMAIL_ALLOWED_SENDERS.split(",") if email.strip()]
+
+    def get_allowed_voices_list(self) -> list[str]:
+        if not self.ALLOWED_VOICES:
+            return ["af_heart"]
+        return [v.strip().lower() for v in self.ALLOWED_VOICES.split(",") if v.strip()]
+
+    def is_production_valid(self) -> bool:
+        if self.HERALD_ENV.lower() == "production":
+            if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
+                return False
+            if not self.EMAIL_ALLOWED_SENDERS.strip():
+                return False
+        return True
 
 
 settings = Settings()

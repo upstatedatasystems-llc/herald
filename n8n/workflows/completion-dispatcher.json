@@ -22,35 +22,39 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT id, gmail_message_id, gmail_thread_id, sender_email, local_audio_path, audio_bytes, audio_duration_seconds, script_json FROM podcast_jobs WHERE status = 'AUDIO_READY' ORDER BY updated_at ASC LIMIT 1;"
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/delivery/claim",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.HERALD_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Query AUDIO_READY Jobs",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
+      "name": "Claim Delivery Job (Atomic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
       "position": [
         500,
         300
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "Herald Postgres Database"
-        }
-      }
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "string": [
+          "boolean": [
             {
-              "value1": "={{ $json.id }}",
-              "operation": "isNotEmpty"
+              "value1": "={{ $json.claimed }}",
+              "value2": true
             }
           ]
         }
       },
-      "name": "Check If Job Found",
+      "name": "Check If Job Claimed",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
@@ -60,7 +64,7 @@
     },
     {
       "parameters": {
-        "filePath": "={{ $json.local_audio_path }}",
+        "filePath": "={{ $json.job.local_audio_path }}",
         "options": {}
       },
       "name": "Read Local MP3 File",
@@ -76,7 +80,7 @@
         "authentication": "oAuth2",
         "operation": "upload",
         "fileContentKey": "data",
-        "name": "={{ JSON.parse($json.script_json).episode_title }}.mp3",
+        "name": "={{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}.mp3",
         "parents": [
           "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
         ],
@@ -99,13 +103,22 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Query AUDIO_READY Jobs').item.json.id }}/delivery",
+        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.HERALD_API_KEY }}"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\",\n  \"completed_delivery\": true\n}",
+        "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
         "options": {}
       },
-      "name": "Update Job Delivery Metadata",
+      "name": "Record Drive Metadata",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
@@ -115,18 +128,40 @@
     },
     {
       "parameters": {
-        "resource": "message",
-        "operation": "reply",
-        "messageId": "={{ $('Query AUDIO_READY Jobs').item.json.gmail_message_id }}",
-        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Query AUDIO_READY Jobs').item.json.script_json).episode_title }}\nDuration: {{ Math.floor($('Query AUDIO_READY Jobs').item.json.audio_duration_seconds / 60) }}m {{ $('Query AUDIO_READY Jobs').item.json.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Query AUDIO_READY Jobs').item.json.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Query AUDIO_READY Jobs').item.json.id }}",
-        "options": {}
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024 }}",
+              "operation": "smallerEqual",
+              "value2": "={{ Number($env.EMAIL_ATTACHMENT_MAX_MB || 18) }}"
+            }
+          ]
+        }
       },
-      "name": "Send Gmail Completion Reply",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
+      "name": "Check Attachment Threshold",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
       "position": [
         1750,
         250
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
+        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Included MP3 file",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "name": "Send Reply With Attachment",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2000,
+        150
       ],
       "credentials": {
         "gmailOAuth2": {
@@ -134,6 +169,51 @@
           "name": "Herald Gmail Account"
         }
       }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
+        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Link-only reply (file exceeds attachment size limit)",
+        "options": {}
+      },
+      "name": "Send Link-Only Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2000,
+        350
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/delivery-complete",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.HERALD_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Record Delivery Complete",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        2250,
+        250
+      ]
     }
   ],
   "connections": {
@@ -141,25 +221,25 @@
       "main": [
         [
           {
-            "node": "Query AUDIO_READY Jobs",
+            "node": "Claim Delivery Job (Atomic)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query AUDIO_READY Jobs": {
+    "Claim Delivery Job (Atomic)": {
       "main": [
         [
           {
-            "node": "Check If Job Found",
+            "node": "Check If Job Claimed",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Check If Job Found": {
+    "Check If Job Claimed": {
       "main": [
         [
           {
@@ -185,18 +265,58 @@
       "main": [
         [
           {
-            "node": "Update Job Delivery Metadata",
+            "node": "Record Drive Metadata",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Update Job Delivery Metadata": {
+    "Record Drive Metadata": {
       "main": [
         [
           {
-            "node": "Send Gmail Completion Reply",
+            "node": "Check Attachment Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Attachment Threshold": {
+      "main": [
+        [
+          {
+            "node": "Send Reply With Attachment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Link-Only Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Reply With Attachment": {
+      "main": [
+        [
+          {
+            "node": "Record Delivery Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Link-Only Reply": {
+      "main": [
+        [
+          {
+            "node": "Record Delivery Complete",
             "type": "main",
             "index": 0
           }
@@ -206,6 +326,7 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "errorWorkflow": "Herald - System Error Handler"
   }
 }

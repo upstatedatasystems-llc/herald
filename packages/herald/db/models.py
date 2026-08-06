@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -25,14 +26,15 @@ class JobState(str, PyEnum):
     SOURCE_READY = "SOURCE_READY"
     SCRIPTING = "SCRIPTING"
     SCRIPT_READY = "SCRIPT_READY"
-    QUEUED = "QUEUED"
+    QUEUED_TTS = "QUEUED_TTS"
     SYNTHESIZING = "SYNTHESIZING"
     ENCODING = "ENCODING"
     AUDIO_READY = "AUDIO_READY"
     UPLOADING = "UPLOADING"
     DELIVERING = "DELIVERING"
     COMPLETE = "COMPLETE"
-    FAILED = "FAILED"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE"
+    FAILED_FINAL = "FAILED_FINAL"
     CANCELLED = "CANCELLED"
 
 
@@ -61,16 +63,42 @@ class PodcastJob(Base):
     source_text = Column(Text, nullable=False)
     script_json = Column(JSON, nullable=True)
     status = Column(String(50), nullable=False, default=JobState.RECEIVED.value, index=True)
+    
+    # Custom directives from email body
+    custom_voice = Column(String(50), nullable=True)
+    custom_speed = Column(Float, nullable=True)
+    custom_title = Column(String(255), nullable=True)
+
+    # Attempt counts & stage operations
     attempt_count = Column(Integer, nullable=False, default=0)
+    synthesis_attempt_count = Column(Integer, nullable=False, default=0)
+    delivery_attempt_count = Column(Integer, nullable=False, default=0)
     completed_chunk_index = Column(Integer, nullable=False, default=0)
+    failed_stage = Column(String(50), nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Claim & Heartbeat state
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    claim_owner = Column(String(100), nullable=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Generated Audio Metadata
     local_audio_path = Column(Text, nullable=True)
     audio_sha256 = Column(String(64), nullable=True)
     audio_bytes = Column(BigInteger, nullable=True)
     audio_duration_seconds = Column(Integer, nullable=True)
+
+    # Delivery & Google Drive metadata
     drive_file_id = Column(String(255), nullable=True, unique=True)
     drive_web_link = Column(Text, nullable=True)
+    drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Error details
     error_code = Column(String(100), nullable=True)
     error_detail = Column(Text, nullable=True)
+
+    # Timestamps
     created_at = Column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -107,3 +135,4 @@ class JobStateTransition(Base):
 
 
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
+Index("idx_podcast_jobs_claim", PodcastJob.status, PodcastJob.claimed_at)

@@ -11,18 +11,20 @@ from packages.herald.tts.kokoro_client import KokoroClient
 def test_full_mocked_pipeline_integration(db_session, tmp_path):
     """
     Test complete vertical slice:
-    intake -> validation -> scripting -> queue -> TTS synthesis -> FFmpeg MP3 encoding -> delivery metadata -> COMPLETE
+    intake -> validation -> scripting -> QUEUED_TTS -> SYNTHESIZING -> ENCODING -> AUDIO_READY -> UPLOADING -> DELIVERING -> COMPLETE
     """
     os.environ["HERALD_MOCK_TTS"] = "1"
 
     # Step 1: Intake email message
     raw_subject = "Podcast: Standard"
-    raw_body = "Today in technology, cloud hardware models are expanding rapidly with ARM architecture."
+    raw_body = "Voice: af_heart\nSpeed: 1.0\nTitle: Custom ARM Episode\n\nToday in technology, cloud hardware models are expanding rapidly with ARM architecture."
     sender = "authorized@example.com"
     msg_id = "gmail-msg-test-999"
 
     parsed = process_email_message(subject=raw_subject, body_text=raw_body)
     assert parsed.mode == RequestMode.STANDARD
+    assert parsed.custom_voice == "af_heart"
+    assert parsed.custom_title == "Custom ARM Episode"
 
     job = PodcastJob(
         gmail_message_id=msg_id,
@@ -31,6 +33,9 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
         source_type=SourceType.EMAIL_BODY.value,
         source_hash=parsed.source_hash,
         source_text=parsed.clean_text,
+        custom_voice=parsed.custom_voice,
+        custom_speed=parsed.custom_speed,
+        custom_title=parsed.custom_title,
         status=JobState.RECEIVED.value,
     )
     db_session.add(job)
@@ -45,11 +50,12 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
     script_data = {
         "episode_title": "ARM Architecture Breakdown",
         "episode_description": "A quick overview of cloud ARM computing.",
-        "requested_mode": "standard",
+        "estimated_minutes": 8,
         "segments": [
-            {"sequence": 1, "speaker": "host", "text": "Welcome to Herald. Today we discuss cloud ARM computing."},
-            {"sequence": 2, "speaker": "host", "text": "Ampere A1 servers provide great efficiency for continuous jobs."},
+            {"order": 1, "heading": "Introduction", "narration": "Welcome to Herald. Today we discuss cloud ARM computing."},
+            {"order": 2, "heading": "Efficiency", "narration": "Ampere A1 servers provide great efficiency for continuous jobs."},
         ],
+        "warnings": [],
     }
     validated_script = PodcastScriptResponse(**script_data)
     job.script_json = validated_script.model_dump()
@@ -57,8 +63,8 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
 
     transition_job_state(db_session, job, JobState.SCRIPTING.value, component="test")
     transition_job_state(db_session, job, JobState.SCRIPT_READY.value, component="test")
-    transition_job_state(db_session, job, JobState.QUEUED.value, component="test")
-    assert job.status == JobState.QUEUED.value
+    transition_job_state(db_session, job, JobState.QUEUED_TTS.value, component="test")
+    assert job.status == JobState.QUEUED_TTS.value
 
     # Step 4: Worker TTS synthesis & FFmpeg audio assembly
     transition_job_state(db_session, job, JobState.SYNTHESIZING.value, component="test")
@@ -94,7 +100,7 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
     assert job.status == JobState.AUDIO_READY.value
     assert output_mp3.exists()
 
-    # Step 5: Drive Upload & Delivery Completion
+    # Step 5: Atomic Drive Upload & Delivery Completion
     transition_job_state(db_session, job, JobState.UPLOADING.value, component="test")
     job.drive_file_id = "drive-file-xyz-123"
     job.drive_web_link = "https://drive.google.com/file/d/drive-file-xyz-123/view"

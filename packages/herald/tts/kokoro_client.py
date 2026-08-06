@@ -2,7 +2,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -23,9 +23,9 @@ class KokoroClient(BaseTTSEngine):
 
     def __init__(
         self,
-        base_url: Optional[str] = None,
-        voice: Optional[str] = None,
-        speed: Optional[float] = None,
+        base_url: str | None = None,
+        voice: str | None = None,
+        speed: float | None = None,
     ):
         self.base_url = (base_url or settings.KOKORO_BASE_URL).rstrip("/")
         self.voice = voice or settings.KOKORO_VOICE
@@ -79,8 +79,8 @@ class KokoroClient(BaseTTSEngine):
         self,
         text: str,
         output_path: Path,
-        voice: Optional[str] = None,
-        speed: Optional[float] = None,
+        voice: str | None = None,
+        speed: float | None = None,
     ) -> Path:
         """
         Synthesize text chunk to audio output file via OpenAI-compatible endpoint.

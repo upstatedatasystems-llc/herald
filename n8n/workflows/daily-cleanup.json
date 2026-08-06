@@ -1,0 +1,60 @@
+{
+  "name": "Herald - Daily File Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger - Daily 2 AM",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, local_audio_path FROM podcast_jobs WHERE status = 'COMPLETE' AND completed_at < NOW() - INTERVAL '48 hours' AND local_audio_path IS NOT NULL;"
+      },
+      "name": "Query Expired Complete Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Herald Postgres Database"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron Trigger - Daily 2 AM": {
+      "main": [
+        [
+          {
+            "node": "Query Expired Complete Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

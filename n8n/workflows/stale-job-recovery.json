@@ -1,0 +1,60 @@
+{
+  "name": "Herald - Stale Job Recovery & Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger - Hourly",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, status, updated_at FROM podcast_jobs WHERE status IN ('SYNTHESIZING', 'ENCODING', 'UPLOADING') AND updated_at < NOW() - INTERVAL '30 minutes';"
+      },
+      "name": "Query Stuck Active Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Herald Postgres Database"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron Trigger - Hourly": {
+      "main": [
+        [
+          {
+            "node": "Query Stuck Active Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
