@@ -5,8 +5,8 @@ from pathlib import Path
 
 import httpx
 
-from packages.herald.config import settings
-from packages.herald.gemini.schema import PodcastScriptResponse
+from herald.config import settings
+from herald.gemini.schema import PodcastScriptResponse
 
 logger = logging.getLogger("herald.gemini")
 
@@ -28,7 +28,7 @@ class GeminiValidationError(GeminiError):
 
 
 def load_system_prompt() -> str:
-    prompt_file = Path(__file__).parent.parent.parent.parent / "prompts" / "podcast_script" / "prompt.md"
+    prompt_file = Path(__file__).parent.parent.parent / "prompts" / "podcast_script" / "prompt.md"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return "Transform the provided source content into a podcast script JSON matching Appendix C schema."
@@ -38,7 +38,6 @@ def generate_podcast_script(
     source_text: str,
     request_mode: str = "standard",
     source_title: str | None = None,
-    source_url: str | None = None,
     api_key: str | None = None,
     model_name: str | None = None,
 ) -> PodcastScriptResponse:
@@ -57,7 +56,6 @@ def generate_podcast_script(
     user_prompt = f"""
 REQUESTED MODE: {request_mode.upper()}
 SOURCE TITLE: {source_title or 'N/A'}
-SOURCE URL: {source_url or 'N/A'}
 
 <SOURCE_DATA>
 {source_text}
@@ -68,7 +66,6 @@ Generate the podcast script JSON response matching Appendix C schema now.
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
-    # Appendix C JSON Schema Definition
     schema_dict = {
         "type": "OBJECT",
         "properties": {
@@ -76,7 +73,6 @@ Generate the podcast script JSON response matching Appendix C schema now.
             "episode_description": {"type": "STRING"},
             "estimated_minutes": {"type": "INTEGER"},
             "source_title": {"type": "STRING"},
-            "source_url": {"type": "STRING"},
             "segments": {
                 "type": "ARRAY",
                 "items": {
@@ -113,7 +109,6 @@ Generate the podcast script JSON response matching Appendix C schema now.
             
             prompt_content = f"{system_prompt}\n\n{user_prompt}"
             if attempt == 2 and last_error:
-                # Add schema repair instruction on attempt 2 retry
                 prompt_content += f"\n\nNOTE: The previous attempt failed validation with error: '{last_error}'. Please ensure all required fields (episode_title, episode_description, estimated_minutes, segments, warnings) and segment required fields (order, heading, narration) are strictly present."
 
             payload = {
@@ -160,7 +155,6 @@ Generate the podcast script JSON response matching Appendix C schema now.
             raw_text = parts[0]["text"]
             script_data = json.loads(raw_text)
 
-            # Validate against Appendix C Pydantic schema
             validated_script = PodcastScriptResponse(**script_data)
             return validated_script
 

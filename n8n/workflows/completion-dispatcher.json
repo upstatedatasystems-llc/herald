@@ -64,11 +64,17 @@
     },
     {
       "parameters": {
-        "filePath": "={{ $json.job.local_audio_path }}",
-        "options": {}
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.job.needs_upload }}",
+              "value2": true
+            }
+          ]
+        }
       },
-      "name": "Read Local MP3 File",
-      "type": "n8n-nodes-base.readBinaryFile",
+      "name": "Check Needs Drive Upload",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
         1000,
@@ -77,10 +83,23 @@
     },
     {
       "parameters": {
+        "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_audio_path }}",
+        "options": {}
+      },
+      "name": "Read Local MP3 File For Drive",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        150
+      ]
+    },
+    {
+      "parameters": {
         "authentication": "oAuth2",
         "operation": "upload",
         "fileContentKey": "data",
-        "name": "={{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}.mp3",
+        "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_title }}.mp3",
         "parents": [
           "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
         ],
@@ -90,8 +109,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        1250,
-        250
+        1500,
+        150
       ],
       "credentials": {
         "googleDriveOAuth2": {
@@ -115,15 +134,15 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+        "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\",\n  \"drive_job_key\": \"{{ $('Claim Delivery Job (Atomic)').item.json.job.drive_job_key }}\"\n}",
         "options": {}
       },
       "name": "Record Drive Metadata",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        1500,
-        250
+        1750,
+        150
       ]
     },
     {
@@ -142,8 +161,21 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        1750,
+        2000,
         250
+      ]
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_audio_path }}",
+        "options": {}
+      },
+      "name": "Read Local MP3 File For Gmail Attachment",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        150
       ]
     },
     {
@@ -151,7 +183,7 @@
         "resource": "message",
         "operation": "reply",
         "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
-        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Included MP3 file",
+        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $('Claim Delivery Job (Atomic)').item.json.job.drive_web_link || $('Record Drive Metadata').item.json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Included MP3 file",
         "binaryData": true,
         "binaryPropertyName": "data",
         "options": {}
@@ -160,7 +192,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        2000,
+        2500,
         150
       ],
       "credentials": {
@@ -175,14 +207,14 @@
         "resource": "message",
         "operation": "reply",
         "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
-        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ JSON.parse($('Claim Delivery Job (Atomic)').item.json.job.script_json).episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Link-only reply (file exceeds attachment size limit)",
+        "message": "=Your Herald podcast episode is ready!\n\nTitle: {{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_title }}\nDuration: {{ Math.floor($('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds / 60) }}m {{ $('Claim Delivery Job (Atomic)').item.json.job.audio_duration_seconds % 60 }}s\nFile Size: {{ ($('Claim Delivery Job (Atomic)').item.json.job.audio_bytes / 1024 / 1024).toFixed(2) }} MB\n\nGoogle Drive Link:\n{{ $('Claim Delivery Job (Atomic)').item.json.job.drive_web_link || $('Record Drive Metadata').item.json.drive_web_link }}\n\nJob ID: {{ $('Claim Delivery Job (Atomic)').item.json.job.id }}\nAttachment: Link-only reply (file exceeds attachment size limit)",
         "options": {}
       },
       "name": "Send Link-Only Reply",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        2000,
+        2500,
         350
       ],
       "credentials": {
@@ -205,13 +237,16 @@
             }
           ]
         },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"gmail_result_message_id\": \"{{ $json.id || '' }}\"\n}",
         "options": {}
       },
       "name": "Record Delivery Complete",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        2250,
+        2750,
         250
       ]
     }
@@ -243,14 +278,32 @@
       "main": [
         [
           {
-            "node": "Read Local MP3 File",
+            "node": "Check Needs Drive Upload",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Read Local MP3 File": {
+    "Check Needs Drive Upload": {
+      "main": [
+        [
+          {
+            "node": "Read Local MP3 File For Drive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Attachment Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Local MP3 File For Drive": {
       "main": [
         [
           {
@@ -287,7 +340,7 @@
       "main": [
         [
           {
-            "node": "Send Reply With Attachment",
+            "node": "Read Local MP3 File For Gmail Attachment",
             "type": "main",
             "index": 0
           }
@@ -295,6 +348,17 @@
         [
           {
             "node": "Send Link-Only Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Local MP3 File For Gmail Attachment": {
+      "main": [
+        [
+          {
+            "node": "Send Reply With Attachment",
             "type": "main",
             "index": 0
           }

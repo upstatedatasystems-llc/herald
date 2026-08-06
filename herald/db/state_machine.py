@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from packages.herald.db.models import JobState, JobStateTransition, PodcastJob
+from herald.db.models import JobState, JobStateTransition, PodcastJob
 
 VALID_TRANSITIONS: dict[str, set[str]] = {
     JobState.RECEIVED.value: {

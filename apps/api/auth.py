@@ -2,7 +2,7 @@ import hmac
 
 from fastapi import Header, HTTPException, status
 
-from packages.herald.config import settings
+from herald.config import settings
 
 
 def verify_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")):

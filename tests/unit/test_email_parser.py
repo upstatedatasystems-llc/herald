@@ -1,5 +1,6 @@
-from packages.herald.db.models import RequestMode
-from packages.herald.extraction.email_parser import (
+from herald.db.models import RequestMode
+from herald.extraction.email_parser import (
+    SourceClassification,
     clean_email_text,
     compute_source_hash,
     extract_urls,
@@ -9,60 +10,57 @@ from packages.herald.extraction.email_parser import (
 
 
 def test_clean_email_text_removes_signatures_and_replies():
-    raw_email = """Here is the main newsletter content for today.
+    text = """Hello, please convert this email to a podcast.
 
-Important announcements and discussion.
+-- 
+John Doe
+Software Engineer
 
-On Thu, Aug 6, 2026 at 10:00 AM user@example.com wrote:
-> Quoted reply thread text should be removed.
---
-Signature text
-Unsubscribe from newsletter
+On 2026-08-01 John wrote:
+> Previous message body
 """
-    cleaned = clean_email_text(raw_email)
-    assert "main newsletter content" in cleaned
-    assert "Important announcements" in cleaned
-    assert "Quoted reply thread" not in cleaned
-    assert "Signature text" not in cleaned
+    cleaned = clean_email_text(text)
+    assert "Hello, please convert this email to a podcast." in cleaned
+    assert "John Doe" not in cleaned
+    assert "Previous message body" not in cleaned
 
 
 def test_html_to_text_conversion():
-    html_content = """<html>
-    <head><style>body { color: red; }</style></head>
-    <body>
-        <h1>Headline Title</h1>
-        <p>This is paragraph text.</p>
-        <script>alert('bad');</script>
-    </body>
-    </html>"""
-    text = html_to_text(html_content)
-    assert "Headline Title" in text
-    assert "This is paragraph text." in text
-    assert "alert" not in text
-    assert "color: red" not in text
+    html = """<html><body>
+    <header>Nav Header</header>
+    <h1>Article Title</h1>
+    <p>This is paragraph content.</p>
+    <footer>Footer Links</footer>
+    </body></html>"""
+    text = html_to_text(html)
+    assert "Article Title" in text
+    assert "This is paragraph content." in text
+    assert "Nav Header" not in text
+    assert "Footer Links" not in text
 
 
 def test_extract_urls():
-    text = "Check out https://example.com/article?id=123 for details and http://test.org."
+    text = "Check out https://example.com/page1 and http://test.org/news."
     urls = extract_urls(text)
-    assert "https://example.com/article?id=123" in urls
-    assert "http://test.org" in urls
+    assert len(urls) == 2
+    assert "https://example.com/page1" in urls
+    assert "http://test.org/news" in urls
 
 
 def test_process_email_message_url_dominant():
-    res = process_email_message(
-        subject="Podcast: Brief",
-        body_text="Here is a great article: https://example.com/news/123",
-    )
-    assert res.mode == RequestMode.BRIEF
-    assert res.detected_url == "https://example.com/news/123"
-    assert res.is_url_dominant is True
+    subject = "Podcast: Brief"
+    body = "https://example.com/tech-article"
+    result = process_email_message(subject, body_text=body)
+
+    assert result.mode == RequestMode.BRIEF
+    assert result.classification == SourceClassification.URL
+    assert result.detected_url == "https://example.com/tech-article"
 
 
 def test_compute_source_hash_idempotent():
-    h1 = compute_source_hash("Sample source text", "https://example.com/article")
-    h2 = compute_source_hash("Sample source text", "https://example.com/article")
-    h3 = compute_source_hash("Different source text", "https://example.com/article")
+    h1 = compute_source_hash("Sample content", "https://example.com")
+    h2 = compute_source_hash("Sample content", "https://example.com")
+    h3 = compute_source_hash("Different content", "https://example.com")
 
     assert h1 == h2
     assert h1 != h3

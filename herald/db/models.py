@@ -1,10 +1,9 @@
+import enum
 import uuid
 from datetime import UTC, datetime
-from enum import Enum as PyEnum
 
 from sqlalchemy import (
     JSON,
-    BigInteger,
     Column,
     DateTime,
     Float,
@@ -16,10 +15,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
-from packages.herald.db.connection import Base
+from herald.db.connection import Base
 
 
-class JobState(str, PyEnum):
+class JobState(str, enum.Enum):
     RECEIVED = "RECEIVED"
     VALIDATING = "VALIDATING"
     EXTRACTING = "EXTRACTING"
@@ -38,59 +37,63 @@ class JobState(str, PyEnum):
     CANCELLED = "CANCELLED"
 
 
-class RequestMode(str, PyEnum):
-    BRIEF = "BRIEF"
-    STANDARD = "STANDARD"
-    DETAILED = "DETAILED"
+class RequestMode(str, enum.Enum):
+    BRIEF = "brief"
+    STANDARD = "standard"
+    DETAILED = "detailed"
 
 
-class SourceType(str, PyEnum):
-    EMAIL_BODY = "EMAIL_BODY"
-    URL = "URL"
+class SourceType(str, enum.Enum):
+    EMAIL_BODY = "email_body"
+    URL = "url"
 
 
 class PodcastJob(Base):
     __tablename__ = "podcast_jobs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    gmail_message_id = Column(String(255), unique=True, nullable=False, index=True)
+    gmail_message_id = Column(String(255), nullable=False, unique=True, index=True)
     gmail_thread_id = Column(String(255), nullable=True)
     sender_email = Column(String(255), nullable=False, index=True)
-    request_mode = Column(String(50), nullable=False, default=RequestMode.STANDARD.value)
-    source_type = Column(String(50), nullable=False, default=SourceType.EMAIL_BODY.value)
+
+    request_mode = Column(String(20), nullable=False, default=RequestMode.STANDARD.value)
+    source_type = Column(String(20), nullable=False, default=SourceType.EMAIL_BODY.value)
     source_url = Column(Text, nullable=True)
     source_hash = Column(String(64), nullable=False, index=True)
     source_text = Column(Text, nullable=False)
-    script_json = Column(JSON, nullable=True)
-    status = Column(String(50), nullable=False, default=JobState.RECEIVED.value, index=True)
-    
-    # Custom directives from email body
+
+    # Optional top-of-body directives
     custom_voice = Column(String(50), nullable=True)
     custom_speed = Column(Float, nullable=True)
     custom_title = Column(String(255), nullable=True)
 
-    # Attempt counts & stage operations
+    # State tracking
+    status = Column(String(50), nullable=False, default=JobState.RECEIVED.value, index=True)
     attempt_count = Column(Integer, nullable=False, default=0)
     synthesis_attempt_count = Column(Integer, nullable=False, default=0)
     delivery_attempt_count = Column(Integer, nullable=False, default=0)
-    completed_chunk_index = Column(Integer, nullable=False, default=0)
     failed_stage = Column(String(50), nullable=True)
     next_retry_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Claim & Heartbeat state
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     claim_owner = Column(String(100), nullable=True)
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Generated Audio Metadata
-    local_audio_path = Column(Text, nullable=True)
+    # Gemini script output JSON (Appendix C schema)
+    script_json = Column(JSON, nullable=True)
+
+    # Audio synthesis tracking
+    completed_chunk_index = Column(Integer, nullable=False, default=0)
+    local_audio_path = Column(String(512), nullable=True)
+    audio_bytes = Column(Integer, nullable=True)
     audio_sha256 = Column(String(64), nullable=True)
-    audio_bytes = Column(BigInteger, nullable=True)
     audio_duration_seconds = Column(Integer, nullable=True)
 
     # Delivery & Google Drive metadata
-    drive_file_id = Column(String(255), nullable=True, unique=True)
-    drive_web_link = Column(Text, nullable=True)
+    drive_file_id = Column(String(255), nullable=True)
+    drive_web_link = Column(String(512), nullable=True)
+    drive_job_key = Column(String(100), nullable=True, index=True)
+    gmail_result_message_id = Column(String(255), nullable=True)
     drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -99,9 +102,7 @@ class PodcastJob(Base):
     error_detail = Column(Text, nullable=True)
 
     # Timestamps
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -110,26 +111,20 @@ class PodcastJob(Base):
     )
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
-    transitions = relationship(
-        "JobStateTransition", back_populates="job", cascade="all, delete-orphan"
-    )
+    transitions = relationship("JobStateTransition", back_populates="job", cascade="all, delete-orphan")
 
 
 class JobStateTransition(Base):
     __tablename__ = "job_state_transitions"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    job_id = Column(
-        String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    from_state = Column(String(50), nullable=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_state = Column(String(50), nullable=False)
     to_state = Column(String(50), nullable=False)
-    component = Column(String(100), nullable=False)
+    component = Column(String(50), nullable=False)
     message = Column(Text, nullable=True)
     error_category = Column(String(100), nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
     job = relationship("PodcastJob", back_populates="transitions")
 

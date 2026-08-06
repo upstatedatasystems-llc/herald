@@ -7,9 +7,9 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from packages.herald.config import settings
-from packages.herald.tts.kokoro_client import KokoroClient, KokoroTTSError
-from packages.herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.config import settings
+from herald.tts.kokoro_client import KokoroClient, KokoroTTSError
+from herald.audio.ffmpeg_builder import join_and_normalize_audio
 
 
 def run_smoke_test(mock_if_missing: bool = False):

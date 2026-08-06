@@ -1,6 +1,6 @@
 import pytest
 
-from packages.herald.extraction.url_extractor import (
+from herald.extraction.url_extractor import (
     SSRFVulnerabilityError,
     is_ip_allowed,
     validate_url_host,

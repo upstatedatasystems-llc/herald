@@ -1,5 +1,7 @@
 import os
+import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -7,31 +9,23 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from apps.api.auth import verify_api_key
-from packages.herald.config import settings
-from packages.herald.db.connection import Base, engine, get_db
-from packages.herald.db.models import (
-    JobState,
-    PodcastJob,
-    SourceType,
-)
-from packages.herald.db.state_machine import transition_job_state
-from packages.herald.extraction.email_parser import (
+from herald.audio.ffmpeg_builder import check_free_disk_mb
+from herald.config import settings
+from herald.db.connection import get_db
+from herald.db.models import JobState, JobStateTransition, PodcastJob, SourceType
+from herald.db.state_machine import transition_job_state
+from herald.extraction.email_parser import (
+    SourceClassification,
     compute_source_hash,
     process_email_message,
 )
-from packages.herald.extraction.url_extractor import (
+from herald.extraction.url_extractor import (
     ArticleExtractionError,
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
-from packages.herald.gemini.client import GeminiError, generate_podcast_script
-from packages.herald.tts.kokoro_client import KokoroClient
-
-# Initialize tables if running standalone
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception:
-    pass
+from herald.gemini.client import GeminiError, generate_podcast_script
+from herald.tts.kokoro_client import KokoroClient
 
 app = FastAPI(
     title="Herald Email-to-Podcast API",
@@ -40,7 +34,6 @@ app = FastAPI(
 )
 
 
-# Pydantic Schemas for API Requests & Responses
 class IntakeRequest(BaseModel):
     gmail_message_id: str = Field(..., description="Unique Gmail Message ID for deduplication")
     gmail_thread_id: str | None = Field(None, description="Gmail Thread ID")
@@ -87,6 +80,8 @@ class JobStatusResponse(BaseModel):
     audio_duration_seconds: int | None
     drive_file_id: str | None
     drive_web_link: str | None
+    drive_job_key: str | None
+    gmail_result_message_id: str | None
     error_code: str | None
     error_detail: str | None
     created_at: str
@@ -97,6 +92,11 @@ class JobStatusResponse(BaseModel):
 class DriveCompleteRequest(BaseModel):
     drive_file_id: str = Field(..., description="Google Drive File ID")
     drive_web_link: str = Field(..., description="Private Google Drive Web Link")
+    drive_job_key: str | None = Field(None, description="Stable Herald Drive job key")
+
+
+class DeliveryCompleteRequest(BaseModel):
+    gmail_result_message_id: str | None = Field(None, description="Returned Gmail result message ID")
 
 
 class DeliveryFailedRequest(BaseModel):
@@ -107,9 +107,7 @@ class DeliveryFailedRequest(BaseModel):
 @app.get("/health", tags=["Health"])
 @app.get("/live", tags=["Health"])
 def health_check():
-    """
-    Process liveness check endpoint. Returns HTTP 200 when API process is running.
-    """
+    """Process liveness check endpoint. Returns HTTP 200 when API process is running."""
     return {
         "status": "live",
         "timestamp": datetime.now(UTC).isoformat(),
@@ -121,34 +119,55 @@ def health_check():
 @app.get("/ready", tags=["Health"])
 def readiness_check(db: Session = Depends(get_db)):
     """
-    Service readiness check endpoint. Validates database connectivity and configuration.
-    Returns HTTP 503 if database or configuration is unavailable.
+    Readiness evaluation validating PostgreSQL, expected schema revision, API key, allowlist, work dir, free disk, and Kokoro.
+    Returns HTTP 503 if any required check fails.
     """
-    db_healthy = False
+    reasons = []
+
+    # 1. PostgreSQL DB check
     try:
         db.execute(text("SELECT 1"))
-        db_healthy = True
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Database readiness check failed: {e}",
-        )
+        reasons.append(f"Database connection failed: {e}")
 
+    # 2. Alembic schema check
+    try:
+        result = db.execute(text("SELECT version_num FROM alembic_version")).first()
+        if not result or not result[0]:
+            reasons.append("Database schema missing Alembic revision version")
+    except Exception:
+        reasons.append("Database schema missing alembic_version table (run migrations first)")
+
+    # 3. Production security check
+    if settings.HERALD_ENV.lower() == "production":
+        if not settings.HERALD_API_KEY or settings.HERALD_API_KEY == "default-insecure-api-key":
+            reasons.append("Production HERALD_API_KEY is not configured securely")
+        if not settings.EMAIL_ALLOWED_SENDERS.strip():
+            reasons.append("Production EMAIL_ALLOWED_SENDERS is empty (fail-closed rule)")
+
+    # 4. Free disk check
+    work_dir = Path(settings.HERALD_WORK_DIR)
+    free_mb = check_free_disk_mb(work_dir)
+    if free_mb < settings.HERALD_MIN_DISK_MB:
+        reasons.append(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)")
+
+    # 5. Kokoro check
     kokoro_client = KokoroClient()
-    kokoro_status = kokoro_client.health_check()
+    kokoro_healthy = kokoro_client.health_check()
+    if not kokoro_healthy:
+        reasons.append("Kokoro TTS service reachable check failed")
 
-    config_valid = settings.is_production_valid()
-    if not config_valid and settings.HERALD_ENV.lower() == "production":
+    if reasons:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Production configuration is missing required HERALD_API_KEY or EMAIL_ALLOWED_SENDERS",
+            detail={"ready": False, "reasons": reasons},
         )
 
     return {
         "ready": True,
-        "database": db_healthy,
-        "kokoro_tts": kokoro_status,
         "environment": settings.HERALD_ENV,
+        "free_disk_mb": free_mb,
+        "kokoro_tts": kokoro_healthy,
     }
 
 
@@ -159,13 +178,10 @@ def readiness_check(db: Session = Depends(get_db)):
     tags=["Intake"],
 )
 def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
-    """
-    Validate sender allowlist (fail closed!), check message deduplication, clean content, parse directives, and create job.
-    """
+    """Validate sender allowlist, check message deduplication, clean content, parse directives, and create job."""
     sender = req.sender_email.strip().lower()
     allowed_senders = settings.get_allowed_senders_list()
 
-    # FAIL CLOSED: Reject unauthorized senders before URL extraction, Gemini, or DB job creation
     if settings.HERALD_ENV.lower() == "production" and not allowed_senders:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -178,7 +194,6 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             detail="Sender address is not authorized on the system allowlist.",
         )
 
-    # Idempotency check 1: Duplicate Gmail Message ID
     existing_message_job = (
         db.query(PodcastJob)
         .filter(PodcastJob.gmail_message_id == req.gmail_message_id)
@@ -194,7 +209,6 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             message="Message ID has already been processed.",
         )
 
-    # Process email content and directives
     try:
         parsed = process_email_message(
             subject=req.subject, body_text=req.body_text, body_html=req.body_html
@@ -208,11 +222,10 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     source_type = SourceType.EMAIL_BODY.value
     source_url = None
 
-    if parsed.is_url_dominant and parsed.detected_url:
+    if parsed.classification == SourceClassification.URL and parsed.detected_url:
         source_type = SourceType.URL.value
         source_url = parsed.detected_url
 
-    # Idempotency check 2: Duplicate source content hash
     existing_hash_job = (
         db.query(PodcastJob)
         .filter(PodcastJob.source_hash == parsed.source_hash)
@@ -229,8 +242,11 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             message="Identical content hash already processed.",
         )
 
-    # Create new PodcastJob
+    job_id = str(uuid.uuid4())
+    drive_key = f"herald_job_{job_id}"
+
     job = PodcastJob(
+        id=job_id,
         gmail_message_id=req.gmail_message_id,
         gmail_thread_id=req.gmail_thread_id,
         sender_email=sender,
@@ -242,13 +258,13 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         custom_voice=parsed.custom_voice,
         custom_speed=parsed.custom_speed,
         custom_title=parsed.custom_title,
+        drive_job_key=drive_key,
         status=JobState.RECEIVED.value,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    # Transition to VALIDATING -> SOURCE_READY
     transition_job_state(db, job, JobState.VALIDATING.value, component="herald-api")
 
     if source_type == SourceType.URL.value and source_url:
@@ -257,7 +273,6 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             title, extracted_text, canonical_url = extract_article_from_url(source_url)
             job.source_text = f"Title: {title}\n\n{extracted_text}"
             job.source_url = canonical_url
-            # Recalculate source hash from extracted article text
             job.source_hash = compute_source_hash(extracted_text, canonical_url)
             db.commit()
         except (SSRFVulnerabilityError, ArticleExtractionError) as e:
@@ -288,9 +303,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     tags=["Extraction"],
 )
 def extract_url(req: ExtractUrlRequest):
-    """
-    Safely extract public article text with SSRF protection.
-    """
+    """Safely extract public article text with SSRF protection."""
     try:
         title, extracted_text, canonical_url = extract_article_from_url(req.url)
         return ExtractUrlResponse(
@@ -312,9 +325,7 @@ def extract_url(req: ExtractUrlRequest):
     tags=["Scripting"],
 )
 def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(get_db)):
-    """
-    Generate Gemini podcast script matching Appendix C schema and transition job state to QUEUED_TTS.
-    """
+    """Generate Gemini podcast script matching Appendix C schema and transition job state to QUEUED_TTS."""
     job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -334,7 +345,6 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             source_text=job.source_text,
             request_mode=job.request_mode.lower(),
             source_title=job.custom_title,
-            source_url=job.source_url,
         )
         job.script_json = script.model_dump()
         db.commit()
@@ -363,26 +373,55 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
 )
 def claim_delivery_job(db: Session = Depends(get_db)):
     """
-    Atomically select 1 AUDIO_READY job using SELECT ... FOR UPDATE SKIP LOCKED,
-    transition state to UPLOADING, and return job metadata.
+    Atomically select 1 eligible delivery job using SELECT FOR UPDATE SKIP LOCKED in 1 transaction.
+    Determines exact resume stage (UPLOADING vs DELIVERING).
     """
     job = (
         db.query(PodcastJob)
-        .filter(PodcastJob.status == JobState.AUDIO_READY.value)
+        .filter(
+            PodcastJob.status.in_([
+                JobState.AUDIO_READY.value,
+                JobState.UPLOADING.value,
+                JobState.DELIVERING.value,
+                JobState.FAILED_RETRYABLE.value,
+            ])
+        )
         .order_by(PodcastJob.updated_at.asc())
         .with_for_update(skip_locked=True)
         .first()
     )
 
-    if not job:
+    if not job or job.status == JobState.COMPLETE.value:
         return {"claimed": False, "job": None}
 
-    job.claimed_at = datetime.now(UTC)
+    now = datetime.now(UTC)
+    job.claimed_at = now
     job.claim_owner = "n8n-completion-dispatcher"
     job.delivery_attempt_count += 1
-    db.commit()
+    job.updated_at = now
 
-    transition_job_state(db, job, JobState.UPLOADING.value, component="n8n")
+    target_state = JobState.UPLOADING.value
+    if job.drive_file_id and job.drive_web_link:
+        target_state = JobState.DELIVERING.value
+
+    old_state = job.status
+    job.status = target_state
+
+    if old_state != target_state:
+        transition = JobStateTransition(
+            job_id=job.id,
+            from_state=old_state,
+            to_state=target_state,
+            component="n8n-delivery-claim",
+            message=f"Claimed delivery job atomically in state '{target_state}'",
+        )
+        db.add(transition)
+
+    db.commit()
+    db.refresh(job)
+
+    needs_upload = not bool(job.drive_file_id)
+    needs_email = not bool(job.delivered_at)
 
     return {
         "claimed": True,
@@ -396,7 +435,10 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "audio_duration_seconds": job.audio_duration_seconds,
             "drive_file_id": job.drive_file_id,
             "drive_web_link": job.drive_web_link,
+            "drive_job_key": job.drive_job_key or f"herald_job_{job.id}",
             "script_json": job.script_json,
+            "needs_upload": needs_upload,
+            "needs_email": needs_email,
         },
     }
 
@@ -409,19 +451,28 @@ def claim_delivery_job(db: Session = Depends(get_db)):
 def update_drive_complete(
     job_id: str, req: DriveCompleteRequest, db: Session = Depends(get_db)
 ):
-    """
-    Record Google Drive file ID, link, and transition status to DELIVERING. Idempotent.
-    """
+    """Record Google Drive file ID, web link, and transition status to DELIVERING. Idempotent."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    if job.status == JobState.COMPLETE.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job metadata cannot be modified.")
+
+    if job.drive_file_id and job.drive_file_id != req.drive_file_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Conflicting Drive file ID: job already has '{job.drive_file_id}'",
+        )
+
     job.drive_file_id = req.drive_file_id
     job.drive_web_link = req.drive_web_link
+    if req.drive_job_key:
+        job.drive_job_key = req.drive_job_key
     job.drive_uploaded_at = datetime.now(UTC)
     db.commit()
 
-    if job.status != JobState.DELIVERING.value and job.status != JobState.COMPLETE.value:
+    if job.status != JobState.DELIVERING.value:
         transition_job_state(db, job, JobState.DELIVERING.value, component="n8n")
 
     return {
@@ -437,13 +488,16 @@ def update_drive_complete(
     dependencies=[Depends(verify_api_key)],
     tags=["Delivery"],
 )
-def update_delivery_complete(job_id: str, db: Session = Depends(get_db)):
-    """
-    Record successful Gmail delivery and transition job to COMPLETE. Idempotent.
-    """
+def update_delivery_complete(
+    job_id: str, req: DeliveryCompleteRequest | None = None, db: Session = Depends(get_db)
+):
+    """Record successful Gmail delivery and transition job to COMPLETE. Idempotent."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    if req and req.gmail_result_message_id:
+        job.gmail_result_message_id = req.gmail_result_message_id
 
     job.delivered_at = datetime.now(UTC)
     db.commit()
@@ -462,12 +516,13 @@ def update_delivery_complete(job_id: str, db: Session = Depends(get_db)):
 def update_delivery_failed(
     job_id: str, req: DeliveryFailedRequest, db: Session = Depends(get_db)
 ):
-    """
-    Record delivery failure without deleting existing Drive metadata.
-    """
+    """Record delivery failure without deleting existing Drive metadata."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status == JobState.COMPLETE.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job cannot be set to failed.")
 
     transition_job_state(
         db,
@@ -487,9 +542,7 @@ def update_delivery_failed(
     tags=["Jobs"],
 )
 def get_job_status(job_id: str, db: Session = Depends(get_db)):
-    """
-    Get detailed status for a podcast job.
-    """
+    """Get detailed status for a podcast job."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -508,6 +561,8 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
         audio_duration_seconds=job.audio_duration_seconds,
         drive_file_id=job.drive_file_id,
         drive_web_link=job.drive_web_link,
+        drive_job_key=job.drive_job_key,
+        gmail_result_message_id=job.gmail_result_message_id,
         error_code=job.error_code,
         error_detail=job.error_detail,
         created_at=job.created_at.isoformat(),
@@ -522,9 +577,7 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
     tags=["Jobs"],
 )
 def retry_job(job_id: str, db: Session = Depends(get_db)):
-    """
-    Administrator retry endpoint to resume a failed job from its appropriate stage.
-    """
+    """Administrator retry endpoint to resume a failed job from its appropriate stage."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -6,18 +6,35 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-herald}
-      POSTGRES_USER: ${POSTGRES_USER:-herald}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:?Required POSTGRES_DB environment variable}
+      POSTGRES_USER: ${POSTGRES_USER:?Required POSTGRES_USER environment variable}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required POSTGRES_PASSWORD environment variable}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - herald-backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-herald} -d ${POSTGRES_DB:-herald}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  herald-migration:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: herald-migration
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - herald-backend
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:1.50.0
@@ -28,20 +45,23 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-herald}
-      DB_POSTGRESDB_USER: ${POSTGRES_USER:-herald}
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-this-to-a-32-char-random-key}
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Required N8N_ENCRYPTION_KEY environment variable}
       N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
       TZ: ${TZ:-America/New_York}
-      HERALD_API_KEY: ${HERALD_API_KEY}
-      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
-      EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS}
+      HERALD_API_KEY: ${HERALD_API_KEY:?Required HERALD_API_KEY environment variable}
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+      EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS:-}
+      EMAIL_ATTACHMENT_MAX_MB: ${EMAIL_ATTACHMENT_MAX_MB:-18}
     ports:
       - "127.0.0.1:5678:5678"
     volumes:
@@ -60,7 +80,11 @@ services:
       - kokoro_models:/app/api/src/models
     networks:
       - herald-backend
-    # Internal Docker network port 8880 only; do not publish publicly
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8880/v1/models || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   herald-api:
     build:
@@ -73,6 +97,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -100,6 +126,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
       kokoro:
         condition: service_started
     env_file:

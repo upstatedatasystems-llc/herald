@@ -1,24 +1,46 @@
-import os
-
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-# Set environment variable for mock TTS during testing
-os.environ["HERALD_MOCK_TTS"] = "1"
-os.environ["HERALD_ENV"] = "testing"
+import herald.db.connection as db_conn
+from herald.db.connection import Base
 
-from packages.herald.db.connection import Base
+test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+
+TestingSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+db_conn.engine = test_engine
+db_conn.SessionLocal = TestingSessionLocal
+
+Base.metadata.create_all(bind=test_engine)
+
+from apps.api.main import app
+from herald.db.connection import get_db
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="function", autouse=True)
 def db_session():
-    """Create an in-memory SQLite database session for unit testing."""
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    session = Session()
+    """Provides a clean transactional in-memory SQLite database session for each test function."""
+    Base.metadata.create_all(bind=test_engine)
+    session = TestingSessionLocal()
+
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+
     try:
         yield session
     finally:
         session.close()
+        app.dependency_overrides.clear()
+        with test_engine.begin() as conn:
+            for table in reversed(Base.metadata.sorted_tables):
+                conn.execute(table.delete())

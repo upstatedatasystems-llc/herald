@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from packages.herald.gemini.schema import PodcastScriptResponse
+from herald.gemini.schema import PodcastScriptResponse
 
 
 def test_valid_appendix_c_podcast_script_response():
@@ -10,8 +10,6 @@ def test_valid_appendix_c_podcast_script_response():
         "episode_description": "An overview of recent AI developments.",
         "estimated_minutes": 10,
         "source_title": "Tech News Today",
-        "source_url": "https://example.com/article",
-        "requested_mode": "standard",
         "segments": [
             {"order": 1, "heading": "Introduction", "narration": "Welcome to today's breakdown."},
             {"order": 2, "heading": "Main Developments", "narration": "Here are the key announcements."},

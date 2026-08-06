@@ -1,26 +1,18 @@
-.PHONY: setup build up down logs migrate test lint format smoke-test status backup restore help
-
-PYTHON ?= python
-PIP ?= python -m pip
+.PHONY: help build up down restart logs ps migrate test test-postgres smoke status backup restore-test readiness
 
 help:
-	@echo "Herald Automation System Commands:"
-	@echo "  make setup       Install dependencies"
-	@echo "  make build       Build Docker images"
-	@echo "  make up          Start all services"
-	@echo "  make down        Stop all services"
-	@echo "  make logs        Tail service logs"
-	@echo "  make migrate     Run database migrations"
-	@echo "  make test        Run test suite"
-	@echo "  make lint        Run code linters"
-	@echo "  make format      Run code formatters"
-	@echo "  make smoke-test  Run Kokoro TTS smoke test"
-	@echo "  make status      Display system health & queue status"
-	@echo "  make backup      Run database backup script"
-	@echo "  make restore     Run database restore script"
-
-setup:
-	$(PIP) install -e .[dev]
+	@echo "Herald Operational Commands:"
+	@echo "  make build          Build all Docker images"
+	@echo "  make up             Start entire stack in detached mode"
+	@echo "  make down           Stop stack and remove containers"
+	@echo "  make restart        Restart services"
+	@echo "  make migrate        Run Alembic database migrations"
+	@echo "  make test           Run unit and integration test suite inside container"
+	@echo "  make status         Show system job queue metrics and database health"
+	@echo "  make readiness      Check API readiness endpoint"
+	@echo "  make smoke          Run audio pipeline smoke test"
+	@echo "  make backup         Execute full system backup script"
+	@echo "  make restore-test   Execute backup restore test"
 
 build:
 	docker compose build
@@ -31,29 +23,35 @@ up:
 down:
 	docker compose down
 
+restart:
+	docker compose restart
+
 logs:
-	docker compose logs -f
+	docker compose logs -f --tail=100
+
+ps:
+	docker compose ps
 
 migrate:
-	alembic upgrade head
+	docker compose run --rm herald-migration
 
 test:
-	pytest -v tests/
+	docker compose run --rm herald-api python -m pytest -v tests/
 
-lint:
-	ruff check packages/ apps/ tests/
+test-postgres:
+	docker compose run --rm herald-api python -m pytest -v tests/unit/test_postgres_concurrency.py
 
-format:
-	ruff format packages/ apps/ tests/
+readiness:
+	curl -f http://127.0.0.1:8000/readiness
 
-smoke-test:
-	$(PYTHON) scripts/smoke_test.py
+smoke:
+	docker compose run --rm herald-worker python scripts/smoke_test.py
 
 status:
-	$(PYTHON) scripts/status.py
+	docker compose run --rm herald-api python scripts/status.py
 
 backup:
 	bash scripts/backup.sh
 
-restore:
+restore-test:
 	bash scripts/restore.sh

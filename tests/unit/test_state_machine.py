@@ -1,7 +1,7 @@
 import pytest
 
-from packages.herald.db.models import JobState, PodcastJob
-from packages.herald.db.state_machine import InvalidStateTransitionError, transition_job_state
+from herald.db.models import JobState, PodcastJob
+from herald.db.state_machine import InvalidStateTransitionError, transition_job_state
 
 
 def test_valid_state_transitions(db_session):

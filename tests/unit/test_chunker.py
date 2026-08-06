@@ -1,4 +1,4 @@
-from packages.herald.tts.chunker import chunk_podcast_script, split_text_into_sentences
+from herald.tts.chunker import chunk_podcast_script, split_text_into_sentences
 
 
 def test_split_text_into_sentences_protects_abbreviations():

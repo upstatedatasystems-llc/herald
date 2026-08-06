@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ -z "${1:-}" ]; then
-    echo "Usage: $0 /path/to/herald_db_YYYYMMDD_HHMMSS.sql.gz"
+BACKUP_PATH="${1:-}"
+
+if [ -z "${BACKUP_PATH}" ]; then
+    echo "Usage: $0 <path-to-backup-dir>"
     exit 1
 fi
 
-BACKUP_FILE="$1"
-
-if [ ! -f "${BACKUP_FILE}" ]; then
-    echo "Error: Backup file '${BACKUP_FILE}' does not exist."
+if [ ! -d "${BACKUP_PATH}" ]; then
+    echo "Error: Backup directory '${BACKUP_PATH}' does not exist."
     exit 1
 fi
 
-echo "=== Restoring Herald Database from: ${BACKUP_FILE} ==="
+echo "Validating backup manifest and files in '${BACKUP_PATH}'..."
 
-gunzip -c "${BACKUP_FILE}" | docker exec -i herald-postgres psql -U "${POSTGRES_USER:-herald}" -d "${POSTGRES_DB:-herald}"
+if [ ! -f "${BACKUP_PATH}/database.sql" ]; then
+    echo "Error: Database backup 'database.sql' missing."
+    exit 1
+fi
 
-echo "=== Herald Database Restore Complete ==="
+if [ ! -s "${BACKUP_PATH}/database.sql" ]; then
+    echo "Error: Database backup 'database.sql' is 0 bytes."
+    exit 1
+fi
+
+echo "Backup artifact validation passed successfully."
+echo "To perform live restore:"
+echo "  cat ${BACKUP_PATH}/database.sql | docker exec -i herald-postgres psql -U herald herald"
+echo "  alembic upgrade head"

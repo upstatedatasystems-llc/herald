@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 
-from packages.herald.config import settings
-from packages.herald.tts.base import BaseTTSEngine
+from herald.config import settings
+from herald.tts.base import BaseTTSEngine
 
 logger = logging.getLogger("herald.tts.kokoro")
 

@@ -6,13 +6,13 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from packages.herald.audio.ffmpeg_builder import join_and_normalize_audio
-from packages.herald.config import settings
-from packages.herald.db.connection import SessionLocal
-from packages.herald.db.models import JobState, PodcastJob
-from packages.herald.db.state_machine import transition_job_state
-from packages.herald.tts.chunker import chunk_podcast_script
-from packages.herald.tts.kokoro_client import KokoroClient, KokoroTTSError
+from herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.config import settings
+from herald.db.connection import SessionLocal
+from herald.db.models import JobState, PodcastJob
+from herald.db.state_machine import transition_job_state
+from herald.tts.chunker import chunk_podcast_script
+from herald.tts.kokoro_client import KokoroClient, KokoroTTSError
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),

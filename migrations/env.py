@@ -7,9 +7,9 @@ from alembic import context
 # Append parent dir to sys.path so packages/herald can be imported
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from packages.herald.config import settings
-from packages.herald.db.connection import Base
-import packages.herald.db.models  # noqa
+from herald.config import settings
+from herald.db.connection import Base
+import herald.db.models  # noqa
 
 config = context.config
 

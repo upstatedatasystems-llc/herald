@@ -1,4 +1,6 @@
-from packages.herald.extraction.email_parser import parse_directives
+import pytest
+
+from herald.extraction.email_parser import parse_directives
 
 
 def test_parse_directives_valid():
@@ -22,6 +24,5 @@ def test_parse_directives_out_of_bounds_speed():
     raw_body = """Speed: 2.5
 Here is normal body content."""
 
-    text, voice, speed, title = parse_directives(raw_body)
-    assert speed is None  # Out of bounds speed (0.8 - 1.2) ignored
-    assert "Here is normal body content." in text
+    with pytest.raises(ValueError):
+        parse_directives(raw_body)

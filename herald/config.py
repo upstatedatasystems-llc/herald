@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     HERALD_API_KEY: str = ""
     HERALD_MAX_SOURCE_CHARS: int = 100000
     HERALD_WORK_DIR: str = "/data/herald"
+    HERALD_MIN_DISK_MB: int = 500
 
     # Database
     POSTGRES_HOST: str = "postgres"

@@ -1,11 +1,11 @@
 import os
 
-from packages.herald.audio.ffmpeg_builder import join_and_normalize_audio
-from packages.herald.db.models import JobState, PodcastJob, RequestMode, SourceType
-from packages.herald.db.state_machine import transition_job_state
-from packages.herald.extraction.email_parser import process_email_message
-from packages.herald.gemini.schema import PodcastScriptResponse
-from packages.herald.tts.kokoro_client import KokoroClient
+from herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.db.models import JobState, PodcastJob, RequestMode, SourceType
+from herald.db.state_machine import transition_job_state
+from herald.extraction.email_parser import process_email_message
+from herald.gemini.schema import PodcastScriptResponse
+from herald.tts.kokoro_client import KokoroClient
 
 
 def test_full_mocked_pipeline_integration(db_session, tmp_path):

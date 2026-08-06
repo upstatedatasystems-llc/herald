@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from packages.herald.config import settings
+from herald.config import settings
 
 Base = declarative_base()
 
