@@ -39,11 +39,8 @@ class EmailParseResult:
 
 EXACT_SUBJECT_MAP = {
     "podcast: brief": RequestMode.BRIEF,
-    "podcast: brief.": RequestMode.BRIEF,
     "podcast: standard": RequestMode.STANDARD,
-    "podcast: standard.": RequestMode.STANDARD,
     "podcast: detailed": RequestMode.DETAILED,
-    "podcast: detailed.": RequestMode.DETAILED,
 }
 
 DIRECTIVE_PATTERNS = {
@@ -52,7 +49,6 @@ DIRECTIVE_PATTERNS = {
     "title": re.compile(r"^\s*Title\s*:\s*(.+)\s*$", re.IGNORECASE),
 }
 
-# Any line starting with directive-like key but invalid
 GENERIC_DIRECTIVE_PATTERN = re.compile(r"^\s*([a-zA-Z0-9_-]+)\s*:\s*(.*)$")
 
 REPLY_SEPARATOR_PATTERNS = [
@@ -76,7 +72,6 @@ def parse_subject_mode(subject: str) -> RequestMode | None:
     """
     Parse email subject. Repeatedly strip leading Re:, Fwd:, FW: prefixes conservatively.
     Require the entire remaining normalized subject to match EXACTLY one valid command.
-    Substrings like 'Weekly Podcast: Briefing' MUST be rejected (returns None).
     """
     if not subject:
         return None
@@ -95,7 +90,7 @@ def parse_subject_mode(subject: str) -> RequestMode | None:
 def parse_directives(text: str) -> tuple[str, str | None, float | None, str | None]:
     """
     Parse optional top-of-body directives (Voice:, Speed:, Title:) from first non-empty lines.
-    Rejects invalid directives with ValueError. Returns clean text without directives.
+    Rejects duplicate directives, unknown directives, or overlong titles with ValueError.
     """
     if not text:
         return text, None, None, None
@@ -108,6 +103,7 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
 
     allowed_voices = settings.get_allowed_voices_list()
     in_header_zone = True
+    seen_directives = set()
 
     for line in lines:
         stripped = line.strip()
@@ -117,6 +113,9 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
         if in_header_zone:
             m_voice = DIRECTIVE_PATTERNS["voice"].match(stripped)
             if m_voice:
+                if "voice" in seen_directives:
+                    raise ValueError("Duplicate directive 'Voice:' detected.")
+                seen_directives.add("voice")
                 val = m_voice.group(1).strip().lower()
                 if val not in allowed_voices:
                     raise ValueError(f"Invalid directive 'Voice: {val}'. Voice must be one of: {allowed_voices}")
@@ -125,6 +124,9 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
 
             m_speed = DIRECTIVE_PATTERNS["speed"].match(stripped)
             if m_speed:
+                if "speed" in seen_directives:
+                    raise ValueError("Duplicate directive 'Speed:' detected.")
+                seen_directives.add("speed")
                 try:
                     s_val = float(m_speed.group(1))
                     if not (settings.MIN_SPEED <= s_val <= settings.MAX_SPEED):
@@ -136,11 +138,22 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
 
             m_title = DIRECTIVE_PATTERNS["title"].match(stripped)
             if m_title:
+                if "title" in seen_directives:
+                    raise ValueError("Duplicate directive 'Title:' detected.")
+                seen_directives.add("title")
                 t_val = m_title.group(1).strip()
                 if len(t_val) == 0:
                     raise ValueError("Directive 'Title:' cannot be empty.")
-                custom_title = t_val[:255]
+                if len(t_val) > 255:
+                    raise ValueError(f"Directive 'Title:' exceeds maximum length of 255 characters (got {len(t_val)}).")
+                custom_title = t_val
                 continue
+
+            m_generic = GENERIC_DIRECTIVE_PATTERN.match(stripped)
+            if m_generic:
+                key = m_generic.group(1).strip()
+                if key.lower() not in ("voice", "speed", "title", "http", "https", "article", "link", "source", "url"):
+                    raise ValueError(f"Unknown or invalid directive '{key}:'. Allowed directives are Voice:, Speed:, Title:")
 
         in_header_zone = False
         remaining_lines.append(line)

@@ -106,7 +106,7 @@ Generate the podcast script JSON response matching Appendix C schema now.
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info(f"Sending script request to Gemini API ({model}), attempt {attempt}/{max_attempts}")
-            
+
             prompt_content = f"{system_prompt}\n\n{user_prompt}"
             if attempt == 2 and last_error:
                 prompt_content += f"\n\nNOTE: The previous attempt failed validation with error: '{last_error}'. Please ensure all required fields (episode_title, episode_description, estimated_minutes, segments, warnings) and segment required fields (order, heading, narration) are strictly present."

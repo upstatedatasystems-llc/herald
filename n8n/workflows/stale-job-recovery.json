@@ -1,18 +1,18 @@
 {
-  "name": "Herald - Stale Job Recovery & Monitoring",
+  "name": "Herald - Stale Job Recovery",
   "nodes": [
     {
       "parameters": {
         "rule": {
           "interval": [
             {
-              "field": "hours",
-              "hoursInterval": 1
+              "field": "minutes",
+              "minutesInterval": 15
             }
           ]
         }
       },
-      "name": "Cron Trigger - Hourly",
+      "name": "Interval - Every 15 Minutes",
       "type": "n8n-nodes-base.cron",
       "typeVersion": 1,
       "position": [
@@ -22,30 +22,34 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT id, status, updated_at FROM podcast_jobs WHERE status IN ('SYNTHESIZING', 'ENCODING', 'UPLOADING') AND updated_at < NOW() - INTERVAL '30 minutes';"
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/ops/stale-recovery",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.HERALD_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Query Stuck Active Jobs",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
+      "name": "Call Herald Stale Recovery API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
       "position": [
         500,
         300
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "Herald Postgres Database"
-        }
-      }
+      ]
     }
   ],
   "connections": {
-    "Cron Trigger - Hourly": {
+    "Interval - Every 15 Minutes": {
       "main": [
         [
           {
-            "node": "Query Stuck Active Jobs",
+            "node": "Call Herald Stale Recovery API",
             "type": "main",
             "index": 0
           }

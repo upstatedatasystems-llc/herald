@@ -46,4 +46,4 @@ def test_unauthorized_sender_rejected(monkeypatch):
         headers={"X-API-Key": "test-key"},
     )
     assert res.status_code == 403
-    assert "not authorized" in res.json()["detail"]
+    assert "allowlist" in res.json()["detail"]

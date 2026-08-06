@@ -1,5 +1,5 @@
 {
-  "name": "Herald - Weekly Maintenance & Pruning",
+  "name": "Herald - Weekly Maintenance",
   "nodes": [
     {
       "parameters": {
@@ -22,22 +22,26 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT count(*) as total_completed FROM podcast_jobs WHERE status = 'COMPLETE';"
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/ops/weekly-maintenance",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.HERALD_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Query Maintenance Metrics",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
+      "name": "Call Herald Weekly Maintenance API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
       "position": [
         500,
         300
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "Herald Postgres Database"
-        }
-      }
+      ]
     }
   ],
   "connections": {
@@ -45,7 +49,7 @@
       "main": [
         [
           {
-            "node": "Query Maintenance Metrics",
+            "node": "Call Herald Weekly Maintenance API",
             "type": "main",
             "index": 0
           }

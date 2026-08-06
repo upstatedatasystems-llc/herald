@@ -22,22 +22,26 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT id, local_audio_path FROM podcast_jobs WHERE status = 'COMPLETE' AND completed_at < NOW() - INTERVAL '48 hours' AND local_audio_path IS NOT NULL;"
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/ops/cleanup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.HERALD_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Query Expired Complete Jobs",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.4,
+      "name": "Call Herald Daily Cleanup API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
       "position": [
         500,
         300
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "Herald Postgres Database"
-        }
-      }
+      ]
     }
   ],
   "connections": {
@@ -45,7 +49,7 @@
       "main": [
         [
           {
-            "node": "Query Expired Complete Jobs",
+            "node": "Call Herald Daily Cleanup API",
             "type": "main",
             "index": 0
           }

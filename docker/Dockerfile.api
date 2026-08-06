@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies (FFmpeg, libpq-dev for postgres, gcc)
+# Install system dependencies (FFmpeg, libpq-dev for postgres, gcc, curl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     gcc \
@@ -11,10 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pyproject.toml and source code
-COPY pyproject.toml README.md ./
-COPY packages/ ./packages/
+COPY pyproject.toml README.md alembic.ini ./
+COPY herald/ ./herald/
 COPY apps/ ./apps/
+COPY migrations/ ./migrations/
 COPY prompts/ ./prompts/
+COPY scripts/ ./scripts/
 
 # Install python dependencies
 RUN pip install --no-cache-dir -e .

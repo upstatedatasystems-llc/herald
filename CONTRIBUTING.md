@@ -11,7 +11,7 @@ Thank you for your interest in contributing to Herald!
    - Comprehensive docstrings and comments preserving business logic rationale.
 3. **Security**:
    - Never commit API keys, OAuth tokens, model files, or secrets.
-   - All external HTTP calls to URLs extracted from emails MUST pass through the SSRF protection layer in `packages/herald/extraction/url_extractor.py`.
+   - All external HTTP calls to URLs extracted from emails MUST pass through the SSRF protection layer in `herald/extraction/url_extractor.py`.
    - Untrusted text inside prompts must be isolated inside `SOURCE_DATA` containers.
 
 ## Development Setup

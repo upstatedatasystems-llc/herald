@@ -1,5 +1,6 @@
 import ipaddress
 import socket
+import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -36,10 +37,7 @@ def is_ip_allowed(ip_str: str) -> bool:
         return False
 
     ip_clean = str(ip)
-    if ip_clean in ("169.254.169.254", "fd00:ec2::254"):
-        return False
-
-    return True
+    return ip_clean not in ("169.254.169.254", "fd00:ec2::254")
 
 
 def validate_url_host(url: str) -> tuple[str, int, str]:
@@ -67,6 +65,8 @@ def validate_url_host(url: str) -> tuple[str, int, str]:
 
     try:
         port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Port {port} out of valid range 1-65535")
     except ValueError as ve:
         raise SSRFVulnerabilityError(f"Invalid URL port number: {ve}")
 
@@ -100,8 +100,9 @@ def extract_article_from_url(
 ) -> tuple[str, str, str]:
     """
     Safely extract article title, canonical text, and canonical URL from a public web page.
-    Enforces SSRF validation on initial and redirect URLs, total timeout deadline, and byte limits.
+    Enforces SSRF validation on initial and redirect URLs, total elapsed deadline, and byte limits.
     """
+    start_time = time.monotonic()
     current_url = url
     seen_urls = set()
 
@@ -112,25 +113,29 @@ def extract_article_from_url(
 
     validate_url_host(current_url)
 
-    timeouts = httpx.Timeout(timeout_seconds, connect=5.0)
+    redirect_count = 0
 
-    client_kwargs = {
-        "follow_redirects": False,
-        "timeout": timeouts,
-        "headers": headers,
-    }
-    if transport:
-        client_kwargs["transport"] = transport
+    while redirect_count <= max_redirects:
+        elapsed = time.monotonic() - start_time
+        remaining_timeout = timeout_seconds - elapsed
+        if remaining_timeout <= 0:
+            raise ArticleExtractionError(f"Total extraction elapsed deadline ({timeout_seconds}s) exceeded.")
 
-    with httpx.Client(**client_kwargs) as client:
-        redirect_count = 0
+        if current_url in seen_urls:
+            raise ArticleExtractionError("Redirect loop detected")
+        seen_urls.add(current_url)
 
-        while redirect_count <= max_redirects:
-            if current_url in seen_urls:
-                raise ArticleExtractionError("Redirect loop detected")
-            seen_urls.add(current_url)
+        timeouts = httpx.Timeout(remaining_timeout, connect=min(5.0, remaining_timeout))
+        client_kwargs = {
+            "follow_redirects": False,
+            "timeout": timeouts,
+            "headers": headers,
+        }
+        if transport:
+            client_kwargs["transport"] = transport
 
-            try:
+        try:
+            with httpx.Client(**client_kwargs) as client:
                 with client.stream("GET", current_url) as response:
                     if response.is_redirect:
                         redirect_count += 1
@@ -156,6 +161,8 @@ def extract_article_from_url(
                     body_chunks = []
                     bytes_read = 0
                     for chunk in response.iter_bytes(chunk_size=8192):
+                        if time.monotonic() - start_time > timeout_seconds:
+                            raise ArticleExtractionError("Total extraction elapsed deadline exceeded during stream read")
                         bytes_read += len(chunk)
                         if bytes_read > max_bytes:
                             raise ArticleExtractionError(f"Response size exceeds maximum limit of {max_bytes} bytes")
@@ -164,8 +171,8 @@ def extract_article_from_url(
                     content_bytes = b"".join(body_chunks)
                     break
 
-            except httpx.HTTPError as e:
-                raise ArticleExtractionError(f"HTTP request failed for '{current_url}': {e}")
+        except httpx.HTTPError as e:
+            raise ArticleExtractionError(f"HTTP request failed for '{current_url}': {e}")
 
     html_text = content_bytes.decode("utf-8", errors="replace")
     soup = BeautifulSoup(html_text, "html.parser")

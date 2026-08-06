@@ -32,7 +32,7 @@ def split_text_into_sentences(text: str) -> list[str]:
 def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> list[TTSChunk]:
     """
     Chunk podcast script segments into safe TTS chunks under max_chars limit,
-    preserving sentence and paragraph boundaries, using Appendix C 'narration' field.
+    preserving sentence and paragraph boundaries, enforcing strict max_chars even for pathological single tokens.
     """
     chunks: list[TTSChunk] = []
     chunk_index = 0
@@ -75,6 +75,32 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                     sub_words: list[str] = []
                     sub_len = 0
                     for word in words:
+                        # Pathological single token safety
+                        if len(word) > max_chars:
+                            if sub_words:
+                                chunk_index += 1
+                                chunks.append(
+                                    TTSChunk(
+                                        index=chunk_index,
+                                        text=" ".join(sub_words),
+                                        segment_order=seg_order,
+                                        is_section_end=False,
+                                    )
+                                )
+                                sub_words = []
+                                sub_len = 0
+                            for w_part in [word[j:j+max_chars] for j in range(0, len(word), max_chars)]:
+                                chunk_index += 1
+                                chunks.append(
+                                    TTSChunk(
+                                        index=chunk_index,
+                                        text=w_part,
+                                        segment_order=seg_order,
+                                        is_section_end=False,
+                                    )
+                                )
+                            continue
+
                         if sub_len + len(word) + 1 <= max_chars:
                             sub_words.append(word)
                             sub_len += len(word) + 1
@@ -112,7 +138,7 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                     index=chunk_index,
                     text=" ".join(current_chunk_sentences),
                     segment_order=seg_order,
-                    is_section_end=True if not is_last_segment else False,
+                    is_section_end=not is_last_segment,
                 )
             )
 

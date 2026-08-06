@@ -7,12 +7,12 @@ help:
 	@echo "  make down           Stop stack and remove containers"
 	@echo "  make restart        Restart services"
 	@echo "  make migrate        Run Alembic database migrations"
-	@echo "  make test           Run unit and integration test suite inside container"
+	@echo "  make test           Run unit and integration test suite"
 	@echo "  make status         Show system job queue metrics and database health"
 	@echo "  make readiness      Check API readiness endpoint"
 	@echo "  make smoke          Run audio pipeline smoke test"
 	@echo "  make backup         Execute full system backup script"
-	@echo "  make restore-test   Execute backup restore test"
+	@echo "  make restore-test   Execute disposable backup restore test"
 
 build:
 	docker compose build
@@ -36,22 +36,22 @@ migrate:
 	docker compose run --rm herald-migration
 
 test:
-	docker compose run --rm herald-api python -m pytest -v tests/
+	python -m pytest -v tests/
 
 test-postgres:
-	docker compose run --rm herald-api python -m pytest -v tests/unit/test_postgres_concurrency.py
+	python -m pytest -v tests/unit/test_postgres_concurrency.py
 
 readiness:
 	curl -f http://127.0.0.1:8000/readiness
 
 smoke:
-	docker compose run --rm herald-worker python scripts/smoke_test.py
+	python scripts/smoke_test.py
 
 status:
-	docker compose run --rm herald-api python scripts/status.py
+	python scripts/status.py
 
 backup:
 	bash scripts/backup.sh
 
 restore-test:
-	bash scripts/restore.sh
+	bash scripts/test_restore.sh

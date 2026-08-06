@@ -1,5 +1,5 @@
 {
-  "name": "Herald - Daily System Health Report",
+  "name": "Herald - Daily Health Report",
   "nodes": [
     {
       "parameters": {
@@ -23,12 +23,21 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "http://herald-api:8000/readiness",
+        "url": "http://herald-api:8000/api/v1/ops/daily-health",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.HERALD_API_KEY}}"
+            }
+          ]
+        },
         "options": {}
       },
-      "name": "Check API Readiness",
+      "name": "Call Herald Daily Health API",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 3,
+      "typeVersion": 4.1,
       "position": [
         500,
         300
@@ -40,7 +49,7 @@
       "main": [
         [
           {
-            "node": "Check API Readiness",
+            "node": "Call Herald Daily Health API",
             "type": "main",
             "index": 0
           }

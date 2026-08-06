@@ -32,11 +32,11 @@ jobs:
 
       - name: Lint with Ruff
         run: |
-          ruff check packages/ apps/ tests/
+          ruff check herald/ apps/ tests/
 
       - name: Run unit & integration tests
         run: |
-          pytest -v tests/ --cov=packages --cov=apps
+          pytest -v tests/ --cov=herald --cov=apps
 
       - name: Run Kokoro TTS smoke test (mock mode)
         run: |

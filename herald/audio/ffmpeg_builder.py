@@ -4,11 +4,12 @@ import logging
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import mutagen
-from mutagen.id3 import COMM, ID3, TALB, TIT2, TPE1
+from mutagen.id3 import COMM, ID3, TALB, TDRC, TIT2, TPE1
 
 from herald.config import settings
 
@@ -24,6 +25,8 @@ def check_free_disk_mb(path: Path) -> float:
     try:
         check_path = path if path.exists() else path.parent
         total, used, free = shutil.disk_usage(check_path)
+        _ = total
+        _ = used
         return free / (1024 * 1024)
     except Exception as e:
         logger.warning(f"Disk check failed for '{path}': {e}")
@@ -55,6 +58,7 @@ def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5) -> Pa
 def validate_audio_file(file_path: Path) -> dict[str, Any]:
     """
     Validate that an audio file exists, is non-zero, and contains valid audio streams using mutagen/ffprobe.
+    Raises FFmpegExecutionError if file is missing, empty, or invalid.
     """
     if not file_path.exists() or file_path.stat().st_size == 0:
         raise FFmpegExecutionError(f"Audio file '{file_path}' is missing or 0 bytes.")
@@ -64,8 +68,8 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
         audio = mutagen.File(file_path)
         if audio and audio.info and hasattr(audio.info, "length"):
             duration_sec = int(audio.info.length)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Mutagen inspection error on '{file_path}': {e}")
 
     if duration_sec == 0 and shutil.which("ffprobe"):
         try:
@@ -79,7 +83,7 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
             res = subprocess.run(cmd, capture_output=True, text=True, check=True)
             duration_sec = int(float(res.stdout.strip()))
         except Exception as e:
-            logger.warning(f"FFprobe duration check failed: {e}")
+            logger.warning(f"FFprobe duration check failed for '{file_path}': {e}")
 
     return {
         "valid": True,
@@ -101,9 +105,11 @@ def embed_id3_metadata(
         except Exception:
             tags = ID3()
 
+        current_year = str(datetime.now(UTC).year)
         tags["TIT2"] = TIT2(encoding=3, text=title)
         tags["TPE1"] = TPE1(encoding=3, text="Herald Podcast Generator")
         tags["TALB"] = TALB(encoding=3, text="Herald Audio Episodes")
+        tags["TDRC"] = TDRC(encoding=3, text=current_year)
         if description or job_id:
             comment_text = f"{description or ''}\nJob ID: {job_id or ''}".strip()
             tags["COMM"] = COMM(encoding=3, lang="eng", desc="Episode Info", text=comment_text)
@@ -130,7 +136,7 @@ def join_and_normalize_audio(
     insert_pauses: bool = True,
 ) -> dict[str, Any]:
     """
-    Concat WAV audio chunks with section pause padding, normalize spoken loudness using loudnorm,
+    Concat WAV audio chunks with section/paragraph pause padding, normalize spoken loudness using loudnorm,
     encode to mono MP3, embed ID3 metadata, and validate audio duration.
     """
     if not chunk_paths:
@@ -141,19 +147,26 @@ def join_and_normalize_audio(
     if free_mb < settings.HERALD_MIN_DISK_MB:
         raise FFmpegExecutionError(f"Insufficient free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
 
+    # Validate all input chunks before assembly
+    for cp in chunk_paths:
+        validate_audio_file(cp)
+
     output_mp3_path.parent.mkdir(parents=True, exist_ok=True)
     concat_list_path = output_mp3_path.parent / f"concat_{job_id or 'temp'}.txt"
+    pauses_dir = output_mp3_path.parent / f"pauses_{job_id or 'temp'}"
 
     padded_chunks = []
-    pauses_dir = output_mp3_path.parent / f"pauses_{job_id or 'temp'}"
 
     try:
         if insert_pauses:
             padding_start = generate_silence_wav(pauses_dir / "silence_start.wav", 0.8)
             padded_chunks.append(padding_start)
 
-        for chunk in chunk_paths:
+        for i, chunk in enumerate(chunk_paths):
             padded_chunks.append(chunk)
+            if insert_pauses and i < len(chunk_paths) - 1:
+                pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", 0.5)
+                padded_chunks.append(pause_wav)
 
         if insert_pauses:
             padding_end = generate_silence_wav(pauses_dir / "silence_end.wav", 0.8)
@@ -204,7 +217,7 @@ def join_and_normalize_audio(
 
         checksum = compute_file_sha256(output_mp3_path)
         log_entry = {
-            "timestamp": logger.name,
+            "timestamp": datetime.now(UTC).isoformat(),
             "job_id": job_id,
             "stage": "ENCODING",
             "result": "SUCCESS",

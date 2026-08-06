@@ -8,7 +8,7 @@
 
 ## 2. Server-Side Request Forgery (SSRF) Protections
 
-When an emailed source consists of an article URL, Herald's URL extraction engine (`packages/herald/extraction/url_extractor.py`) enforces strict security protections:
+When an emailed source consists of an article URL, Herald's URL extraction engine (`herald/extraction/url_extractor.py`) enforces strict security protections:
 
 1. **Scheme Control**: Permits only `http` and `https` protocols.
 2. **DNS Resolution Inspection**: Resolves hostnames to IP addresses prior to connecting.

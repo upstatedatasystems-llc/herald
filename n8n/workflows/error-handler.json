@@ -13,24 +13,29 @@
     },
     {
       "parameters": {
-        "sendTo": "={{ $env.EMAIL_ALLOWED_SENDERS.split(',')[0] }}",
-        "subject": "=Alert: Herald Workflow Execution Error",
-        "message": "=An error occurred during Herald workflow execution:\n\nWorkflow Name: {{ $json.workflow.name }}\nNode Name: {{ $json.execution.error.node.name }}\nError Message: {{ $json.execution.error.message }}\nTimestamp: {{ $json.execution.lastNodeExecuted }}\n\nPlease check system logs and job status.",
+        "method": "POST",
+        "url": "http://herald-api:8000/api/v1/ops/error-handler",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.HERALD_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{$json.execution.error.job_id || null}}\",\n  \"error_code\": \"{{$json.execution.error.message || 'WORKFLOW_EXECUTION_ERROR'}}\",\n  \"error_detail\": \"{{$json.execution.error.description || 'Execution failure in n8n workflow'}}\"\n}",
         "options": {}
       },
-      "name": "Send Diagnostic Alert Email",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
+      "name": "Call Herald Error Handler API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
       "position": [
         500,
         300
-      ],
-      "credentials": {
-        "gmailOAuth2": {
-          "id": "1",
-          "name": "Herald Gmail Account"
-        }
-      }
+      ]
     }
   ],
   "connections": {
@@ -38,7 +43,7 @@
       "main": [
         [
           {
-            "node": "Send Diagnostic Alert Email",
+            "node": "Call Herald Error Handler API",
             "type": "main",
             "index": 0
           }

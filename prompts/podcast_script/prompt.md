@@ -33,7 +33,6 @@ Return your response ONLY as structured JSON adhering strictly to the response s
   "episode_description": "string",
   "estimated_minutes": 10,
   "source_title": "string or null",
-  "source_url": "string or null",
   "segments": [
     {
       "order": 1,

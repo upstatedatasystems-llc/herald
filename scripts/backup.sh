@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP_DIR="${HERALD_BACKUP_DIR:-/data/herald/backups}"
+BACKUP_DIR="${HERALD_BACKUP_DIR:-./backups}"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 TARGET_DIR="${BACKUP_DIR}/backup_${TIMESTAMP}"
 
@@ -11,12 +11,17 @@ echo "Starting Herald system backup to ${TARGET_DIR}..."
 
 # 1. PostgreSQL Database Backup
 if command -v pg_dump >/dev/null 2>&1; then
-    pg_dump -h "${POSTGRES_HOST:-postgres}" -U "${POSTGRES_USER:-herald}" "${POSTGRES_DB:-herald}" > "${TARGET_DIR}/database.sql"
-elif command -v docker >/dev/null 2>&1; then
-    docker exec herald-postgres pg_dump -U herald herald > "${TARGET_DIR}/database.sql"
+    pg_dump -h "${POSTGRES_HOST:-localhost}" -U "${POSTGRES_USER:-herald}" "${POSTGRES_DB:-herald}" > "${TARGET_DIR}/database.sql"
+elif command -v docker >/dev/null 2>&1 && docker ps | grep -q herald-postgres; then
+    docker exec herald-postgres pg_dump -U "${POSTGRES_USER:-herald}" "${POSTGRES_DB:-herald}" > "${TARGET_DIR}/database.sql"
 else
-    echo "Warning: pg_dump not found; creating fallback backup marker"
-    echo "-- Database backup marker" > "${TARGET_DIR}/database.sql"
+    echo "Error: Neither pg_dump nor running herald-postgres container available. Backup failed." >&2
+    exit 1
+fi
+
+if [ ! -s "${TARGET_DIR}/database.sql" ]; then
+    echo "Error: Generated database.sql is empty. Backup failed." >&2
+    exit 1
 fi
 
 # 2. Workflow JSON & Manifest
@@ -29,14 +34,17 @@ cat <<EOF > "${TARGET_DIR}/manifest.json"
 {
   "timestamp": "${TIMESTAMP}",
   "system": "Herald Email-to-Podcast",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "environment": "${HERALD_ENV:-production}"
 }
 EOF
 
 # 4. Generate SHA256 Checksums
 cd "${TARGET_DIR}"
-sha256sum * > checksums.txt 2>/dev/null || shasum -a 256 * > checksums.txt
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum database.sql manifest.json > checksums.txt
+elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 database.sql manifest.json > checksums.txt
+fi
 
 echo "Backup completed successfully at ${TARGET_DIR}"
-EOF

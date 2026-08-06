@@ -110,9 +110,11 @@ def transition_job_state(
     message: str | None = None,
     error_category: str | None = None,
     force: bool = False,
+    commit: bool = True,
 ) -> PodcastJob:
     """
-    Safely transition a job to a new state and record the transition history.
+    Safely transition a job to a new state and record transition history.
+    Allows caller to pass commit=False to manage transaction boundaries.
     """
     from_state = job.status
     allowed_targets = VALID_TRANSITIONS.get(from_state, set())
@@ -143,6 +145,7 @@ def transition_job_state(
         error_category=error_category,
     )
     db.add(transition)
-    db.commit()
-    db.refresh(job)
+    if commit:
+        db.commit()
+        db.refresh(job)
     return job

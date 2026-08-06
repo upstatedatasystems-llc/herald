@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Column,
     DateTime,
     Float,
@@ -85,7 +86,7 @@ class PodcastJob(Base):
     # Audio synthesis tracking
     completed_chunk_index = Column(Integer, nullable=False, default=0)
     local_audio_path = Column(String(512), nullable=True)
-    audio_bytes = Column(Integer, nullable=True)
+    audio_bytes = Column(BigInteger, nullable=True)
     audio_sha256 = Column(String(64), nullable=True)
     audio_duration_seconds = Column(Integer, nullable=True)
 
@@ -117,9 +118,9 @@ class PodcastJob(Base):
 class JobStateTransition(Base):
     __tablename__ = "job_state_transitions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
-    from_state = Column(String(50), nullable=False)
+    from_state = Column(String(50), nullable=True)
     to_state = Column(String(50), nullable=False)
     component = Column(String(50), nullable=False)
     message = Column(Text, nullable=True)

@@ -1,18 +1,18 @@
 import os
+import shutil
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from apps.api.auth import verify_api_key
 from herald.audio.ffmpeg_builder import check_free_disk_mb
 from herald.config import settings
 from herald.db.connection import get_db
-from herald.db.models import JobState, JobStateTransition, PodcastJob, SourceType
+from herald.db.models import JobState, PodcastJob, SourceType
 from herald.db.state_machine import transition_job_state
 from herald.extraction.email_parser import (
     SourceClassification,
@@ -28,17 +28,37 @@ from herald.gemini.client import GeminiError, generate_podcast_script
 from herald.tts.kokoro_client import KokoroClient
 
 app = FastAPI(
-    title="Herald Email-to-Podcast API",
-    description="API service for Herald podcast generation intake, extraction, scripting, and job tracking.",
-    version="0.1.0",
+    title="Herald Email-to-Podcast Automation API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 
+def verify_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")):
+    """
+    Constant-time API key verification using fail-closed security.
+    """
+    if settings.HERALD_ENV.lower() == "production":
+        if not x_api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="X-API-Key header is missing.",
+            )
+        import secrets
+        if not secrets.compare_digest(x_api_key, settings.HERALD_API_KEY):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid API Key.",
+            )
+    return True
+
+
 class IntakeRequest(BaseModel):
-    gmail_message_id: str = Field(..., description="Unique Gmail Message ID for deduplication")
-    gmail_thread_id: str | None = Field(None, description="Gmail Thread ID")
-    sender_email: str = Field(..., description="Sender email address")
-    subject: str = Field(..., description="Email subject line")
+    gmail_message_id: str = Field(..., description="Unique Gmail message ID")
+    gmail_thread_id: str | None = Field(None, description="Gmail thread ID")
+    sender_email: str = Field(..., description="Authorized sender email address")
+    subject: str = Field(..., description="Email subject line containing Podcast: <Mode>")
     body_text: str | None = Field(None, description="Plain text email body")
     body_html: str | None = Field(None, description="HTML email body")
 
@@ -63,7 +83,22 @@ class ExtractUrlResponse(BaseModel):
 
 
 class GenerateScriptRequest(BaseModel):
-    job_id: str = Field(..., description="Job ID to generate Gemini script for")
+    job_id: str = Field(..., description="Podcast job ID")
+
+
+class DriveCompleteRequest(BaseModel):
+    drive_file_id: str = Field(..., description="Uploaded Google Drive file ID")
+    drive_web_link: str = Field(..., description="Web link to Google Drive file")
+    drive_job_key: str | None = Field(None, description="Herald job key stored in Drive appProperties")
+
+
+class DeliveryCompleteRequest(BaseModel):
+    gmail_result_message_id: str | None = Field(None, description="Sent reply Gmail message ID")
+
+
+class DeliveryFailedRequest(BaseModel):
+    error_code: str = Field(default="GMAIL_DELIVERY_FAILURE")
+    error_detail: str = Field(default="Failed to deliver completion email")
 
 
 class JobStatusResponse(BaseModel):
@@ -87,21 +122,6 @@ class JobStatusResponse(BaseModel):
     created_at: str
     updated_at: str
     completed_at: str | None
-
-
-class DriveCompleteRequest(BaseModel):
-    drive_file_id: str = Field(..., description="Google Drive File ID")
-    drive_web_link: str = Field(..., description="Private Google Drive Web Link")
-    drive_job_key: str | None = Field(None, description="Stable Herald Drive job key")
-
-
-class DeliveryCompleteRequest(BaseModel):
-    gmail_result_message_id: str | None = Field(None, description="Returned Gmail result message ID")
-
-
-class DeliveryFailedRequest(BaseModel):
-    error_code: str = Field(default="GMAIL_DELIVERY_FAILURE")
-    error_detail: str = Field(default="Failed to deliver completion email")
 
 
 @app.get("/health", tags=["Health"])
@@ -132,11 +152,21 @@ def readiness_check(db: Session = Depends(get_db)):
 
     # 2. Alembic schema check
     try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        alembic_cfg = Config("alembic.ini")
+        script_dir = ScriptDirectory.from_config(alembic_cfg)
+        head_revision = script_dir.get_current_head()
+
         result = db.execute(text("SELECT version_num FROM alembic_version")).first()
-        if not result or not result[0]:
-            reasons.append("Database schema missing Alembic revision version")
-    except Exception:
-        reasons.append("Database schema missing alembic_version table (run migrations first)")
+        current_revision = result[0] if result else None
+        if not current_revision:
+            reasons.append("Database schema missing alembic_version revision")
+        elif current_revision != head_revision:
+            reasons.append(f"Database revision ({current_revision}) does not match expected head ({head_revision})")
+    except Exception as e:
+        reasons.append(f"Alembic version check failed: {e}")
 
     # 3. Production security check
     if settings.HERALD_ENV.lower() == "production":
@@ -145,15 +175,25 @@ def readiness_check(db: Session = Depends(get_db)):
         if not settings.EMAIL_ALLOWED_SENDERS.strip():
             reasons.append("Production EMAIL_ALLOWED_SENDERS is empty (fail-closed rule)")
 
-    # 4. Free disk check
+    # 4. Work directory writability check
     work_dir = Path(settings.HERALD_WORK_DIR)
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        test_file = work_dir / ".readiness_test"
+        test_file.touch()
+        test_file.unlink(missing_ok=True)
+    except Exception as e:
+        reasons.append(f"Work directory '{work_dir}' is not writable: {e}")
+
+    # 5. Free disk check
     free_mb = check_free_disk_mb(work_dir)
     if free_mb < settings.HERALD_MIN_DISK_MB:
         reasons.append(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)")
 
-    # 5. Kokoro check
+    # 6. Kokoro check
     kokoro_client = KokoroClient()
-    kokoro_healthy = kokoro_client.health_check()
+    kokoro_res = kokoro_client.health_check()
+    kokoro_healthy = bool(isinstance(kokoro_res, dict) and kokoro_res.get("healthy"))
     if not kokoro_healthy:
         reasons.append("Kokoro TTS service reachable check failed")
 
@@ -191,7 +231,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     if allowed_senders and sender not in allowed_senders:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sender address is not authorized on the system allowlist.",
+            detail=f"Security Violation: Sender '{sender}' is not on the authorized allowlist.",
         )
 
     existing_message_job = (
@@ -374,9 +414,12 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
 def claim_delivery_job(db: Session = Depends(get_db)):
     """
     Atomically select 1 eligible delivery job using SELECT FOR UPDATE SKIP LOCKED in 1 transaction.
-    Determines exact resume stage (UPLOADING vs DELIVERING).
+    Returns explicit action ('upload_then_email', 'email_only', or 'none').
     """
-    job = (
+    now = datetime.now(UTC)
+    stale_cutoff = now - timedelta(minutes=15)
+
+    candidate_jobs = (
         db.query(PodcastJob)
         .filter(
             PodcastJob.status.in_([
@@ -388,43 +431,66 @@ def claim_delivery_job(db: Session = Depends(get_db)):
         )
         .order_by(PodcastJob.updated_at.asc())
         .with_for_update(skip_locked=True)
-        .first()
+        .all()
     )
 
-    if not job or job.status == JobState.COMPLETE.value:
-        return {"claimed": False, "job": None}
+    eligible_job = None
+    for job in candidate_jobs:
+        if job.status == JobState.COMPLETE.value:
+            continue
 
-    now = datetime.now(UTC)
+        if job.status == JobState.FAILED_RETRYABLE.value:
+            if job.failed_stage in ("SYNTHESIZING", "ENCODING", "SCRIPTING", "EXTRACTING"):
+                continue
+            if job.next_retry_at and job.next_retry_at > now:
+                continue
+            eligible_job = job
+            break
+
+        elif job.status in (JobState.UPLOADING.value, JobState.DELIVERING.value):
+            last_active = job.last_heartbeat_at or job.claimed_at
+            if last_active and last_active > stale_cutoff and job.claim_owner == "n8n-completion-dispatcher":
+                continue
+            eligible_job = job
+            break
+
+        elif job.status == JobState.AUDIO_READY.value:
+            eligible_job = job
+            break
+
+    if not eligible_job:
+        return {"claimed": False, "action": "none", "job": None}
+
+    job = eligible_job
     job.claimed_at = now
     job.claim_owner = "n8n-completion-dispatcher"
     job.delivery_attempt_count += 1
     job.updated_at = now
 
-    target_state = JobState.UPLOADING.value
-    if job.drive_file_id and job.drive_web_link:
-        target_state = JobState.DELIVERING.value
+    has_drive_file = bool(job.drive_file_id and job.drive_web_link)
+    action = "email_only" if has_drive_file else "upload_then_email"
+    target_state = JobState.DELIVERING.value if has_drive_file else JobState.UPLOADING.value
 
     old_state = job.status
-    job.status = target_state
-
     if old_state != target_state:
-        transition = JobStateTransition(
-            job_id=job.id,
-            from_state=old_state,
-            to_state=target_state,
+        transition_job_state(
+            db,
+            job,
+            target_state,
             component="n8n-delivery-claim",
-            message=f"Claimed delivery job atomically in state '{target_state}'",
+            message=f"Claimed delivery job atomically for action '{action}'",
+            commit=False,
         )
-        db.add(transition)
 
     db.commit()
     db.refresh(job)
 
-    needs_upload = not bool(job.drive_file_id)
+    needs_upload = not has_drive_file
     needs_email = not bool(job.delivered_at)
 
     return {
         "claimed": True,
+        "action": action,
         "job": {
             "id": job.id,
             "gmail_message_id": job.gmail_message_id,
@@ -439,6 +505,7 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "script_json": job.script_json,
             "needs_upload": needs_upload,
             "needs_email": needs_email,
+            "action": action,
         },
     }
 
@@ -602,3 +669,224 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
         db, job, target_state, component="herald-api", message="Job manually retried by admin", force=True
     )
     return {"job_id": job.id, "status": job.status, "attempt_count": job.attempt_count}
+
+
+# =====================================================================
+# Operations API Endpoints (called by n8n operational workflows)
+# =====================================================================
+
+@app.post(
+    "/api/v1/ops/cleanup",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Operations"],
+)
+def ops_daily_cleanup(db: Session = Depends(get_db)):
+    """
+    Daily cleanup: Delete local MP3 & intermediate chunks for COMPLETE jobs > 48 hours old.
+    Never deletes Google Drive files.
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=48)
+    eligible_jobs = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.status == JobState.COMPLETE.value,
+            PodcastJob.completed_at < cutoff,
+            PodcastJob.local_audio_path.isnot(None),
+        )
+        .all()
+    )
+
+    cleaned_count = 0
+    freed_bytes = 0
+    work_dir = Path(settings.HERALD_WORK_DIR)
+
+    for job in eligible_jobs:
+        if job.local_audio_path:
+            p = Path(job.local_audio_path)
+            if p.exists():
+                freed_bytes += p.stat().st_size
+                p.unlink(missing_ok=True)
+            job.local_audio_path = None
+            cleaned_count += 1
+
+        chunks_dir = work_dir / "jobs" / job.id
+        if chunks_dir.exists():
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "cleaned_jobs_count": cleaned_count,
+        "freed_bytes": freed_bytes,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 2),
+    }
+
+
+@app.post(
+    "/api/v1/ops/stale-recovery",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Operations"],
+)
+def ops_stale_recovery(db: Session = Depends(get_db)):
+    """
+    Recover stale jobs across all active stages using stage-specific timeouts.
+    """
+    now = datetime.now(UTC)
+    recovered = 0
+
+    stale_specs = [
+        (JobState.SYNTHESIZING.value, timedelta(minutes=15), JobState.QUEUED_TTS.value),
+        (JobState.ENCODING.value, timedelta(minutes=15), JobState.QUEUED_TTS.value),
+        (JobState.UPLOADING.value, timedelta(minutes=30), JobState.UPLOADING.value),
+        (JobState.DELIVERING.value, timedelta(minutes=30), JobState.DELIVERING.value),
+    ]
+
+    for status_val, timeout, target_val in stale_specs:
+        cutoff = now - timeout
+        jobs = (
+            db.query(PodcastJob)
+            .filter(PodcastJob.status == status_val)
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        for job in jobs:
+            last_active = job.last_heartbeat_at or job.claimed_at
+            if last_active and last_active < cutoff:
+                job.claimed_at = None
+                job.claim_owner = None
+                job.last_heartbeat_at = None
+                transition_job_state(
+                    db,
+                    job,
+                    target_val,
+                    component="herald-ops-recovery",
+                    message="Recovered stale claim via operational recovery workflow",
+                    force=True,
+                    commit=False,
+                )
+                recovered += 1
+
+    db.commit()
+    return {"status": "success", "recovered_jobs": recovered}
+
+
+@app.get(
+    "/api/v1/ops/daily-health",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Operations"],
+)
+def ops_daily_health(db: Session = Depends(get_db)):
+    """
+    Generate daily health metrics report: queue counts, failures, oldest job, disk, DB size, work dir.
+    """
+    counts = {}
+    for st in JobState:
+        cnt = db.query(PodcastJob).filter(PodcastJob.status == st.value).count()
+        counts[st.value] = cnt
+
+    past_24h = datetime.now(UTC) - timedelta(hours=24)
+    failures_24h = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.status.in_([JobState.FAILED_RETRYABLE.value, JobState.FAILED_FINAL.value]),
+            PodcastJob.updated_at >= past_24h,
+        )
+        .count()
+    )
+
+    oldest_pending = (
+        db.query(PodcastJob)
+        .filter(PodcastJob.status.notin_([JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value]))
+        .order_by(PodcastJob.created_at.asc())
+        .first()
+    )
+
+    work_dir = Path(settings.HERALD_WORK_DIR)
+    free_mb = check_free_disk_mb(work_dir)
+
+    completed_uploads = (
+        db.query(PodcastJob)
+        .filter(PodcastJob.drive_file_id.isnot(None))
+        .count()
+    )
+
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "queue_counts": counts,
+        "failures_past_24h": failures_24h,
+        "oldest_pending_job_id": oldest_pending.id if oldest_pending else None,
+        "oldest_pending_created_at": oldest_pending.created_at.isoformat() if oldest_pending else None,
+        "free_disk_mb": free_mb,
+        "completed_uploads_total": completed_uploads,
+        "readiness_status": "OK" if free_mb >= settings.HERALD_MIN_DISK_MB else "DEGRADED",
+    }
+
+
+@app.post(
+    "/api/v1/ops/weekly-maintenance",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Operations"],
+)
+def ops_weekly_maintenance(db: Session = Depends(get_db)):
+    """
+    Weekly maintenance inspection: orphaned file audit, database stats, disk usage overview.
+    """
+    work_dir = Path(settings.HERALD_WORK_DIR)
+    jobs_dir = work_dir / "jobs"
+    orphan_dirs_count = 0
+
+    if jobs_dir.exists():
+        for item in jobs_dir.iterdir():
+            if item.is_dir():
+                job_exists = db.query(PodcastJob).filter(PodcastJob.id == item.name).first()
+                if not job_exists:
+                    shutil.rmtree(item, ignore_errors=True)
+                    orphan_dirs_count += 1
+
+    total_jobs = db.query(PodcastJob).count()
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "total_jobs_in_db": total_jobs,
+        "orphaned_dirs_cleaned": orphan_dirs_count,
+        "status": "completed",
+    }
+
+
+class ErrorHandlerRequest(BaseModel):
+    job_id: str | None = None
+    error_code: str = "WORKFLOW_EXECUTION_ERROR"
+    error_detail: str = "An error occurred in n8n execution workflow"
+    failed_stage: str | None = None
+
+
+@app.post(
+    "/api/v1/ops/error-handler",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Operations"],
+)
+def ops_error_handler(req: ErrorHandlerRequest, db: Session = Depends(get_db)):
+    """
+    Error handler: updates durable job state when job_id is available and returns sanitized alert.
+    """
+    if req.job_id:
+        job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
+        if job and job.status != JobState.COMPLETE.value:
+            transition_job_state(
+                db,
+                job,
+                JobState.FAILED_RETRYABLE.value,
+                component="n8n-error-handler",
+                message=req.error_detail[:500],
+                error_category=req.error_code,
+            )
+
+    sanitized_alert = {
+        "alert": "HERALD_SYSTEM_ERROR",
+        "job_id": req.job_id,
+        "error_code": req.error_code,
+        "error_detail": req.error_detail[:200],
+        "failed_stage": req.failed_stage,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    return sanitized_alert

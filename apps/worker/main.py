@@ -31,41 +31,46 @@ def slugify(text: str, max_len: int = 30) -> str:
 
 def recover_stale_claims(db: Session, stale_minutes: int = 15):
     """
-    Detect jobs stuck in SYNTHESIZING or ENCODING without heartbeat past stale_minutes timeout,
-    and reset them back to QUEUED_TTS for retry.
+    Detect jobs stuck in SYNTHESIZING or ENCODING whose latest heartbeat/claim is past stale_minutes,
+    and atomically requeue them back to QUEUED_TTS for retry.
     """
     cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
     stale_jobs = (
         db.query(PodcastJob)
         .filter(
             PodcastJob.status.in_([JobState.SYNTHESIZING.value, JobState.ENCODING.value]),
-            PodcastJob.claimed_at < cutoff,
         )
+        .with_for_update(skip_locked=True)
         .all()
     )
 
     for job in stale_jobs:
-        logger.warning(f"Recovering stale worker claim for job '{job.id}' (last claimed at {job.claimed_at})")
-        job.claimed_at = None
-        job.claim_owner = None
-        db.commit()
-        transition_job_state(
-            db,
-            job,
-            JobState.QUEUED_TTS.value,
-            component="herald-worker-recovery",
-            message="Recovered stale worker claim after crash or timeout",
-            force=True,
-        )
+        last_active = job.last_heartbeat_at or job.claimed_at
+        if last_active:
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=UTC)
+            if last_active < cutoff:
+                logger.warning(f"Recovering stale worker claim for job '{job.id}' (last active: {last_active})")
+                job.claimed_at = None
+                job.claim_owner = None
+                job.last_heartbeat_at = None
+                transition_job_state(
+                    db,
+                    job,
+                    JobState.QUEUED_TTS.value,
+                    component="herald-worker-recovery",
+                    message="Recovered stale worker claim after crash or timeout",
+                    force=True,
+                    commit=False,
+                )
+                db.commit()
 
 
 def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     """
-    Acquire 1 QUEUED_TTS job using SELECT ... FOR UPDATE SKIP LOCKED, synthesize TTS chunks,
+    Acquire 1 QUEUED_TTS job using SELECT ... FOR UPDATE SKIP LOCKED in 1 transaction, synthesize TTS chunks,
     assemble with FFmpeg, and transition status to AUDIO_READY.
-    Returns True if a job was processed, False otherwise.
     """
-    # Exclusive database lock to acquire single job safely
     job = (
         db.query(PodcastJob)
         .filter(PodcastJob.status == JobState.QUEUED_TTS.value)
@@ -77,13 +82,24 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     if not job:
         return False
 
+    now = datetime.now(UTC)
     logger.info(f"Worker claimed job ID: '{job.id}' (Message ID: '{job.gmail_message_id}')")
-    job.claimed_at = datetime.now(UTC)
+    job.claimed_at = now
     job.claim_owner = "herald-worker"
+    job.last_heartbeat_at = now
     job.synthesis_attempt_count += 1
-    db.commit()
 
-    transition_job_state(db, job, JobState.SYNTHESIZING.value, component="herald-worker")
+    # Single atomic claim + state transition before commit
+    transition_job_state(
+        db,
+        job,
+        JobState.SYNTHESIZING.value,
+        component="herald-worker",
+        message="Claimed worker job atomically for TTS synthesis",
+        commit=False,
+    )
+    db.commit()
+    db.refresh(job)
 
     work_dir = Path(settings.HERALD_WORK_DIR)
     job_dir = work_dir / "jobs" / job.id
@@ -113,13 +129,11 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         for chunk in chunks:
             chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
 
-            # Resumable chunk synthesis: check if chunk already generated from prior attempt
             if chunk.index <= job.completed_chunk_index and chunk_file.exists() and chunk_file.stat().st_size > 0:
                 logger.info(f"Skipping already completed chunk {chunk.index}/{len(chunks)}")
                 generated_chunk_paths.append(chunk_file)
                 continue
 
-            # Per-chunk retry up to 2 retries per chunk
             chunk_success = False
             for chunk_attempt in range(1, 3):
                 try:
@@ -143,17 +157,14 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             db.commit()
             generated_chunk_paths.append(chunk_file)
 
-        # Transition to ENCODING
         transition_job_state(db, job, JobState.ENCODING.value, component="herald-worker")
 
-        # Construct final audio output filename
         now_str = datetime.now(UTC).strftime("%Y-%m-%d_%H%M")
         title_slug = slugify(title)
         short_id = job.id[:8]
         mp3_filename = f"{now_str}_{title_slug}_{short_id}.mp3"
         output_mp3_path = output_dir / mp3_filename
 
-        # FFmpeg assembly with 1 retry after cleaning partial output
         audio_info = None
         for ffmpeg_attempt in range(1, 3):
             try:
@@ -178,11 +189,9 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         job.audio_sha256 = audio_info["sha256"]
         db.commit()
 
-        # Transition to AUDIO_READY
         transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
         logger.info(f"Successfully rendered audio for job '{job.id}': {output_mp3_path}")
 
-        # Clean up intermediate chunk files
         try:
             shutil.rmtree(chunks_dir)
         except Exception as e:
@@ -217,13 +226,12 @@ def run_worker_loop():
     h_status = kokoro_client.health_check()
     logger.info(f"Startup Kokoro/FFmpeg Health Status: {h_status}")
 
-    poll_interval = 5  # seconds
+    poll_interval = 5
 
     while True:
         try:
             db = SessionLocal()
             try:
-                # Recover any stale claims every loop
                 recover_stale_claims(db)
                 job_processed = process_next_job(db, kokoro_client)
             finally:
