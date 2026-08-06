@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import shutil
+import struct
 import subprocess
+import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,7 @@ class FFmpegExecutionError(Exception):
 
 
 def check_free_disk_mb(path: Path) -> float:
-    """Check available free disk space in megabytes."""
+    """Check available free disk space in megabytes. Fail closed by raising exception."""
     try:
         check_path = path if path.exists() else path.parent
         total, used, free = shutil.disk_usage(check_path)
@@ -29,66 +31,107 @@ def check_free_disk_mb(path: Path) -> float:
         _ = used
         return free / (1024 * 1024)
     except Exception as e:
-        logger.warning(f"Disk check failed for '{path}': {e}")
-        return 999999.0
+        logger.error(f"Disk check failed for '{path}': {e}")
+        raise FFmpegExecutionError(f"Disk check failed: {e}")
 
 
-def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5) -> Path:
+def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sample_rate: int = 24000) -> Path:
     """Generate a silent WAV chunk for pause insertion between sections/paragraphs."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not shutil.which("ffmpeg"):
-        with open(output_path, "wb") as f:
-            f.write(b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+        num_samples = int(sample_rate * duration_seconds)
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            data = struct.pack("<" + ("h" * num_samples), *([0] * num_samples))
+            wav_file.writeframes(data)
         return output_path
 
     cmd = [
         "ffmpeg",
         "-y",
         "-f", "lavfi",
-        "-i", f"anullsrc=r=24000:cl=mono:d={duration_seconds}",
+        "-i", f"anullsrc=r={sample_rate}:cl=mono:d={duration_seconds}",
+        "-ac", "1",
+        "-ar", str(sample_rate),
         str(output_path),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
-        logger.warning(f"Silence generation failed: {res.stderr}")
+        logger.warning(f"FFmpeg silence generation failed: {res.stderr}")
     return output_path
 
 
 def validate_audio_file(file_path: Path) -> dict[str, Any]:
     """
-    Validate that an audio file exists, is non-zero, and contains valid audio streams using mutagen/ffprobe.
-    Raises FFmpegExecutionError if file is missing, empty, or invalid.
+    Validate that an audio file exists, is non-zero, contains valid audio streams,
+    non-zero duration, valid container format using mutagen/ffprobe.
+    Raises FFmpegExecutionError if file is invalid, empty, or missing streams.
     """
     if not file_path.exists() or file_path.stat().st_size == 0:
         raise FFmpegExecutionError(f"Audio file '{file_path}' is missing or 0 bytes.")
 
-    duration_sec = 0
+    audio_type = None
+    is_valid_container = False
+
     try:
         audio = mutagen.File(file_path)
-        if audio and audio.info and hasattr(audio.info, "length"):
-            duration_sec = int(audio.info.length)
+        if audio and audio.info:
+            is_valid_container = True
+            audio_type = type(audio).__name__
+            if hasattr(audio.info, "length"):
+                duration_sec = float(audio.info.length)
     except Exception as e:
-        logger.debug(f"Mutagen inspection error on '{file_path}': {e}")
+        logger.debug(f"Mutagen validation error for '{file_path}': {e}")
 
-    if duration_sec == 0 and shutil.which("ffprobe"):
+    if not is_valid_container and str(file_path).lower().endswith(".wav"):
+        try:
+            with wave.open(str(file_path), "rb") as w:
+                nframes = w.getnframes()
+                framerate = w.getframerate()
+                if framerate > 0 and nframes >= 0:
+                    is_valid_container = True
+                    duration_sec = nframes / float(framerate)
+                    audio_type = "WAVE"
+        except Exception as e:
+            logger.debug(f"Wave inspection error for '{file_path}': {e}")
+
+    if not is_valid_container and not shutil.which("ffprobe"):
+        raise FFmpegExecutionError(f"File '{file_path}' is not a valid audio format.")
+
+    if duration_sec <= 0 and shutil.which("ffprobe"):
         try:
             cmd = [
                 "ffprobe",
                 "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-show_entries", "format=duration,format_name:stream=codec_type",
+                "-of", "json",
                 str(file_path),
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            duration_sec = int(float(res.stdout.strip()))
+            probe_data = json.loads(res.stdout)
+            streams = probe_data.get("streams", [])
+            has_audio_stream = any(s.get("codec_type") == "audio" for s in streams)
+            if not has_audio_stream:
+                raise FFmpegExecutionError(f"File '{file_path}' contains no valid audio streams.")
+
+            dur_str = probe_data.get("format", {}).get("duration", "0")
+            duration_sec = float(dur_str)
         except Exception as e:
-            logger.warning(f"FFprobe duration check failed for '{file_path}': {e}")
+            if isinstance(e, FFmpegExecutionError):
+                raise
+            raise FFmpegExecutionError(f"FFprobe validation failed for '{file_path}': {e}")
+
+    if not is_valid_container and duration_sec <= 0:
+        raise FFmpegExecutionError(f"Audio file '{file_path}' is invalid or contains no audio duration.")
 
     return {
         "valid": True,
         "size_bytes": file_path.stat().st_size,
-        "duration_seconds": duration_sec,
+        "duration_seconds": int(duration_sec),
+        "audio_type": audio_type,
     }
 
 
@@ -134,15 +177,16 @@ def join_and_normalize_audio(
     episode_description: str = "",
     job_id: str = "",
     insert_pauses: bool = True,
+    is_section_end_list: list[bool] | None = None,
 ) -> dict[str, Any]:
     """
-    Concat WAV audio chunks with section/paragraph pause padding, normalize spoken loudness using loudnorm,
+    Concat WAV audio chunks with section (1.2s) and paragraph (0.5s) pause padding, normalize spoken loudness,
     encode to mono MP3, embed ID3 metadata, and validate audio duration.
     """
     if not chunk_paths:
         raise FFmpegExecutionError("No audio chunk files provided for assembly.")
 
-    # Check low disk space before rendering
+    # Check low disk space before rendering (fail closed)
     free_mb = check_free_disk_mb(output_mp3_path.parent)
     if free_mb < settings.HERALD_MIN_DISK_MB:
         raise FFmpegExecutionError(f"Insufficient free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
@@ -165,7 +209,9 @@ def join_and_normalize_audio(
         for i, chunk in enumerate(chunk_paths):
             padded_chunks.append(chunk)
             if insert_pauses and i < len(chunk_paths) - 1:
-                pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", 0.5)
+                is_sec_end = is_section_end_list[i] if (is_section_end_list and i < len(is_section_end_list)) else False
+                pause_duration = 1.2 if is_sec_end else 0.5
+                pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", pause_duration)
                 padded_chunks.append(pause_wav)
 
         if insert_pauses:

@@ -7,11 +7,11 @@ from herald.tts.kokoro_client import KokoroClient
 
 def test_concurrency_worker_claims_and_stale_recovery(db_session, monkeypatch):
     """
-    Test worker atomic claims, SKIP LOCKED isolation, and stale claim recovery.
+    Test worker atomic claims, concurrent session isolation, and stale claim recovery.
     """
     monkeypatch.setenv("HERALD_MOCK_TTS", "1")
 
-    # Create 3 QUEUED_TTS jobs
+    # Create 2 QUEUED_TTS jobs
     job1 = PodcastJob(
         gmail_message_id="msg-conc-1",
         sender_email="user@example.com",
@@ -58,6 +58,12 @@ def test_concurrency_worker_claims_and_stale_recovery(db_session, monkeypatch):
     # Job 1 should be AUDIO_READY
     db_session.refresh(job1)
     assert job1.status == JobState.AUDIO_READY.value
+
+    # Process second job
+    processed_2 = process_next_job(db_session, kokoro)
+    assert processed_2 is True
+    db_session.refresh(job2)
+    assert job2.status == JobState.AUDIO_READY.value
 
     # Stale claim recovery test
     stale_time = datetime.now(UTC) - timedelta(minutes=30)

@@ -185,17 +185,26 @@ def readiness_check(db: Session = Depends(get_db)):
     except Exception as e:
         reasons.append(f"Work directory '{work_dir}' is not writable: {e}")
 
-    # 5. Free disk check
-    free_mb = check_free_disk_mb(work_dir)
-    if free_mb < settings.HERALD_MIN_DISK_MB:
-        reasons.append(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)")
+    # 5. Free disk check with fail-closed exception handling
+    try:
+        free_mb = check_free_disk_mb(work_dir)
+        if free_mb < settings.HERALD_MIN_DISK_MB:
+            reasons.append(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)")
+    except Exception as e:
+        free_mb = 0.0
+        reasons.append(f"Disk space inspection failed: {e}")
 
-    # 6. Kokoro check
-    kokoro_client = KokoroClient()
-    kokoro_res = kokoro_client.health_check()
-    kokoro_healthy = bool(isinstance(kokoro_res, dict) and kokoro_res.get("healthy"))
-    if not kokoro_healthy:
-        reasons.append("Kokoro TTS service reachable check failed")
+    # 6. Kokoro check - inspect kokoro_res["healthy"]
+    try:
+        kokoro_client = KokoroClient()
+        kokoro_res = kokoro_client.health_check()
+        kokoro_healthy = bool(isinstance(kokoro_res, dict) and kokoro_res.get("healthy"))
+        if not kokoro_healthy and (settings.HERALD_ENV.lower() == "production" or os.environ.get("HERALD_REQUIRE_KOKORO") == "1"):
+            reasons.append("Kokoro TTS service reachable check failed")
+    except Exception as e:
+        kokoro_healthy = False
+        if settings.HERALD_ENV.lower() == "production" or os.environ.get("HERALD_REQUIRE_KOKORO") == "1":
+            reasons.append(f"Kokoro health check exception: {e}")
 
     if reasons:
         raise HTTPException(
@@ -413,8 +422,9 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
 )
 def claim_delivery_job(db: Session = Depends(get_db)):
     """
-    Atomically select 1 eligible delivery job using SELECT FOR UPDATE SKIP LOCKED in 1 transaction.
-    Returns explicit action ('upload_then_email', 'email_only', or 'none').
+    Atomically select 1 eligible delivery job using SELECT FOR UPDATE SKIP LOCKED on 1 row.
+    Never claims failures from INTAKE, EXTRACTING, SCRIPTING, SYNTHESIZING, or ENCODING.
+    Returns explicit action ('upload_then_email', 'email_only', 'complete_without_resend', or 'none').
     """
     now = datetime.now(UTC)
     stale_cutoff = now - timedelta(minutes=15)
@@ -440,17 +450,24 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             continue
 
         if job.status == JobState.FAILED_RETRYABLE.value:
-            if job.failed_stage in ("SYNTHESIZING", "ENCODING", "SCRIPTING", "EXTRACTING"):
+            if job.failed_stage in ("INTAKE", "VALIDATING", "EXTRACTING", "SCRIPTING", "SYNTHESIZING", "ENCODING"):
                 continue
-            if job.next_retry_at and job.next_retry_at > now:
-                continue
+            if job.next_retry_at:
+                nr = job.next_retry_at
+                if nr.tzinfo is None:
+                    nr = nr.replace(tzinfo=UTC)
+                if nr > now:
+                    continue
             eligible_job = job
             break
 
         elif job.status in (JobState.UPLOADING.value, JobState.DELIVERING.value):
             last_active = job.last_heartbeat_at or job.claimed_at
-            if last_active and last_active > stale_cutoff and job.claim_owner == "n8n-completion-dispatcher":
-                continue
+            if last_active:
+                if last_active.tzinfo is None:
+                    last_active = last_active.replace(tzinfo=UTC)
+                if last_active > stale_cutoff and job.claim_owner == "n8n-completion-dispatcher":
+                    continue
             eligible_job = job
             break
 
@@ -468,8 +485,17 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     job.updated_at = now
 
     has_drive_file = bool(job.drive_file_id and job.drive_web_link)
-    action = "email_only" if has_drive_file else "upload_then_email"
-    target_state = JobState.DELIVERING.value if has_drive_file else JobState.UPLOADING.value
+    already_delivered = bool(job.delivered_at or job.gmail_result_message_id)
+
+    if already_delivered:
+        action = "complete_without_resend"
+        target_state = JobState.COMPLETE.value
+    elif has_drive_file:
+        action = "email_only"
+        target_state = JobState.DELIVERING.value
+    else:
+        action = "upload_then_email"
+        target_state = JobState.UPLOADING.value
 
     old_state = job.status
     if old_state != target_state:
@@ -486,7 +512,7 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     db.refresh(job)
 
     needs_upload = not has_drive_file
-    needs_email = not bool(job.delivered_at)
+    needs_email = not already_delivered
 
     return {
         "claimed": True,
@@ -524,7 +550,18 @@ def update_drive_complete(
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job.status == JobState.COMPLETE.value:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job metadata cannot be modified.")
+        if job.drive_file_id and job.drive_file_id != req.drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting Drive file ID on COMPLETE job: existing '{job.drive_file_id}' vs new '{req.drive_file_id}'",
+            )
+        return {
+            "job_id": job.id,
+            "status": job.status,
+            "drive_file_id": job.drive_file_id,
+            "drive_web_link": job.drive_web_link,
+            "message": "Job already COMPLETE.",
+        }
 
     if job.drive_file_id and job.drive_file_id != req.drive_file_id:
         raise HTTPException(
@@ -540,7 +577,7 @@ def update_drive_complete(
     db.commit()
 
     if job.status != JobState.DELIVERING.value:
-        transition_job_state(db, job, JobState.DELIVERING.value, component="n8n")
+        transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete")
 
     return {
         "job_id": job.id,
@@ -563,16 +600,43 @@ def update_delivery_complete(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if req and req.gmail_result_message_id:
-        job.gmail_result_message_id = req.gmail_result_message_id
+    new_msg_id = req.gmail_result_message_id if req else None
 
-    job.delivered_at = datetime.now(UTC)
+    if job.status == JobState.COMPLETE.value:
+        if new_msg_id and job.gmail_result_message_id and job.gmail_result_message_id != new_msg_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting Gmail result message ID on COMPLETE job: existing '{job.gmail_result_message_id}' vs new '{new_msg_id}'",
+            )
+        return {
+            "job_id": job.id,
+            "status": job.status,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "message": "Job already COMPLETE.",
+        }
+
+    if job.gmail_result_message_id and new_msg_id and job.gmail_result_message_id != new_msg_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Conflicting Gmail result message ID: existing '{job.gmail_result_message_id}' vs new '{new_msg_id}'",
+        )
+
+    if new_msg_id:
+        job.gmail_result_message_id = new_msg_id
+
+    if not job.delivered_at:
+        job.delivered_at = datetime.now(UTC)
+
     db.commit()
 
     if job.status != JobState.COMPLETE.value:
-        transition_job_state(db, job, JobState.COMPLETE.value, component="n8n")
+        transition_job_state(db, job, JobState.COMPLETE.value, component="n8n-delivery-complete")
 
-    return {"job_id": job.id, "status": job.status, "completed_at": job.completed_at.isoformat()}
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
 
 
 @app.post(
@@ -583,7 +647,7 @@ def update_delivery_complete(
 def update_delivery_failed(
     job_id: str, req: DeliveryFailedRequest, db: Session = Depends(get_db)
 ):
-    """Record delivery failure without deleting existing Drive metadata."""
+    """Record delivery failure with bounded backoff and transition to FAILED_RETRYABLE or FAILED_FINAL."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -591,15 +655,32 @@ def update_delivery_failed(
     if job.status == JobState.COMPLETE.value:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job cannot be set to failed.")
 
+    job.delivery_attempt_count += 1
+    job.attempt_count += 1
+
+    delay_seconds = min(30 * (2 ** (job.delivery_attempt_count - 1)), 3600)
+    job.next_retry_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+
+    target_failed_state = (
+        JobState.FAILED_FINAL.value if job.delivery_attempt_count >= 3 else JobState.FAILED_RETRYABLE.value
+    )
+
     transition_job_state(
         db,
         job,
-        JobState.FAILED_RETRYABLE.value,
-        component="n8n",
-        message=req.error_detail,
+        target_failed_state,
+        component="n8n-delivery-failed",
+        message=req.error_detail[:500],
         error_category=req.error_code,
     )
-    return {"job_id": job.id, "status": job.status}
+
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "failed_stage": job.failed_stage,
+        "delivery_attempt_count": job.delivery_attempt_count,
+        "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+    }
 
 
 @app.get(
@@ -644,7 +725,10 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
     tags=["Jobs"],
 )
 def retry_job(job_id: str, db: Session = Depends(get_db)):
-    """Administrator retry endpoint to resume a failed job from its appropriate stage."""
+    """
+    Executable stage-specific retry endpoint.
+    Determines exact resume state based on failed_stage and persisted artifacts without force=True.
+    """
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -652,23 +736,48 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
     if job.status not in (JobState.FAILED_RETRYABLE.value, JobState.FAILED_FINAL.value):
         raise HTTPException(status_code=400, detail=f"Job is in state '{job.status}', not FAILED")
 
-    target_state = JobState.QUEUED_TTS.value
-    if not job.script_json:
+    if job.attempt_count >= 3:
+        transition_job_state(
+            db,
+            job,
+            JobState.FAILED_FINAL.value,
+            component="herald-retry",
+            message="Maximum retry attempt limit reached",
+            commit=True,
+        )
+        raise HTTPException(status_code=400, detail="Job has reached maximum retry attempt limit (FAILED_FINAL).")
+
+    failed_stage = job.failed_stage or "QUEUED_TTS"
+
+    if failed_stage == JobState.EXTRACTING.value:
+        target_state = JobState.EXTRACTING.value
+    elif failed_stage == JobState.SCRIPTING.value:
         target_state = JobState.SCRIPTING.value
-    elif job.drive_file_id and job.drive_web_link:
+    elif failed_stage in (JobState.SYNTHESIZING.value, JobState.ENCODING.value, JobState.QUEUED_TTS.value):
+        target_state = JobState.QUEUED_TTS.value
+    elif failed_stage == JobState.UPLOADING.value:
+        target_state = JobState.DELIVERING.value if (job.drive_file_id and job.drive_web_link) else JobState.UPLOADING.value
+    elif failed_stage == JobState.DELIVERING.value:
         target_state = JobState.DELIVERING.value
-    elif job.local_audio_path and os.path.exists(job.local_audio_path):
-        target_state = JobState.UPLOADING.value
+    else:
+        target_state = JobState.QUEUED_TTS.value
 
     job.attempt_count += 1
     job.error_code = None
     job.error_detail = None
+    job.next_retry_at = None
     db.commit()
 
     transition_job_state(
-        db, job, target_state, component="herald-api", message="Job manually retried by admin", force=True
+        db, job, target_state, component="herald-api-retry", message=f"Resuming retry from failed stage '{failed_stage}' to '{target_state}'", force=False
     )
-    return {"job_id": job.id, "status": job.status, "attempt_count": job.attempt_count}
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "resumed_from_stage": failed_stage,
+        "target_stage": target_state,
+        "attempt_count": job.attempt_count,
+    }
 
 
 # =====================================================================
@@ -730,12 +839,14 @@ def ops_daily_cleanup(db: Session = Depends(get_db)):
 )
 def ops_stale_recovery(db: Session = Depends(get_db)):
     """
-    Recover stale jobs across all active stages using stage-specific timeouts.
+    Recover stale jobs across all active stages using stage-specific timeouts and conditional updates.
     """
     now = datetime.now(UTC)
-    recovered = 0
+    recovered_count = 0
 
     stale_specs = [
+        (JobState.EXTRACTING.value, timedelta(minutes=15), JobState.EXTRACTING.value),
+        (JobState.SCRIPTING.value, timedelta(minutes=15), JobState.SCRIPTING.value),
         (JobState.SYNTHESIZING.value, timedelta(minutes=15), JobState.QUEUED_TTS.value),
         (JobState.ENCODING.value, timedelta(minutes=15), JobState.QUEUED_TTS.value),
         (JobState.UPLOADING.value, timedelta(minutes=30), JobState.UPLOADING.value),
@@ -752,23 +863,29 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
         )
         for job in jobs:
             last_active = job.last_heartbeat_at or job.claimed_at
-            if last_active and last_active < cutoff:
-                job.claimed_at = None
-                job.claim_owner = None
-                job.last_heartbeat_at = None
-                transition_job_state(
-                    db,
-                    job,
-                    target_val,
-                    component="herald-ops-recovery",
-                    message="Recovered stale claim via operational recovery workflow",
-                    force=True,
-                    commit=False,
-                )
-                recovered += 1
+            if last_active:
+                if last_active.tzinfo is None:
+                    last_active = last_active.replace(tzinfo=UTC)
+                if last_active < cutoff:
+                    job.claimed_at = None
+                    job.claim_owner = None
+                    job.last_heartbeat_at = None
+                    target_state = (
+                        JobState.FAILED_FINAL.value if job.attempt_count >= 3 else target_val
+                    )
+                    transition_job_state(
+                        db,
+                        job,
+                        target_state,
+                        component="herald-ops-stale-recovery",
+                        message=f"Recovered stale claim in state '{status_val}' after timeout",
+                        force=True,
+                        commit=False,
+                    )
+                    recovered_count += 1
 
     db.commit()
-    return {"status": "success", "recovered_jobs": recovered}
+    return {"status": "success", "recovered_jobs": recovered_count}
 
 
 @app.get(
@@ -778,7 +895,7 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
 )
 def ops_daily_health(db: Session = Depends(get_db)):
     """
-    Generate daily health metrics report: queue counts, failures, oldest job, disk, DB size, work dir.
+    Generate daily health metrics report: queue counts, failures, oldest waiting job, longest active job, free disk, database size, work dir.
     """
     counts = {}
     for st in JobState:
@@ -803,7 +920,10 @@ def ops_daily_health(db: Session = Depends(get_db)):
     )
 
     work_dir = Path(settings.HERALD_WORK_DIR)
-    free_mb = check_free_disk_mb(work_dir)
+    try:
+        free_mb = check_free_disk_mb(work_dir)
+    except Exception:
+        free_mb = 0.0
 
     completed_uploads = (
         db.query(PodcastJob)

@@ -6,7 +6,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.audio.ffmpeg_builder import (
+    check_free_disk_mb,
+    join_and_normalize_audio,
+    validate_audio_file,
+)
 from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob
@@ -54,10 +58,13 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 job.claimed_at = None
                 job.claim_owner = None
                 job.last_heartbeat_at = None
+                target_state = (
+                    JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.QUEUED_TTS.value
+                )
                 transition_job_state(
                     db,
                     job,
-                    JobState.QUEUED_TTS.value,
+                    target_state,
                     component="herald-worker-recovery",
                     message="Recovered stale worker claim after crash or timeout",
                     force=True,
@@ -89,7 +96,6 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     job.last_heartbeat_at = now
     job.synthesis_attempt_count += 1
 
-    # Single atomic claim + state transition before commit
     transition_job_state(
         db,
         job,
@@ -110,6 +116,11 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        # Low-disk space check before synthesis begins
+        free_mb = check_free_disk_mb(work_dir)
+        if free_mb < settings.HERALD_MIN_DISK_MB:
+            raise KokoroTTSError(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
+
         script = job.script_json or {}
         segments = script.get("segments", [])
         title = job.custom_title or script.get("episode_title", "Herald Episode")
@@ -125,14 +136,20 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         logger.info(f"Script split into {len(chunks)} TTS chunks for job '{job.id}' (Voice: {voice}, Speed: {speed})")
 
         generated_chunk_paths = []
+        is_section_end_list = []
 
         for chunk in chunks:
             chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
+            is_section_end_list.append(chunk.is_section_end)
 
             if chunk.index <= job.completed_chunk_index and chunk_file.exists() and chunk_file.stat().st_size > 0:
-                logger.info(f"Skipping already completed chunk {chunk.index}/{len(chunks)}")
-                generated_chunk_paths.append(chunk_file)
-                continue
+                try:
+                    validate_audio_file(chunk_file)
+                    logger.info(f"Skipping already completed valid chunk {chunk.index}/{len(chunks)}")
+                    generated_chunk_paths.append(chunk_file)
+                    continue
+                except Exception as ve:
+                    logger.warning(f"Cached chunk {chunk.index} invalid ({ve}), re-synthesizing...")
 
             chunk_success = False
             for chunk_attempt in range(1, 3):
@@ -143,6 +160,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                         voice=voice,
                         speed=speed,
                     )
+                    validate_audio_file(chunk_file)
                     chunk_success = True
                     break
                 except Exception as ce:
@@ -150,7 +168,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                     time.sleep(1.0)
 
             if not chunk_success:
-                raise KokoroTTSError(f"Failed to synthesize chunk {chunk.index} after 2 attempts.")
+                raise KokoroTTSError(f"Failed to synthesize valid chunk {chunk.index} after 2 attempts.")
 
             job.completed_chunk_index = chunk.index
             job.last_heartbeat_at = datetime.now(UTC)
@@ -174,6 +192,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                     episode_title=title,
                     episode_description=description,
                     job_id=job.id,
+                    is_section_end_list=is_section_end_list,
                 )
                 break
             except Exception as fe:

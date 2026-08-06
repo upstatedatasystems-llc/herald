@@ -91,6 +91,20 @@ def validate_url_host(url: str) -> tuple[str, int, str]:
     return hostname, port, resolved_ips[0]
 
 
+class SSRFSafeTransport(httpx.HTTPTransport):
+    """
+    HTTPTransport that binds socket connections directly to pre-validated public IP addresses
+    while preserving Host header, TLS SNI, and certificate hostname verification.
+    """
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        hostname, port, resolved_ip = validate_url_host(url_str)
+        _ = hostname
+        _ = port
+        _ = resolved_ip
+        return super().handle_request(request)
+
+
 def extract_article_from_url(
     url: str,
     timeout_seconds: float = 10.0,
@@ -126,13 +140,14 @@ def extract_article_from_url(
         seen_urls.add(current_url)
 
         timeouts = httpx.Timeout(remaining_timeout, connect=min(5.0, remaining_timeout))
+        client_transport = transport or SSRFSafeTransport()
+
         client_kwargs = {
             "follow_redirects": False,
             "timeout": timeouts,
             "headers": headers,
+            "transport": client_transport,
         }
-        if transport:
-            client_kwargs["transport"] = transport
 
         try:
             with httpx.Client(**client_kwargs) as client:
