@@ -1,6 +1,6 @@
 """Add source and diagnostics drive artifact fields, audio_ready_at, voice, speed, model
 
-Revision ID: 005_source_and_diagnostics_drive_artifacts
+Revision ID: 005_drive_artifacts
 Revises: 004_align_orm_schema
 Create Date: 2026-08-07 11:30:00.000000
 
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = '005_source_and_diagnostics_drive_artifacts'
+revision: str = '005_drive_artifacts'
 down_revision: Union[str, None] = '004_align_orm_schema'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
