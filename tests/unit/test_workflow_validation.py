@@ -36,3 +36,23 @@ def test_validate_all_n8n_workflows():
         assert "connections" in data, f"{wf_file.name} missing 'connections' object"
         assert isinstance(data["nodes"], list), f"{wf_file.name} 'nodes' must be a list"
         assert len(data["nodes"]) > 0, f"{wf_file.name} must have at least 1 node"
+
+        if wf_file.name == "completion-dispatcher.json":
+            nodes_by_name = {n["name"]: n for n in data["nodes"]}
+            assert "Fetch Final Completion Email" in nodes_by_name
+            fetch_node = nodes_by_name["Fetch Final Completion Email"]
+            assert "/completion-email" in fetch_node["parameters"]["url"]
+
+            assert "Send Link-Only Reply" in nodes_by_name
+            reply_node = nodes_by_name["Send Link-Only Reply"]
+            assert reply_node["parameters"].get("emailType") == "html"
+            assert "html" in reply_node["parameters"]["message"]
+
+        if wf_file.name == "email-intake.json":
+            nodes_by_name = {n["name"]: n for n in data["nodes"]}
+            trigger_node = nodes_by_name["Gmail Trigger - Herald Intake"]
+            assert "-from:upstatedatasystems@gmail.com" in trigger_node["parameters"]["filters"]["q"]
+
+            ack_node = nodes_by_name["Send Submission Acknowledgment"]
+            assert ack_node["parameters"].get("emailType") == "html"
+            assert "acknowledgment_email_html" in ack_node["parameters"]["message"]

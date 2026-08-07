@@ -332,17 +332,43 @@
     },
     {
       "parameters": {
+        "method": "GET",
+        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/completion-email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.HERALD_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Fetch Final Completion Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        3720,
+        150
+      ]
+    },
+    {
+      "parameters": {
         "resource": "message",
         "operation": "reply",
         "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
-        "message": "={{ $('Claim Delivery Job (Atomic)').item.json.job.formatted_email_text }}",
-        "options": {}
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
       },
       "name": "Send Link-Only Reply",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        3720,
+        3940,
         150
       ],
       "credentials": {
@@ -374,7 +400,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        3940,
+        4160,
         250
       ]
     }
@@ -570,7 +596,7 @@
       "main": [
         [
           {
-            "node": "Send Link-Only Reply",
+            "node": "Fetch Final Completion Email",
             "type": "main",
             "index": 0
           }
@@ -578,6 +604,17 @@
         [
           {
             "node": "Record Delivery Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Final Completion Email": {
+      "main": [
+        [
+          {
+            "node": "Send Link-Only Reply",
             "type": "main",
             "index": 0
           }

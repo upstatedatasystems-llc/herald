@@ -590,37 +590,6 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     segments = script.get("segments", [])
     warnings = script.get("warnings", [])
 
-    created_iso = job.created_at.isoformat() if job.created_at else ""
-    completed_iso = job.completed_at.isoformat() if job.completed_at else None
-
-    formatted_email = format_completion_email(
-        job_id=job.id,
-        episode_title=job.custom_title or script.get("episode_title", "Herald Episode"),
-        episode_description=script.get("episode_description", ""),
-        drive_web_link=job.drive_web_link or "",
-        duration_seconds=job.audio_duration_seconds or 0,
-        file_bytes=job.audio_bytes or 0,
-        request_mode=job.request_mode,
-        source_type=job.source_type,
-        source_title=job.custom_title or script.get("episode_title"),
-        script_estimated_minutes=float(script.get("estimated_minutes", 5.0)),
-        segments_count=len(segments),
-        sha256=job.audio_sha256 or "",
-        chunk_count=job.completed_chunk_index,
-        retry_attempts=max(0, job.attempt_count),
-        drive_file_id=job.drive_file_id or "",
-        source_drive_link=job.source_drive_web_link,
-        source_drive_id=job.source_drive_file_id,
-        diagnostics_drive_link=job.diagnostics_drive_web_link,
-        diagnostics_drive_id=job.diagnostics_drive_file_id,
-        created_at_iso=created_iso,
-        completed_at_iso=completed_iso,
-        gemini_model=job.gemini_model or "gemini-3.5-flash",
-        kokoro_voice=job.kokoro_voice or job.custom_voice or "af_heart",
-        kokoro_speed=job.kokoro_speed or job.custom_speed or 1.0,
-        script_warnings=warnings,
-    )
-
     return {
         "claimed": True,
         "action": action,
@@ -651,9 +620,69 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "needs_upload": (needs_audio_upload or needs_source_upload or needs_diagnostics_upload),
             "needs_email": needs_email,
             "action": action,
-            "formatted_email_text": formatted_email["text"],
-            "formatted_email_html": formatted_email["html"],
         },
+    }
+
+
+@app.get(
+    "/api/v1/jobs/{job_id}/completion-email",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Delivery"],
+)
+def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
+    """
+    Fetch the freshly formatted completion email for a job after all Drive artifacts have been uploaded.
+    """
+    job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not (job.drive_file_id and job.source_drive_file_id and job.diagnostics_drive_file_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot generate completion email: missing required Drive artifact IDs",
+        )
+
+    script = job.script_json or {}
+    segments = script.get("segments", [])
+    warnings = script.get("warnings", [])
+
+    created_iso = job.created_at.isoformat() if job.created_at else ""
+    completed_iso = job.completed_at.isoformat() if job.completed_at else None
+
+    formatted_email = format_completion_email(
+        job_id=job.id,
+        episode_title=job.custom_title or script.get("episode_title", "Herald Episode"),
+        episode_description=script.get("episode_description", ""),
+        drive_web_link=job.drive_web_link,
+        duration_seconds=job.audio_duration_seconds or 0,
+        file_bytes=job.audio_bytes or 0,
+        request_mode=job.request_mode,
+        source_type=job.source_type,
+        source_title=job.custom_title or script.get("episode_title"),
+        script_estimated_minutes=float(script.get("estimated_minutes", 5.0)),
+        segments_count=len(segments),
+        sha256=job.audio_sha256 or "",
+        chunk_count=job.completed_chunk_index or 0,
+        retry_attempts=max(0, job.attempt_count or 0),
+        drive_file_id=job.drive_file_id,
+        source_drive_link=job.source_drive_web_link,
+        source_drive_id=job.source_drive_file_id,
+        diagnostics_drive_link=job.diagnostics_drive_web_link,
+        diagnostics_drive_id=job.diagnostics_drive_file_id,
+        created_at_iso=created_iso,
+        completed_at_iso=completed_iso,
+        gemini_model=job.gemini_model or "gemini-3.5-flash",
+        kokoro_voice=job.kokoro_voice or job.custom_voice or "af_heart",
+        kokoro_speed=job.kokoro_speed or job.custom_speed or 1.0,
+        script_warnings=warnings,
+    )
+
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "text": formatted_email["text"],
+        "html": formatted_email["html"],
     }
 
 

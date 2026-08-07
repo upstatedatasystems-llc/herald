@@ -11,7 +11,7 @@
           ]
         },
         "filters": {
-          "q": "subject:(Podcast:)"
+          "q": "in:inbox subject:(Podcast:) -from:upstatedatasystems@gmail.com"
         },
         "downloadAttachments": false
       },
@@ -43,8 +43,34 @@
           ]
         },
         "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"gmail_message_id\": \"{{ $json.id }}\",\n  \"gmail_thread_id\": \"{{ $json.threadId }}\",\n  \"sender_email\": \"{{ $json.from.value[0].address }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body_text\": \"{{ $json.text || '' }}\",\n  \"body_html\": \"{{ $json.html || '' }}\"\n}",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "gmail_message_id",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "gmail_thread_id",
+              "value": "={{ $json.threadId }}"
+            },
+            {
+              "name": "sender_email",
+              "value": "={{ $json.from.value[0].address }}"
+            },
+            {
+              "name": "subject",
+              "value": "={{ $json.subject }}"
+            },
+            {
+              "name": "body_text",
+              "value": "={{ $json.text || '' }}"
+            },
+            {
+              "name": "body_html",
+              "value": "={{ $json.html || '' }}"
+            }
+          ]
+        },
         "options": {}
       },
       "name": "Call Herald API - Intake",
@@ -105,8 +131,11 @@
         "resource": "message",
         "operation": "reply",
         "messageId": "={{ $json.gmail_message_id || $('Gmail Trigger - Herald Intake').item.json.id }}",
-        "message": "={{ $json.acknowledgment_email_text }}",
-        "options": {}
+        "emailType": "html",
+        "message": "={{ $json.acknowledgment_email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
       },
       "name": "Send Submission Acknowledgment",
       "type": "n8n-nodes-base.gmail",

@@ -44,8 +44,16 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     assert job_data["needs_audio_upload"] is True
     assert job_data["needs_source_upload"] is True
     assert job_data["needs_diagnostics_upload"] is True
+    # Email is NOT formatted at claim time
+    assert "formatted_email_text" not in job_data
+    assert "formatted_email_html" not in job_data
 
-    # 2. Record audio upload only
+    # 2. Attempting to fetch completion email before all 3 Drive IDs exist fails with 400
+    res_premature_email = client.get(f"/api/v1/jobs/{job.id}/completion-email", headers=AUTH_HEADERS)
+    assert res_premature_email.status_code == 400
+    assert "missing required Drive artifact IDs" in res_premature_email.json()["detail"]
+
+    # 3. Record audio upload only
     res_audio = client.post(
         f"/api/v1/jobs/{job.id}/drive-complete",
         headers=AUTH_HEADERS,
@@ -54,7 +62,7 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     assert res_audio.status_code == 200
     assert res_audio.json()["drive_file_id"] == "audio-drive-id-1"
 
-    # 3. Reset claimed_at to simulate a stale retry claim after audio upload
+    # 4. Reset claimed_at to simulate a stale retry claim after audio upload
     job.claimed_at = now - timedelta(minutes=20)
     db_session.commit()
 
@@ -65,7 +73,7 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     assert j2["needs_source_upload"] is True
     assert j2["needs_diagnostics_upload"] is True
 
-    # 4. Record source upload
+    # 5. Record source upload
     res_src = client.post(
         f"/api/v1/jobs/{job.id}/drive-complete",
         headers=AUTH_HEADERS,
@@ -73,7 +81,7 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     )
     assert res_src.status_code == 200
 
-    # 5. Attempt delivery-complete before diagnostics is uploaded -> should fail with 400
+    # 6. Attempt delivery-complete before diagnostics is uploaded -> should fail with 400
     res_premature = client.post(
         f"/api/v1/jobs/{job.id}/delivery-complete",
         headers=AUTH_HEADERS,
@@ -82,7 +90,7 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     assert res_premature.status_code == 400
     assert "missing required Drive artifact IDs" in res_premature.json()["detail"]
 
-    # 6. Record diagnostics upload
+    # 7. Record diagnostics upload
     res_diag = client.post(
         f"/api/v1/jobs/{job.id}/drive-complete",
         headers=AUTH_HEADERS,
@@ -90,7 +98,16 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     )
     assert res_diag.status_code == 200
 
-    # 7. Now delivery-complete succeeds!
+    # 8. Now fetching completion email succeeds and contains fresh Drive links!
+    res_email = client.get(f"/api/v1/jobs/{job.id}/completion-email", headers=AUTH_HEADERS)
+    assert res_email.status_code == 200
+    email_payload = res_email.json()
+    assert "http://drive/audio" in email_payload["html"]
+    assert "http://drive/source" in email_payload["html"]
+    assert "http://drive/diag" in email_payload["html"]
+    assert "Listen on Google Drive" in email_payload["html"]
+
+    # 9. Now delivery-complete succeeds!
     res_final = client.post(
         f"/api/v1/jobs/{job.id}/delivery-complete",
         headers=AUTH_HEADERS,

@@ -2,6 +2,28 @@ import html
 from datetime import UTC, datetime
 
 
+def get_canonical_drive_url(file_id: str | None, web_link: str | None) -> str | None:
+    """
+    Return valid Drive web link if present, or construct canonical fallback URL
+    if file_id is present. Returns None if neither is present.
+    """
+    if web_link and web_link.strip():
+        return web_link.strip()
+    if file_id and file_id.strip():
+        return f"https://drive.google.com/file/d/{file_id.strip()}/view"
+    return None
+
+
+def _format_iso_datetime(iso_str: str | None) -> str:
+    if not iso_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.strftime("%b %d, %Y %H:%M UTC")
+    except Exception:
+        return iso_str
+
+
 def format_acknowledgment_email(
     job_id: str,
     episode_title: str,
@@ -10,81 +32,83 @@ def format_acknowledgment_email(
     estimated_completion_range: str,
 ) -> dict[str, str]:
     """
-    Generate HTML-escaped acknowledgment reply email with plain-text fallback.
+    Generate HTML acknowledgment reply email with plain-text fallback.
     """
     safe_title = html.escape(episode_title or "Herald Episode")
     safe_mode = html.escape((request_mode or "standard").title())
-    safe_eta = html.escape(estimated_completion_range)
+    safe_eta = html.escape(estimated_completion_range or "10-15 minutes")
     safe_job_id = html.escape(job_id)
 
     text_body = (
-        f"Herald has accepted your podcast.\n\n"
-        f"Title: {episode_title}\n\n"
-        f"Your source was processed successfully and your episode is now queued for audio generation.\n\n"
-        f"Requested format: {request_mode.title()}\n"
-        f"Estimated episode length: {estimated_minutes} minutes\n"
-        f"Estimated completion: {estimated_completion_range}\n"
+        f"HERALD — SUBMISSION ACKNOWLEDGMENT\n\n"
+        f"Your podcast request has been accepted and queued for audio generation.\n\n"
+        f"Episode Title: {episode_title}\n"
+        f"Requested Format: {request_mode.title()}\n"
+        f"Estimated Duration: {estimated_minutes} minutes\n"
+        f"Estimated Completion: {estimated_completion_range}\n"
         f"Job ID: {job_id}\n\n"
-        f"You'll receive another email with the private Google Drive link when it is ready."
+        f"You will receive another email with your private Google Drive link as soon as audio generation completes."
     )
 
     html_body = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1f2937; background-color: #f9fafb; margin: 0; padding: 20px; }}
-  .container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; border: 1px solid #e5e7eb; overflow: hidden; font-size: 15px; }}
-  .header {{ background-color: #1e293b; color: #ffffff; padding: 24px; text-align: left; }}
-  .header h1 {{ margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }}
-  .content {{ padding: 24px; }}
-  .card {{ background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }}
-  .card-title {{ font-weight: 600; font-size: 17px; color: #0f172a; margin-bottom: 4px; }}
-  .meta-table {{ width: 100%; border-collapse: collapse; margin: 16px 0; }}
-  .meta-table td {{ padding: 8px 0; border-bottom: 1px solid #f1f5f9; }}
-  .meta-label {{ color: #64748b; font-size: 14px; width: 180px; }}
-  .meta-value {{ font-weight: 500; color: #334155; }}
-  .footer {{ padding: 16px 24px; background-color: #f1f5f9; color: #64748b; font-size: 13px; text-align: center; border-top: 1px solid #e2e8f0; }}
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Podcast Queued - Herald</title>
 </head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>Herald Submission Accepted</h1>
-    </div>
-    <div class="content">
-      <p>Herald has accepted your podcast request.</p>
-      
-      <div class="card">
-        <div class="card-title">{safe_title}</div>
-        <p style="margin:4px 0 0 0; color:#475569; font-size:14px;">Your source was processed successfully and your episode is now queued for audio generation.</p>
-      </div>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1e293b; background-color: #f8fafc; margin: 0; padding: 24px 12px;">
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+          <!-- Header -->
+          <tr>
+            <td style="background-color: #0f172a; padding: 24px; text-align: left;">
+              <div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">HERALD</div>
+              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Your podcast is in the queue</h1>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding: 24px;">
+              <h2 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; color: #0f172a;">{safe_title}</h2>
+              <p style="margin: 0 0 20px 0; font-size: 14px; color: #475569;">Your source was processed successfully and your script has been generated. Audio synthesis is now underway.</p>
+              
+              <!-- Details Table -->
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 20px; border-top: 1px solid #f1f5f9;">
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f1f5f9;">Requested Mode</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_mode}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Estimated Duration</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{estimated_minutes} minutes</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Estimated Completion</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #2563eb; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_eta}</td>
+                </tr>
+              </table>
 
-      <table class="meta-table">
-        <tr>
-          <td class="meta-label">Requested format</td>
-          <td class="meta-value">{safe_mode}</td>
-        </tr>
-        <tr>
-          <td class="meta-label">Estimated episode length</td>
-          <td class="meta-value">{estimated_minutes} minutes</td>
-        </tr>
-        <tr>
-          <td class="meta-label">Estimated completion</td>
-          <td class="meta-value">{safe_eta}</td>
-        </tr>
-        <tr>
-          <td class="meta-label">Job ID</td>
-          <td class="meta-value"><code>{safe_job_id}</code></td>
-        </tr>
-      </table>
+              <p style="margin: 0 0 16px 0; font-size: 14px; color: #475569;">You will receive another email with your private Google Drive link as soon as delivery is complete.</p>
 
-      <p style="color:#475569; font-size:14px;">You’ll receive another email with the private Google Drive link when it is ready.</p>
-    </div>
-    <div class="footer">
-      Herald Email-to-Podcast Automation System
-    </div>
-  </div>
+              <!-- De-emphasized Job ID -->
+              <div style="font-size: 12px; color: #94a3b8; background-color: #f8fafc; padding: 8px 12px; border-radius: 4px; display: inline-block;">
+                Job ID: <code style="font-family: monospace; color: #64748b;">{safe_job_id}</code>
+              </div>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 16px 24px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
+              Herald Email-to-Podcast Automation System
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>"""
 
@@ -95,7 +119,7 @@ def format_completion_email(
     job_id: str,
     episode_title: str,
     episode_description: str,
-    drive_web_link: str,
+    drive_web_link: str | None,
     duration_seconds: int,
     file_bytes: int,
     request_mode: str,
@@ -106,7 +130,7 @@ def format_completion_email(
     sha256: str,
     chunk_count: int,
     retry_attempts: int,
-    drive_file_id: str,
+    drive_file_id: str | None,
     source_drive_link: str | None,
     source_drive_id: str | None,
     diagnostics_drive_link: str | None,
@@ -119,127 +143,195 @@ def format_completion_email(
     script_warnings: list[str] | None = None,
 ) -> dict[str, str]:
     """
-    Generate HTML-escaped completion email with clean layout and plain-text fallback.
+    Generate HTML completion reply email with polished product card design and plain-text fallback.
+    Applies canonical Google Drive URL fallbacks when web_link is missing but file_id exists.
     """
+    audio_url = get_canonical_drive_url(drive_file_id, drive_web_link) or "#"
+    source_url = get_canonical_drive_url(source_drive_id, source_drive_link)
+    diag_url = get_canonical_drive_url(diagnostics_drive_id, diagnostics_drive_link)
+
     safe_title = html.escape(episode_title or "Herald Episode")
     safe_desc = html.escape(episode_description or "")
-    safe_link = html.escape(drive_web_link or "#")
+    safe_audio_url = html.escape(audio_url)
     safe_mode = html.escape((request_mode or "standard").title())
-    safe_src_type = html.escape(source_type or "email_body")
-    safe_src_title = html.escape(source_title or "Untitled Source")
+    safe_src_type = html.escape((source_type or "email_body").replace("_", " ").title())
     safe_job_id = html.escape(job_id)
     safe_sha256 = html.escape(sha256 or "N/A")
-    safe_drive_id = html.escape(drive_file_id or "N/A")
-    safe_src_link = html.escape(source_drive_link or "#") if source_drive_link else "N/A"
-    safe_diag_link = html.escape(diagnostics_drive_link or "#") if diagnostics_drive_link else "N/A"
     safe_model = html.escape(gemini_model or "gemini-3.5-flash")
     safe_voice = html.escape(kokoro_voice or "af_heart")
 
     dur_mins = duration_seconds // 60
     dur_secs = duration_seconds % 60
-    dur_str = f"{dur_mins}m {dur_secs}s"
+    dur_str = f"{dur_mins}m {dur_secs:02d}s" if dur_mins > 0 else f"{dur_secs}s"
     size_mb = f"{(file_bytes / (1024 * 1024)):.2f} MB"
+
+    created_fmt = _format_iso_datetime(created_at_iso)
+    completed_fmt = _format_iso_datetime(completed_at_iso)
+
+    proc_time_str = ""
+    if created_at_iso and completed_at_iso:
+        try:
+            t0 = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00"))
+            t1 = datetime.fromisoformat(completed_at_iso.replace("Z", "+00:00"))
+            elapsed = int((t1 - t0).total_seconds())
+            if elapsed > 0:
+                e_min = elapsed // 60
+                e_sec = elapsed % 60
+                proc_time_str = f" ({e_min}m {e_sec:02d}s processing time)"
+        except Exception:
+            pass
+
+    # Source link HTML
+    if source_url:
+        source_link_html = f'<a href="{html.escape(source_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View source</a>'
+        source_text_val = source_url
+    else:
+        source_link_html = '<span style="color: #94a3b8;">N/A</span>'
+        source_text_val = "N/A"
+
+    # Diagnostics link HTML
+    if diag_url:
+        diag_link_html = f'<a href="{html.escape(diag_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View stats</a>'
+        diag_text_val = diag_url
+    else:
+        diag_link_html = '<span style="color: #94a3b8;">N/A</span>'
+        diag_text_val = "N/A"
 
     warnings_html = ""
     if script_warnings:
         safe_warns = "<br>".join(html.escape(w) for w in script_warnings)
-        warnings_html = f"<tr><td class='meta-label'>Script Warnings</td><td class='meta-value' style='color:#dc2626;'>{safe_warns}</td></tr>"
+        warnings_html = f'<tr><td style="padding: 6px 0; font-size: 13px; color: #64748b; width: 140px;">Script Warnings</td><td style="padding: 6px 0; font-size: 13px; color: #dc2626; font-weight: 500;">{safe_warns}</td></tr>'
 
     text_body = (
-        f"READY: Your Herald podcast episode is ready!\n\n"
-        f"Title: {episode_title}\n"
-        f"Description: {episode_description}\n\n"
-        f"LISTEN:\n{drive_web_link}\n\n"
+        f"HERALD — EPISODE READY\n\n"
+        f"{episode_title}\n"
+        f"{episode_description}\n\n"
+        f"LISTEN ON GOOGLE DRIVE:\n{audio_url}\n\n"
         f"EPISODE DETAILS:\n"
-        f"- Duration: {dur_str}\n"
-        f"- File Size: {size_mb}\n"
-        f"- Requested Mode: {request_mode.title()}\n"
-        f"- Source Type: {source_type}\n"
-        f"- Source Title: {source_title or 'N/A'}\n"
-        f"- Script Estimated Duration: {script_estimated_minutes} minutes\n"
-        f"- Script Segments: {segments_count}\n\n"
+        f"Duration: {dur_str}\n"
+        f"Requested Mode: {request_mode.title()}\n"
+        f"Source Type: {source_type}\n"
+        f"Script Estimate: {script_estimated_minutes} min\n"
+        f"Segments: {segments_count}\n\n"
+        f"FILES:\n"
+        f"- Audio MP3: {audio_url}\n"
+        f"- Original Source: {source_text_val}\n"
+        f"- Diagnostics: {diag_text_val}\n\n"
         f"STATS FOR NERDS:\n"
         f"- Job ID: {job_id}\n"
         f"- SHA-256: {sha256}\n"
         f"- TTS Chunks: {chunk_count}\n"
         f"- Retry Attempts: {retry_attempts}\n"
-        f"- Drive File ID: {drive_file_id}\n"
-        f"- Source Artifact Link: {source_drive_link or 'N/A'}\n"
-        f"- Diagnostics Artifact Link: {diagnostics_drive_link or 'N/A'}\n"
-        f"- Created: {created_at_iso}\n"
-        f"- Completed: {completed_at_iso or 'Just now'}\n"
-        f"- Model: {gemini_model}\n"
-        f"- Voice/Speed: {kokoro_voice} @ {kokoro_speed}x\n"
+        f"- Gemini Model: {gemini_model}\n"
+        f"- Voice / Speed: {kokoro_voice} @ {kokoro_speed}x\n"
+        f"- Created: {created_fmt}\n"
+        f"- Completed: {completed_fmt}{proc_time_str}\n"
     )
 
     html_body = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1f2937; background-color: #f9fafb; margin: 0; padding: 20px; }}
-  .container {{ max-width: 640px; margin: 0 auto; background: #ffffff; border-radius: 8px; border: 1px solid #e5e7eb; overflow: hidden; font-size: 15px; }}
-  .header {{ background-color: #0f172a; color: #ffffff; padding: 24px; text-align: left; }}
-  .badge {{ display: inline-block; background-color: #22c55e; color: #ffffff; font-weight: 700; font-size: 12px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; margin-bottom: 8px; }}
-  .header h1 {{ margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }}
-  .content {{ padding: 24px; }}
-  .btn-container {{ text-align: center; margin: 24px 0; }}
-  .btn {{ display: inline-block; background-color: #2563eb; color: #ffffff !important; font-weight: 600; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-size: 16px; box-shadow: 0 2px 4px rgba(37,99,235,0.2); }}
-  .section-title {{ font-size: 13px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #f1f5f9; padding-bottom: 6px; margin-top: 24px; margin-bottom: 12px; }}
-  .meta-table {{ width: 100%; border-collapse: collapse; }}
-  .meta-table td {{ padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc; }}
-  .meta-label {{ color: #64748b; width: 200px; }}
-  .meta-value {{ color: #334155; font-weight: 500; word-break: break-all; }}
-  .nerd-box {{ background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; font-size: 13px; margin-top: 12px; }}
-  .footer {{ padding: 16px 24px; background-color: #f1f5f9; color: #64748b; font-size: 13px; text-align: center; border-top: 1px solid #e2e8f0; }}
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{safe_title} - Herald</title>
 </head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div class="badge">READY</div>
-      <h1>{safe_title}</h1>
-    </div>
-    <div class="content">
-      <p style="color:#475569; font-size:15px; margin-top:0;">{safe_desc}</p>
-      
-      <div class="btn-container">
-        <a href="{safe_link}" class="btn" target="_blank">Listen on Google Drive &rarr;</a>
-      </div>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1e293b; background-color: #f8fafc; margin: 0; padding: 24px 12px;">
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+          <!-- Header -->
+          <tr>
+            <td style="background-color: #0f172a; padding: 24px; text-align: left;">
+              <div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">HERALD</div>
+              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Your episode is ready</h1>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding: 24px;">
+              <h2 style="margin: 0 0 8px 0; font-size: 20px; font-weight: 700; color: #0f172a;">{safe_title}</h2>
+              <p style="margin: 0 0 24px 0; font-size: 15px; color: #475569; line-height: 1.6;">{safe_desc}</p>
+              
+              <!-- Primary CTA Button -->
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;">
+                <tr>
+                  <td align="center">
+                    <a href="{safe_audio_url}" target="_blank" style="display: inline-block; background-color: #2563eb; color: #ffffff !important; font-weight: 600; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-size: 16px; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">▶ Listen on Google Drive</a>
+                    <p style="margin: 10px 0 0 0; font-size: 13px; color: #64748b; font-weight: 500;">{dur_str} &bull; {safe_mode} &bull; {size_mb}</p>
+                  </td>
+                </tr>
+              </table>
 
-      <div class="section-title">Episode Details</div>
-      <table class="meta-table">
-        <tr><td class="meta-label">Actual Duration</td><td class="meta-value">{dur_str}</td></tr>
-        <tr><td class="meta-label">File Size</td><td class="meta-value">{size_mb}</td></tr>
-        <tr><td class="meta-label">Requested Mode</td><td class="meta-value">{safe_mode}</td></tr>
-        <tr><td class="meta-label">Source Type</td><td class="meta-value">{safe_src_type}</td></tr>
-        <tr><td class="meta-label">Source Title</td><td class="meta-value">{safe_src_title}</td></tr>
-        <tr><td class="meta-label">Script Estimated Duration</td><td class="meta-value">{script_estimated_minutes} minutes</td></tr>
-        <tr><td class="meta-label">Script Segments</td><td class="meta-value">{segments_count}</td></tr>
-      </table>
+              <!-- Episode Details Section -->
+              <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #f1f5f9; padding-bottom: 6px; margin-bottom: 12px;">Episode Details</div>
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;">
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f8fafc;">Duration</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{dur_str}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Requested Mode</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{safe_mode}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Source</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{safe_src_type}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Script Estimate</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{script_estimated_minutes} min</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Segments</td>
+                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{segments_count}</td>
+                </tr>
+              </table>
 
-      <div class="section-title">Stats for Nerds</div>
-      <div class="nerd-box">
-        <table class="meta-table">
-          <tr><td class="meta-label">Job ID</td><td class="meta-value"><code>{safe_job_id}</code></td></tr>
-          <tr><td class="meta-label">SHA-256</td><td class="meta-value"><code>{safe_sha256}</code></td></tr>
-          <tr><td class="meta-label">TTS Chunk Count</td><td class="meta-value">{chunk_count}</td></tr>
-          <tr><td class="meta-label">Retry Attempts</td><td class="meta-value">{retry_attempts}</td></tr>
-          <tr><td class="meta-label">Drive File ID</td><td class="meta-value"><code>{safe_drive_id}</code></td></tr>
-          <tr><td class="meta-label">Source Artifact</td><td class="meta-value"><a href="{safe_src_link}" target="_blank">View Source Text</a></td></tr>
-          <tr><td class="meta-label">Diagnostics Artifact</td><td class="meta-value"><a href="{safe_diag_link}" target="_blank">View Diagnostics JSON</a></td></tr>
-          <tr><td class="meta-label">Created Timestamp</td><td class="meta-value">{created_at_iso}</td></tr>
-          <tr><td class="meta-label">Completed Timestamp</td><td class="meta-value">{completed_at_iso or 'Just now'}</td></tr>
-          <tr><td class="meta-label">Gemini Model</td><td class="meta-value">{safe_model}</td></tr>
-          <tr><td class="meta-label">Kokoro Voice / Speed</td><td class="meta-value">{safe_voice} @ {kokoro_speed}x</td></tr>
-          {warnings_html}
+              <!-- Files Section -->
+              <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #f1f5f9; padding-bottom: 6px; margin-bottom: 12px;">Files</div>
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;">
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f8fafc;">Audio</td>
+                  <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{safe_audio_url}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">Listen</a></td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Original Source</td>
+                  <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{source_link_html}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Diagnostics</td>
+                  <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{diag_link_html}</td>
+                </tr>
+              </table>
+
+              <!-- Stats for Nerds Section -->
+              <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; font-size: 13px;">
+                <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">Stats for Nerds</div>
+                <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b; width: 140px;">Job ID</td><td style="padding: 4px 0; font-size: 13px; color: #334155; font-family: monospace;">{safe_job_id}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">SHA-256</td><td style="padding: 4px 0; font-size: 13px; color: #334155; font-family: monospace; word-break: break-all;">{safe_sha256}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">TTS Chunks</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{chunk_count}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Retry Attempts</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{retry_attempts}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Gemini Model</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_model}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Voice / Speed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_voice} @ {kokoro_speed}x</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Created</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{created_fmt}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Completed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{completed_fmt}{proc_time_str}</td></tr>
+                  {warnings_html}
+                </table>
+              </div>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 16px 24px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
+              Herald Email-to-Podcast Automation System
+            </td>
+          </tr>
         </table>
-      </div>
-    </div>
-    <div class="footer">
-      Herald Email-to-Podcast Automation System
-    </div>
-  </div>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>"""
 
