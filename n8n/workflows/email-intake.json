@@ -12,7 +12,8 @@
         },
         "filters": {
           "q": "subject:(Podcast:)"
-        }
+        },
+        "downloadAttachments": false
       },
       "name": "Gmail Trigger - Herald Intake",
       "type": "n8n-nodes-base.gmailTrigger",
@@ -43,7 +44,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"gmail_message_id\": \"{{ $json.id }}\",\n  \"gmail_thread_id\": \"{{ $json.threadId }}\",\n  \"sender_email\": \"{{ $json.from.value[0].address }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body_text\": \"{{ $json.text }}\",\n  \"body_html\": \"{{ $json.html }}\"\n}",
+        "jsonBody": "={\n  \"gmail_message_id\": \"{{ $json.id }}\",\n  \"gmail_thread_id\": \"{{ $json.threadId }}\",\n  \"sender_email\": \"{{ $json.from.value[0].address }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body_text\": \"{{ $json.text || '' }}\",\n  \"body_html\": \"{{ $json.html || '' }}\"\n}",
         "options": {}
       },
       "name": "Call Herald API - Intake",
@@ -76,7 +77,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://herald-api:8000/api/v1/script/generate",
+        "url": "http://herald-api:8000/api/v1/script/generate",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -98,6 +99,28 @@
         1000,
         250
       ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $json.gmail_message_id || $('Gmail Trigger - Herald Intake').item.json.id }}",
+        "message": "={{ $json.acknowledgment_email_text }}",
+        "options": {}
+      },
+      "name": "Send Submission Acknowledgment",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1250,
+        250
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
     }
   ],
   "connections": {
@@ -128,6 +151,17 @@
         [
           {
             "node": "Call Herald API - Generate Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Herald API - Generate Script": {
+      "main": [
+        [
+          {
+            "node": "Send Submission Acknowledgment",
             "type": "main",
             "index": 0
           }

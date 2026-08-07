@@ -9,6 +9,8 @@ import httpx
 from herald.config import settings
 from herald.tts.base import BaseTTSEngine
 
+from datetime import UTC, datetime, timedelta
+
 logger = logging.getLogger("herald.tts.kokoro")
 
 
@@ -20,6 +22,7 @@ class KokoroClient(BaseTTSEngine):
     """
     Kokoro-FastAPI engine client over internal OpenAI-compatible speech endpoint.
     """
+    _last_successful_probe_at: datetime | None = None
 
     def __init__(
         self,
@@ -33,11 +36,13 @@ class KokoroClient(BaseTTSEngine):
 
     def health_check(self) -> dict[str, Any]:
         """
-        Verify Kokoro container accessibility, model presence, FFmpeg availability, and test inference.
+        Verify Kokoro container accessibility (/v1/models), FFmpeg availability, and test inference status.
+        Supports bounded grace period during active inference saturation.
         """
         status = {
             "healthy": False,
             "kokoro_api": False,
+            "degraded": False,
             "ffmpeg": False,
             "model_path_exists": False,
             "error": None,
@@ -55,20 +60,32 @@ class KokoroClient(BaseTTSEngine):
         if model_path.exists():
             status["model_path_exists"] = True
 
-        # Check HTTP health
+        # Probe /v1/models directly (v0.7.1 API)
+        now = datetime.now(UTC)
+        grace_seconds = getattr(settings, "KOKORO_HEALTH_GRACE_SECONDS", 120)
+
         try:
-            with httpx.Client(timeout=5.0) as client:
-                # Try OpenAI speech endpoint or root / health
-                resp = client.get(f"{self.base_url}/health")
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.get(f"{self.base_url}/models")
                 if resp.status_code == 200:
                     status["kokoro_api"] = True
+                    KokoroClient._last_successful_probe_at = now
                 else:
-                    # Fallback check models endpoint
-                    resp_models = client.get(f"{self.base_url}/models")
-                    if resp_models.status_code == 200:
-                        status["kokoro_api"] = True
+                    status["error"] = f"Kokoro /v1/models probe returned HTTP {resp.status_code}"
+        except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
+            last_good = KokoroClient._last_successful_probe_at
+            if last_good and (now - last_good).total_seconds() <= grace_seconds:
+                logger.info(
+                    f"Kokoro probe timed out during active inference window ({e}), returning degraded healthy state (last successful: {last_good.isoformat()})"
+                )
+                status["kokoro_api"] = True
+                status["degraded"] = True
+            else:
+                logger.warning(f"Kokoro probe timed out and grace period expired ({e})")
+                status["error"] = f"Kokoro probe timeout: {e}"
         except Exception as e:
             logger.warning(f"Kokoro API endpoint '{self.base_url}' health check failed: {e}")
+            status["error"] = str(e)
 
         if status["ffmpeg"] and (status["kokoro_api"] or os.environ.get("HERALD_MOCK_TTS") == "1"):
             status["healthy"] = True

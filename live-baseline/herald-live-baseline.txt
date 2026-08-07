@@ -1,0 +1,288 @@
+============================================================
+HERALD LIVE PRODUCTION BASELINE AUDIT
+Generated: 2026-08-07T15:43:34+00:00
+============================================================
+
+==================== 1. HOST ====================
+Hostname: purgatory02
+OS:
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+Architecture: aarch64
+Kernel: 6.17.0-1019-oracle
+CPU count: 1
+
+--- Memory ---
+               total        used        free      shared  buff/cache   available
+Mem:           5.8Gi       2.1Gi       980Mi        36Mi       2.9Gi       3.6Gi
+Swap:          2.0Gi       215Mi       1.8Gi
+
+--- Swap ---
+NAME      TYPE SIZE USED PRIO
+/swapfile file   2G 216M   -2
+
+--- Root filesystem ---
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        45G   22G   24G  48% /
+
+==================== 2. DOCKER ====================
+Docker version 29.7.2, build a7dcaa6
+Docker Compose version v5.4.0
+
+--- Compose services ---
+postgres
+herald-migration
+herald-api
+kokoro
+herald-worker
+n8n
+
+--- Current container state ---
+NAME               IMAGE                                      COMMAND                  SERVICE            CREATED        STATUS                    PORTS
+herald-api         herald-herald-api                          "uvicorn apps.api.ma…"   herald-api         20 hours ago   Up 20 hours (healthy)     127.0.0.1:8000->8000/tcp
+herald-kokoro      ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1   "./entrypoint.sh"        kokoro             19 hours ago   Up 19 hours (healthy)     
+herald-migration   herald-herald-migration                    "alembic upgrade head"   herald-migration   20 hours ago   Exited (0) 20 hours ago   
+herald-n8n         docker.n8n.io/n8nio/n8n:1.123.69           "tini -- /docker-ent…"   n8n                15 hours ago   Up 15 hours               127.0.0.1:5678->5678/tcp
+herald-postgres    postgres:16-alpine                         "docker-entrypoint.s…"   postgres           20 hours ago   Up 20 hours (healthy)     5432/tcp
+herald-worker      herald-herald-worker                       "python -m apps.work…"   herald-worker      20 hours ago   Up 20 hours               
+
+==================== 3. GIT / REPOSITORY ====================
+--- Local HEAD ---
+d1d3cccb71e1db9db368613483738d632ecbb705 fix(retries-delivery-ops): complete stage retries, delivery claim actions, ssrf transport, and audio validation
+
+--- origin/main ---
+d1d3cccb71e1db9db368613483738d632ecbb705 fix(retries-delivery-ops): complete stage retries, delivery claim actions, ssrf transport, and audio validation
+
+--- Local working-tree changes ---
+ M compose.yaml
+?? compose.yaml.before-kokoro-fix
+?? compose.yaml.before-model-volume-fix
+?? compose.yaml.before-n8n-env-settings
+?? compose.yaml.before-n8n-upgrade
+
+--- Local changes vs checked-out commit ---
+ compose.yaml | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+--- Commits on origin/main not yet in local HEAD ---
+
+--- File changes from current HEAD to origin/main ---
+
+==================== 4. LOCAL COMPOSE BASELINE ====================
+55:    image: docker.n8n.io/n8nio/n8n:1.123.69
+83:      N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
+85:      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+86:      N8N_GIT_NODE_DISABLE_BARE_REPOS: "true"
+91:      EMAIL_ATTACHMENT_MAX_MB: ${EMAIL_ATTACHMENT_MAX_MB:-18}
+101:    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1
+119:      test: ["CMD-SHELL", "curl -f http://localhost:8880/v1/models || exit 1"]
+
+==================== 5. ORIGIN/MAIN COMPOSE BASELINE ====================
+55:    image: docker.n8n.io/n8nio/n8n:1.50.0
+83:      N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
+89:      EMAIL_ATTACHMENT_MAX_MB: ${EMAIL_ATTACHMENT_MAX_MB:-18}
+99:    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.3
+115:      - kokoro_models:/app/api/src/models
+119:      test: ["CMD-SHELL", "curl -f http://localhost:8880/v1/models || exit 1"]
+205:  kokoro_models:
+
+==================== 6. ACTUAL RUNNING IMAGES ====================
+--- postgres ---
+name=/herald-postgres image=postgres:16-alpine image_id=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777 status=running health=healthy
+--- n8n ---
+name=/herald-n8n image=docker.n8n.io/n8nio/n8n:1.123.69 image_id=sha256:53fb504e521052017f43013131062fc18f392aef125b34b1d9deae24527604c9 status=running health=n/a
+--- kokoro ---
+name=/herald-kokoro image=ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1 image_id=sha256:2ff7f4d5ecd43efbd4216ee3f6f17f6d99693dbf0d3e19bac65e8adc2e9927cc status=running health=healthy
+--- herald-api ---
+name=/herald-api image=herald-herald-api image_id=sha256:e7e0d3ac8743bb6367a305993c791eb3edf965b7869cee6cacbf673e32b86be1 status=running health=healthy
+--- herald-worker ---
+name=/herald-worker image=herald-herald-worker image_id=sha256:db4a42c0a85c349203e80caddb1adc1d79bc8697ae91a6022464a7952c3ac149 status=running health=n/a
+
+==================== 7. N8N LIVE VERSION / CONFIG ====================
+1.123.69
+
+--- Safe n8n runtime environment ---
+N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+N8N_CONCURRENCY_PRODUCTION_LIMIT=1
+TZ=America/New_York
+N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+
+==================== 8. KOKORO LIVE IMAGE / HEALTH ====================
+running_image=ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1
+os=linux arch=arm64 repo_digests=["ghcr.io/remsky/kokoro-fastapi-cpu@sha256:2ff7f4d5ecd43efbd4216ee3f6f17f6d99693dbf0d3e19bac65e8adc2e9927cc"]
+
+--- Docker healthcheck configured on live Kokoro container ---
+{"Test":["CMD-SHELL","curl -f http://localhost:8880/v1/models || exit 1"],"Interval":15000000000,"Timeout":5000000000,"Retries":3}
+
+--- Direct /v1/models test over Docker network ---
+HTTP: 200
+Response: {"object":"list","data":[{"id":"tts-1","object":"model","created":1686935002,"owned_by":"kokoro"},{"id":"tts-1-hd","object":"model","created":1686935002,"owned_by":"kokoro"},{"id":"kokoro","object":"model","created":1686935002,"owned_by":"kokoro"},{"id":"gpt-4o-mini-tts","object":"model","created":1686935002,"owned_by":"kokoro"}]}
+
+==================== 9. SAFE HERALD ENV SETTINGS ====================
+N8N_CONCURRENCY_PRODUCTION_LIMIT=1
+N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+GEMINI_MODEL=gemini-3.5-flash
+KOKORO_BASE_URL=http://kokoro:8880/v1
+KOKORO_VOICE=af_heart
+KOKORO_SPEED=1.0
+MAX_ACTIVE_TTS_JOBS=1
+EMAIL_ATTACHMENT_MAX_MB=18
+LOCAL_COMPLETE_RETENTION_HOURS=48
+
+==================== 10. HOST PORT EXPOSURE ====================
+LISTEN 0      4096       127.0.0.1:5678      0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:8000      0.0.0.0:*          
+
+Expected production posture:
+5678 = localhost/private admin only
+8000 = localhost only
+8880 = NOT published on host
+
+==================== 11. WORKER RUNTIME ====================
+Python 3.12.13
+ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
+
+==================== 12. DATABASE MIGRATION STATE ====================
+--- Alembic revision ---
+     version_num      
+----------------------
+ 004_align_orm_schema
+(1 row)
+
+
+--- Existing delivery / retry / proposed artifact columns ---
+       column_name       |     data_type     
+-------------------------+-------------------
+ audio_sha256            | character varying
+ completed_chunk_index   | integer
+ delivery_attempt_count  | integer
+ synthesis_attempt_count | integer
+(4 rows)
+
+
+--- Current job status counts ---
+  status  | count 
+----------+-------
+ COMPLETE |     2
+(1 row)
+
+
+==================== 13. CURRENT CODE FEATURE PRESENCE ====================
+herald/audio/artifact_generator.py                                     local=NO  origin/main=NO 
+herald/services/eta_calculator.py                                      local=NO  origin/main=NO 
+herald/services/email_formatter.py                                     local=NO  origin/main=NO 
+migrations/versions/005_source_and_diagnostics_drive_artifacts.py      local=NO  origin/main=NO 
+n8n/workflows/email-intake.json                                        local=YES origin/main=YES
+n8n/workflows/completion-dispatcher.json                               local=YES origin/main=YES
+
+==================== 14. MAKEFILE OPERATIONS ====================
+3:help:
+17:build:
+18:	docker compose build
+20:up:
+21:	docker compose up -d
+23:down:
+24:	docker compose down
+26:restart:
+27:	docker compose restart
+29:logs:
+30:	docker compose logs -f --tail=100
+32:ps:
+33:	docker compose ps
+35:migrate:
+36:	docker compose run --rm herald-migration
+38:test:
+41:test-postgres:
+44:readiness:
+47:smoke:
+48:	python scripts/smoke_test.py
+50:status:
+51:	python scripts/status.py
+53:backup:
+56:restore-test:
+
+==================== 15. RECENT HEALTH LOG SIGNALS ====================
+herald-kokoro  | INFO:     172.18.0.5:50668 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:43382 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:58438 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:58438 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:54376 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:54918 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:54918 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:35174 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:43562 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:43562 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:58174 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:55548 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:55548 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:59440 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:53358 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:53358 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:42762 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:34100 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:34100 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:49350 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:58202 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:58202 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:60242 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:36538 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:36538 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:39224 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:60578 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:60578 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:58312 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:44054 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:44054 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:55360 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:49152 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:49152 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:42542 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:43740 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:43740 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:45722 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:54130 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:54130 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:39860 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:34530 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:34530 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:56380 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:35484 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:35484 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:54340 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:34478 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:34478 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:33236 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:43654 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:43654 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:48504 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:49010 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:49010 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:53162 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:47384 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:47384 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:37670 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:59972 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:59972 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:60184 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:56878 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:56878 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:36578 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:53082 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:53082 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:53624 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:41336 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:41336 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:60758 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:57204 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:57204 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:39368 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:39810 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:39810 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     127.0.0.1:43100 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:41380 - "GET /v1/health HTTP/1.1" 404 Not Found
+herald-kokoro  | INFO:     172.18.0.5:41380 - "GET /v1/models HTTP/1.1" 200 OK
+herald-kokoro  | INFO:     172.18.0.5:57990 - "GET /v1/models HTTP/1.1" 200 OK
+
+============================================================
+END OF AUDIT
+============================================================

@@ -40,30 +40,42 @@ def test_delivery_claim_endpoint_and_idempotency(db_session, monkeypatch):
     assert res.status_code == 200
     data = res.json()
     assert data["claimed"] is True
-    assert data["action"] == "upload_then_email"
+    assert data["action"] == "deliver_artifacts_and_email"
     assert data["job"]["id"] == job_id
-    assert data["job"]["needs_upload"] is True
+    assert data["job"]["needs_audio_upload"] is True
+    assert data["job"]["needs_source_upload"] is True
+    assert data["job"]["needs_diagnostics_upload"] is True
     assert data["job"]["needs_email"] is True
     assert isinstance(data["job"]["script_json"], dict)
 
     res_drive = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={"drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
+        json={"artifact_type": "audio", "drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
     )
     assert res_drive.status_code == 200
     assert res_drive.json()["status"] == JobState.DELIVERING.value
 
+    # Record remaining source and diagnostics Drive IDs
+    client.post(
+        f"/api/v1/jobs/{job_id}/drive-complete",
+        json={"artifact_type": "source", "source_drive_file_id": "source-123", "source_drive_web_link": "https://drive.google.com/source-123"},
+    )
+    client.post(
+        f"/api/v1/jobs/{job_id}/drive-complete",
+        json={"artifact_type": "diagnostics", "diagnostics_drive_file_id": "diag-123", "diagnostics_drive_web_link": "https://drive.google.com/diag-123"},
+    )
+
     # Repeating drive-complete with same ID -> 200 OK
     res_repeat = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={"drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
+        json={"artifact_type": "audio", "drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
     )
     assert res_repeat.status_code == 200
 
     # Repeating drive-complete with conflicting ID -> 409 Conflict
     res_conflict = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={"drive_file_id": "file-conflicting-999", "drive_web_link": "https://drive.google.com/file/d/file-999"},
+        json={"artifact_type": "audio", "drive_file_id": "file-conflicting-999", "drive_web_link": "https://drive.google.com/file/d/file-999"},
     )
     assert res_conflict.status_code == 409
 
@@ -99,6 +111,10 @@ def test_no_duplicate_gmail_delivery_and_action(db_session, monkeypatch):
         local_audio_path="/data/herald/output/test_delivered.mp3",
         drive_file_id="drive-123",
         drive_web_link="https://drive.google.com/file/d/drive-123",
+        source_drive_file_id="source-123",
+        source_drive_web_link="https://drive.google.com/source-123",
+        diagnostics_drive_file_id="diag-123",
+        diagnostics_drive_web_link="https://drive.google.com/diag-123",
         gmail_result_message_id="gmail-sent-777",
         delivered_at=datetime.now(UTC),
         status=JobState.DELIVERING.value,

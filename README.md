@@ -5,19 +5,22 @@
 
 Herald is a cloud-hosted email-to-podcast automation system designed to run continuously on a resource-conscious ARM64 cloud server (such as Oracle Cloud Infrastructure Ampere A1 with 1 OCPU and 6 GB RAM).
 
-When an authorized user sends or forwards an email or article link to a dedicated inbox, Herald automatically normalizes the text, generates a schema-constrained podcast narration script using Gemini AI, synthesizes single-host speech locally using Kokoro TTS, normalizes audio using FFmpeg, uploads the finished MP3 to Google Drive, and emails the user back with the episode link and optional attachment.
+When an authorized user sends or forwards an email or article link to a dedicated inbox, Herald automatically normalizes the text, generates a schema-constrained podcast narration script using Gemini AI (`gemini-3.5-flash`), sends an immediate submission acknowledgment reply with an estimated completion time, synthesizes single-host speech locally using Kokoro TTS (`ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`), normalizes audio using FFmpeg, uploads 3 canonical artifacts (`.mp3`, `_source.txt`, `_diagnostics.json`) to Google Drive, and emails the user back with a formatted private Drive link.
 
 ---
 
 ## Key Features
 
 - **Email Intake & Parser**: Accepts plain text, HTML emails, forwarded newsletters, or a single article URL.
+- **Submission Acknowledgment Email**: Replies immediately upon intake and script generation with episode title, requested format, estimated duration, and ETA range.
+- **3 Canonical Drive Artifacts**: Uploads `<basename>.mp3`, `<basename>_source.txt`, and `<basename>_diagnostics.json` independently and idempotently to the configured Google Drive folder.
+- **Link-Only Delivery**: Permanently link-only audio delivery with rich HTML + plain-text fallback formatting.
 - **SSRF Protection**: Resolves DNS before connection and strictly blocks loopback, private, link-local, and cloud metadata IPs.
 - **Durable Job Queue**: Uses PostgreSQL with strict state machine transitions (`RECEIVED` -> `VALIDATING` -> `EXTRACTING` -> `SOURCE_READY` -> `SCRIPTING` -> `SCRIPT_READY` -> `QUEUED` -> `SYNTHESIZING` -> `ENCODING` -> `AUDIO_READY` -> `UPLOADING` -> `DELIVERING` -> `COMPLETE`).
 - **Resumable Worker**: Worker claims jobs exclusively (`FOR UPDATE SKIP LOCKED`), chunks scripts on sentence boundaries, tracks chunk progress, and resumes from crash state without re-generating completed audio.
-- **Local ARM64 CPU TTS**: Speech synthesis powered by Kokoro-82M via ONNX Runtime without requiring GPU hardware.
+- **Local ARM64 CPU TTS**: Speech synthesis powered by Kokoro-82M via ONNX Runtime without requiring GPU hardware, with bounded readiness grace period during CPU inference saturation.
 - **Broadcast Audio Assembly**: Concatenates WAV chunks, applies integrated spoken-word loudness normalization (`loudnorm`), encodes 64k mono MP3, and embeds ID3 metadata.
-- **Google Drive & Gmail Integration**: Managed via version-controlled n8n workflows.
+- **Google Drive & Gmail Integration**: Managed via version-controlled n8n 1.123.69 workflows.
 
 ---
 
@@ -28,11 +31,12 @@ When an authorized user sends or forwards an email or article link to a dedicate
 2. n8n detects email & checks sender allowlist
 3. Herald API cleans body text / extracts URL safely (SSRF protected)
 4. Gemini API returns structured JSON podcast script
-5. Job queued in PostgreSQL
-6. Herald Worker claims job & generates audio via Kokoro TTS
-7. FFmpeg normalizes loudness & encodes mono MP3
-8. n8n uploads MP3 to Google Drive folder "Herald Episodes"
-9. n8n emails sender completion reply with Drive link & MP3 attachment
+5. Herald sends submission acknowledgment reply with completion ETA range
+6. Job queued in PostgreSQL
+7. Herald Worker claims job & generates audio via Kokoro TTS
+8. FFmpeg normalizes loudness & encodes mono MP3
+9. n8n uploads MP3, source text, and diagnostics JSON to Google Drive
+10. n8n emails sender completion reply with private Drive link & episode stats
 ```
 
 ---

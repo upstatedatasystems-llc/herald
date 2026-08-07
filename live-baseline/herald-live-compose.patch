@@ -1,0 +1,46 @@
+diff --git a/compose.yaml b/compose.yaml
+index ad580b9..8eea8d4 100644
+--- a/compose.yaml
++++ b/compose.yaml
+@@ -52,7 +52,7 @@ services:
+       - herald-backend
+ 
+   n8n:
+-    image: docker.n8n.io/n8nio/n8n:1.50.0
++    image: docker.n8n.io/n8nio/n8n:1.123.69
+     container_name: herald-n8n
+     restart: unless-stopped
+     security_opt:
+@@ -82,6 +82,8 @@ services:
+       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Required N8N_ENCRYPTION_KEY environment variable}
+       N8N_CONCURRENCY_PRODUCTION_LIMIT: 1
+       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
++      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
++      N8N_GIT_NODE_DISABLE_BARE_REPOS: "true"
+       TZ: ${TZ:-America/New_York}
+       HERALD_API_KEY: ${HERALD_API_KEY:?Required HERALD_API_KEY environment variable}
+       GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+@@ -96,7 +98,7 @@ services:
+       - herald-backend
+ 
+   kokoro:
+-    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.3
++    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1
+     container_name: herald-kokoro
+     restart: unless-stopped
+     security_opt:
+@@ -111,8 +113,6 @@ services:
+         limits:
+           cpus: "1.00"
+           memory: 2048M
+-    volumes:
+-      - kokoro_models:/app/api/src/models
+     networks:
+       - herald-backend
+     healthcheck:
+@@ -202,5 +202,4 @@ networks:
+ volumes:
+   postgres_data:
+   n8n_data:
+-  kokoro_models:
+   work_data:

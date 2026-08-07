@@ -15,25 +15,25 @@ help:
 	@echo "  make restore-test   Execute disposable backup restore test"
 
 build:
-	docker compose build
+	docker compose -f compose.yaml build
 
 up:
-	docker compose up -d
+	docker compose -f compose.yaml up -d
 
 down:
-	docker compose down
+	docker compose -f compose.yaml down
 
 restart:
-	docker compose restart
+	docker compose -f compose.yaml restart
 
 logs:
-	docker compose logs -f --tail=100
+	docker compose -f compose.yaml logs -f --tail=100
 
 ps:
-	docker compose ps
+	docker compose -f compose.yaml ps
 
 migrate:
-	docker compose run --rm herald-migration
+	docker compose -f compose.yaml run --rm herald-migration
 
 test:
 	python -m pytest -v tests/
@@ -45,10 +45,10 @@ readiness:
 	curl -f http://127.0.0.1:8000/readiness
 
 smoke:
-	python scripts/smoke_test.py
+	docker compose -f compose.yaml exec -T herald-worker python scripts/smoke_test.py || python scripts/smoke_test.py
 
 status:
-	python scripts/status.py
+	docker compose -f compose.yaml exec -T herald-worker python scripts/status.py || python scripts/status.py
 
 backup:
 	bash scripts/backup.sh

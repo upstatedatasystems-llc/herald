@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # Gemini
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_MODEL: str = "gemini-3.5-flash"
     GEMINI_TEMPERATURE: float = 0.3
     GEMINI_MAX_OUTPUT_TOKENS: int = 4096
     GEMINI_TIMEOUT_SECONDS: int = 60
@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     KOKORO_MODEL_PATH: str = "/opt/herald/models/kokoro"
     MAX_ACTIVE_TTS_JOBS: int = 1
     TTS_MAX_CHUNK_CHARS: int = 500
+    KOKORO_HEALTH_GRACE_SECONDS: int = 120
+
+    # ETA Calculation
+    TTS_ESTIMATED_REALTIME_FACTOR: float = 2.5
+    DELIVERY_ESTIMATED_OVERHEAD_SECONDS: int = 60
 
     # Directives Bounds
     ALLOWED_VOICES: str = "af_heart,af_bella,af_sarah,am_adam,am_michael"
@@ -56,7 +61,6 @@ class Settings(BaseSettings):
 
     # Gmail Intake & Allowed Senders
     EMAIL_ALLOWED_SENDERS: str = ""
-    EMAIL_ATTACHMENT_MAX_MB: int = 18
     LOCAL_COMPLETE_RETENTION_HOURS: int = 48
 
     def get_database_url(self) -> str:

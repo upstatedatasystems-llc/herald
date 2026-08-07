@@ -71,5 +71,5 @@ def test_failure_matrix_drive_retry_reuses_existing_file(db_session, monkeypatch
     assert res.status_code == 200
     data = res.json()
     assert data["claimed"] is True
-    assert data["job"]["needs_upload"] is False
+    assert data["job"]["needs_audio_upload"] is False
     assert data["job"]["drive_file_id"] == "existing-drive-file-id"

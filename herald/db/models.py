@@ -89,10 +89,18 @@ class PodcastJob(Base):
     audio_bytes = Column(BigInteger, nullable=True)
     audio_sha256 = Column(String(64), nullable=True)
     audio_duration_seconds = Column(Integer, nullable=True)
+    audio_ready_at = Column(DateTime(timezone=True), nullable=True)
+    kokoro_voice = Column(String(50), nullable=True)
+    kokoro_speed = Column(Float, nullable=True)
+    gemini_model = Column(String(50), nullable=True)
 
     # Delivery & Google Drive metadata
     drive_file_id = Column(String(255), nullable=True)
     drive_web_link = Column(String(512), nullable=True)
+    source_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    source_drive_web_link = Column(String(512), nullable=True)
+    diagnostics_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    diagnostics_drive_web_link = Column(String(512), nullable=True)
     drive_job_key = Column(String(100), nullable=True, index=True)
     gmail_result_message_id = Column(String(255), nullable=True)
     drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)

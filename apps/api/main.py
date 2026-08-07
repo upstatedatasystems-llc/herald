@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from herald.audio.artifact_generator import (
+    ensure_source_artifact,
+    generate_diagnostics_artifact,
+    get_artifact_filenames,
+)
 from herald.audio.ffmpeg_builder import check_free_disk_mb
 from herald.config import settings
 from herald.db.connection import get_db
@@ -25,6 +30,11 @@ from herald.extraction.url_extractor import (
     extract_article_from_url,
 )
 from herald.gemini.client import GeminiError, generate_podcast_script
+from herald.services.email_formatter import (
+    format_acknowledgment_email,
+    format_completion_email,
+)
+from herald.services.eta_calculator import calculate_job_eta
 from herald.tts.kokoro_client import KokoroClient
 
 app = FastAPI(
@@ -87,8 +97,13 @@ class GenerateScriptRequest(BaseModel):
 
 
 class DriveCompleteRequest(BaseModel):
-    drive_file_id: str = Field(..., description="Uploaded Google Drive file ID")
-    drive_web_link: str = Field(..., description="Web link to Google Drive file")
+    artifact_type: str = Field(default="audio", description="Artifact type: audio, source, or diagnostics")
+    drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for audio MP3")
+    drive_web_link: str | None = Field(None, description="Web link to audio Google Drive file")
+    source_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for source text")
+    source_drive_web_link: str | None = Field(None, description="Web link to source text Google Drive file")
+    diagnostics_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for diagnostics JSON")
+    diagnostics_drive_web_link: str | None = Field(None, description="Web link to diagnostics JSON Google Drive file")
     drive_job_key: str | None = Field(None, description="Herald job key stored in Drive appProperties")
 
 
@@ -104,23 +119,38 @@ class DeliveryFailedRequest(BaseModel):
 class JobStatusResponse(BaseModel):
     id: str
     gmail_message_id: str
+    gmail_thread_id: str | None
     sender_email: str
     request_mode: str
     source_type: str
+    source_url: str | None
     status: str
     attempt_count: int
+    synthesis_attempt_count: int
+    delivery_attempt_count: int
     completed_chunk_index: int
     local_audio_path: str | None
     audio_bytes: int | None
+    audio_sha256: str | None
     audio_duration_seconds: int | None
     drive_file_id: str | None
     drive_web_link: str | None
+    source_drive_file_id: str | None
+    source_drive_web_link: str | None
+    diagnostics_drive_file_id: str | None
+    diagnostics_drive_web_link: str | None
     drive_job_key: str | None
     gmail_result_message_id: str | None
+    kokoro_voice: str | None
+    kokoro_speed: float | None
+    gemini_model: str | None
     error_code: str | None
     error_detail: str | None
     created_at: str
     updated_at: str
+    audio_ready_at: str | None
+    drive_uploaded_at: str | None
+    delivered_at: str | None
     completed_at: str | None
 
 
@@ -401,18 +431,45 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-api")
         transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-api")
 
+        eta_info = calculate_job_eta(db, job)
+        ack = format_acknowledgment_email(
+            job_id=job.id,
+            episode_title=script.episode_title,
+            request_mode=job.request_mode,
+            estimated_minutes=script.estimated_minutes,
+            estimated_completion_range=eta_info["estimated_completion_range"],
+        )
+
         return {
             "job_id": job.id,
+            "gmail_message_id": job.gmail_message_id,
             "status": job.status,
             "episode_title": script.episode_title,
+            "request_mode": job.request_mode,
             "estimated_minutes": script.estimated_minutes,
+            "estimated_completion_range": eta_info["estimated_completion_range"],
             "segments_count": len(script.segments),
+            "acknowledgment_email_text": ack["text"],
+            "acknowledgment_email_html": ack["html"],
         }
     except GeminiError as e:
         transition_job_state(
             db, job, JobState.FAILED_RETRYABLE.value, component="herald-api", message=str(e), error_category="GEMINI_SCRIPT_FAILURE"
         )
         raise HTTPException(status_code=500, detail=f"Gemini scripting failed: {e}")
+
+
+@app.get(
+    "/api/v1/jobs/{job_id}/eta",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Jobs"],
+)
+def get_job_eta_endpoint(job_id: str, db: Session = Depends(get_db)):
+    """Calculate best-effort job completion ETA range accounting for queue work ahead."""
+    job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return calculate_job_eta(db, job)
 
 
 @app.post(
@@ -424,7 +481,7 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     """
     Atomically select 1 eligible delivery job using SELECT FOR UPDATE SKIP LOCKED on 1 row.
     Never claims failures from INTAKE, EXTRACTING, SCRIPTING, SYNTHESIZING, or ENCODING.
-    Returns explicit action ('upload_then_email', 'email_only', 'complete_without_resend', or 'none').
+    Returns canonical filenames, local paths, Drive IDs, and explicit upload flags.
     """
     now = datetime.now(UTC)
     stale_cutoff = now - timedelta(minutes=15)
@@ -484,18 +541,36 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     job.delivery_attempt_count += 1
     job.updated_at = now
 
-    has_drive_file = bool(job.drive_file_id and job.drive_web_link)
-    already_delivered = bool(job.delivered_at or job.gmail_result_message_id)
+    work_dir = Path(settings.HERALD_WORK_DIR)
+    output_dir = work_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if already_delivered:
+    # Regenerate local source and diagnostics files if missing locally
+    ensure_source_artifact(job, output_dir)
+    names = get_artifact_filenames(job)
+
+    local_audio_path = job.local_audio_path or str(output_dir / names["audio_filename"])
+    local_source_path = str(output_dir / names["source_filename"])
+    local_diagnostics_path = str(output_dir / names["diagnostics_filename"])
+
+    generate_diagnostics_artifact(job, output_dir)
+
+    needs_audio_upload = not bool(job.drive_file_id and job.drive_web_link)
+    needs_source_upload = not bool(job.source_drive_file_id and job.source_drive_web_link)
+    needs_diagnostics_upload = not bool(job.diagnostics_drive_file_id and job.diagnostics_drive_web_link)
+    needs_email = not bool(job.delivered_at or job.gmail_result_message_id)
+
+    if needs_email or needs_audio_upload or needs_source_upload or needs_diagnostics_upload:
+        action = "deliver_artifacts_and_email"
+        if job.status == JobState.DELIVERING.value:
+            target_state = JobState.DELIVERING.value
+        elif needs_audio_upload or needs_source_upload or needs_diagnostics_upload:
+            target_state = JobState.UPLOADING.value
+        else:
+            target_state = JobState.DELIVERING.value
+    else:
         action = "complete_without_resend"
         target_state = JobState.COMPLETE.value
-    elif has_drive_file:
-        action = "email_only"
-        target_state = JobState.DELIVERING.value
-    else:
-        action = "upload_then_email"
-        target_state = JobState.UPLOADING.value
 
     old_state = job.status
     if old_state != target_state:
@@ -511,8 +586,40 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
 
-    needs_upload = not has_drive_file
-    needs_email = not already_delivered
+    script = job.script_json or {}
+    segments = script.get("segments", [])
+    warnings = script.get("warnings", [])
+
+    created_iso = job.created_at.isoformat() if job.created_at else ""
+    completed_iso = job.completed_at.isoformat() if job.completed_at else None
+
+    formatted_email = format_completion_email(
+        job_id=job.id,
+        episode_title=job.custom_title or script.get("episode_title", "Herald Episode"),
+        episode_description=script.get("episode_description", ""),
+        drive_web_link=job.drive_web_link or "",
+        duration_seconds=job.audio_duration_seconds or 0,
+        file_bytes=job.audio_bytes or 0,
+        request_mode=job.request_mode,
+        source_type=job.source_type,
+        source_title=job.custom_title or script.get("episode_title"),
+        script_estimated_minutes=float(script.get("estimated_minutes", 5.0)),
+        segments_count=len(segments),
+        sha256=job.audio_sha256 or "",
+        chunk_count=job.completed_chunk_index,
+        retry_attempts=max(0, job.attempt_count),
+        drive_file_id=job.drive_file_id or "",
+        source_drive_link=job.source_drive_web_link,
+        source_drive_id=job.source_drive_file_id,
+        diagnostics_drive_link=job.diagnostics_drive_web_link,
+        diagnostics_drive_id=job.diagnostics_drive_file_id,
+        created_at_iso=created_iso,
+        completed_at_iso=completed_iso,
+        gemini_model=job.gemini_model or "gemini-3.5-flash",
+        kokoro_voice=job.kokoro_voice or job.custom_voice or "af_heart",
+        kokoro_speed=job.kokoro_speed or job.custom_speed or 1.0,
+        script_warnings=warnings,
+    )
 
     return {
         "claimed": True,
@@ -522,16 +629,30 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "gmail_message_id": job.gmail_message_id,
             "gmail_thread_id": job.gmail_thread_id,
             "sender_email": job.sender_email,
-            "local_audio_path": job.local_audio_path,
+            "audio_filename": names["audio_filename"],
+            "source_filename": names["source_filename"],
+            "diagnostics_filename": names["diagnostics_filename"],
+            "local_audio_path": local_audio_path,
+            "local_source_path": local_source_path,
+            "local_diagnostics_path": local_diagnostics_path,
             "audio_bytes": job.audio_bytes,
             "audio_duration_seconds": job.audio_duration_seconds,
             "drive_file_id": job.drive_file_id,
             "drive_web_link": job.drive_web_link,
+            "source_drive_file_id": job.source_drive_file_id,
+            "source_drive_web_link": job.source_drive_web_link,
+            "diagnostics_drive_file_id": job.diagnostics_drive_file_id,
+            "diagnostics_drive_web_link": job.diagnostics_drive_web_link,
             "drive_job_key": job.drive_job_key or f"herald_job_{job.id}",
             "script_json": job.script_json,
-            "needs_upload": needs_upload,
+            "needs_audio_upload": needs_audio_upload,
+            "needs_source_upload": needs_source_upload,
+            "needs_diagnostics_upload": needs_diagnostics_upload,
+            "needs_upload": (needs_audio_upload or needs_source_upload or needs_diagnostics_upload),
             "needs_email": needs_email,
             "action": action,
+            "formatted_email_text": formatted_email["text"],
+            "formatted_email_html": formatted_email["html"],
         },
     }
 
@@ -544,39 +665,85 @@ def claim_delivery_job(db: Session = Depends(get_db)):
 def update_drive_complete(
     job_id: str, req: DriveCompleteRequest, db: Session = Depends(get_db)
 ):
-    """Record Google Drive file ID, web link, and transition status to DELIVERING. Idempotent."""
+    """Record Google Drive file IDs and web links independently and idempotently."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job.status == JobState.COMPLETE.value:
-        if job.drive_file_id and job.drive_file_id != req.drive_file_id:
+        if (req.drive_file_id and job.drive_file_id and job.drive_file_id != req.drive_file_id) or \
+           (req.source_drive_file_id and job.source_drive_file_id and job.source_drive_file_id != req.source_drive_file_id) or \
+           (req.diagnostics_drive_file_id and job.diagnostics_drive_file_id and job.diagnostics_drive_file_id != req.diagnostics_drive_file_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Conflicting Drive file ID on COMPLETE job: existing '{job.drive_file_id}' vs new '{req.drive_file_id}'",
+                detail=f"Conflicting Drive file ID on COMPLETE job: existing vs new",
             )
         return {
             "job_id": job.id,
             "status": job.status,
             "drive_file_id": job.drive_file_id,
             "drive_web_link": job.drive_web_link,
+            "source_drive_file_id": job.source_drive_file_id,
+            "diagnostics_drive_file_id": job.diagnostics_drive_file_id,
             "message": "Job already COMPLETE.",
         }
 
-    if job.drive_file_id and job.drive_file_id != req.drive_file_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Conflicting Drive file ID: job already has '{job.drive_file_id}'",
-        )
+    updated_any = False
 
-    job.drive_file_id = req.drive_file_id
-    job.drive_web_link = req.drive_web_link
+    # Audio MP3 Drive ID
+    if req.drive_file_id:
+        if job.drive_file_id and job.drive_file_id != req.drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting audio Drive file ID: existing '{job.drive_file_id}' vs new '{req.drive_file_id}'",
+            )
+        job.drive_file_id = req.drive_file_id
+        if req.drive_web_link:
+            job.drive_web_link = req.drive_web_link
+        updated_any = True
+
+    # Source Text Drive ID
+    if req.source_drive_file_id:
+        if job.source_drive_file_id and job.source_drive_file_id != req.source_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting source Drive file ID: existing '{job.source_drive_file_id}' vs new '{req.source_drive_file_id}'",
+            )
+        job.source_drive_file_id = req.source_drive_file_id
+        if req.source_drive_web_link:
+            job.source_drive_web_link = req.source_drive_web_link
+        updated_any = True
+
+    # Diagnostics JSON Drive ID
+    if req.diagnostics_drive_file_id:
+        if job.diagnostics_drive_file_id and job.diagnostics_drive_file_id != req.diagnostics_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting diagnostics Drive file ID: existing '{job.diagnostics_drive_file_id}' vs new '{req.diagnostics_drive_file_id}'",
+            )
+        job.diagnostics_drive_file_id = req.diagnostics_drive_file_id
+        if req.diagnostics_drive_web_link:
+            job.diagnostics_drive_web_link = req.diagnostics_drive_web_link
+        updated_any = True
+
     if req.drive_job_key:
         job.drive_job_key = req.drive_job_key
-    job.drive_uploaded_at = datetime.now(UTC)
+
+    if updated_any:
+        job.drive_uploaded_at = datetime.now(UTC)
+
     db.commit()
 
-    if job.status != JobState.DELIVERING.value:
+    # Regenerate local diagnostics JSON file so it includes updated audio and source Drive IDs
+    output_dir = Path(settings.HERALD_WORK_DIR) / "output"
+    try:
+        generate_diagnostics_artifact(job, output_dir)
+    except Exception:
+        pass
+
+    if job.status != JobState.DELIVERING.value and (
+        job.drive_file_id or job.source_drive_file_id or job.diagnostics_drive_file_id
+    ):
         transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete")
 
     return {
@@ -584,6 +751,10 @@ def update_drive_complete(
         "status": job.status,
         "drive_file_id": job.drive_file_id,
         "drive_web_link": job.drive_web_link,
+        "source_drive_file_id": job.source_drive_file_id,
+        "source_drive_web_link": job.source_drive_web_link,
+        "diagnostics_drive_file_id": job.diagnostics_drive_file_id,
+        "diagnostics_drive_web_link": job.diagnostics_drive_web_link,
     }
 
 
@@ -595,7 +766,7 @@ def update_drive_complete(
 def update_delivery_complete(
     job_id: str, req: DeliveryCompleteRequest | None = None, db: Session = Depends(get_db)
 ):
-    """Record successful Gmail delivery and transition job to COMPLETE. Idempotent."""
+    """Record successful Gmail delivery and transition job to COMPLETE. Requires all 3 Drive artifact IDs."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -615,6 +786,21 @@ def update_delivery_complete(
             "message": "Job already COMPLETE.",
         }
 
+    # Ensure all 3 Drive artifacts exist before transitioning to COMPLETE
+    missing = []
+    if not job.drive_file_id:
+        missing.append("audio_file_id")
+    if not job.source_drive_file_id:
+        missing.append("source_file_id")
+    if not job.diagnostics_drive_file_id:
+        missing.append("diagnostics_file_id")
+
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot transition job to COMPLETE: missing required Drive artifact IDs ({', '.join(missing)})",
+        )
+
     if job.gmail_result_message_id and new_msg_id and job.gmail_result_message_id != new_msg_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -624,8 +810,11 @@ def update_delivery_complete(
     if new_msg_id:
         job.gmail_result_message_id = new_msg_id
 
+    now = datetime.now(UTC)
     if not job.delivered_at:
-        job.delivered_at = datetime.now(UTC)
+        job.delivered_at = now
+    if not job.completed_at:
+        job.completed_at = now
 
     db.commit()
 
@@ -698,23 +887,38 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
     return JobStatusResponse(
         id=job.id,
         gmail_message_id=job.gmail_message_id,
+        gmail_thread_id=job.gmail_thread_id,
         sender_email=job.sender_email,
         request_mode=job.request_mode,
         source_type=job.source_type,
+        source_url=job.source_url,
         status=job.status,
         attempt_count=job.attempt_count,
+        synthesis_attempt_count=job.synthesis_attempt_count,
+        delivery_attempt_count=job.delivery_attempt_count,
         completed_chunk_index=job.completed_chunk_index,
         local_audio_path=job.local_audio_path,
         audio_bytes=job.audio_bytes,
+        audio_sha256=job.audio_sha256,
         audio_duration_seconds=job.audio_duration_seconds,
         drive_file_id=job.drive_file_id,
         drive_web_link=job.drive_web_link,
+        source_drive_file_id=job.source_drive_file_id,
+        source_drive_web_link=job.source_drive_web_link,
+        diagnostics_drive_file_id=job.diagnostics_drive_file_id,
+        diagnostics_drive_web_link=job.diagnostics_drive_web_link,
         drive_job_key=job.drive_job_key,
         gmail_result_message_id=job.gmail_result_message_id,
+        kokoro_voice=job.kokoro_voice,
+        kokoro_speed=job.kokoro_speed,
+        gemini_model=job.gemini_model,
         error_code=job.error_code,
         error_detail=job.error_detail,
-        created_at=job.created_at.isoformat(),
-        updated_at=job.updated_at.isoformat(),
+        created_at=job.created_at.isoformat() if job.created_at else "",
+        updated_at=job.updated_at.isoformat() if job.updated_at else "",
+        audio_ready_at=job.audio_ready_at.isoformat() if job.audio_ready_at else None,
+        drive_uploaded_at=job.drive_uploaded_at.isoformat() if job.drive_uploaded_at else None,
+        delivered_at=job.delivered_at.isoformat() if job.delivered_at else None,
         completed_at=job.completed_at.isoformat() if job.completed_at else None,
     )
 
@@ -810,6 +1014,7 @@ def ops_daily_cleanup(db: Session = Depends(get_db)):
     work_dir = Path(settings.HERALD_WORK_DIR)
 
     for job in eligible_jobs:
+        names = get_artifact_filenames(job)
         if job.local_audio_path:
             p = Path(job.local_audio_path)
             if p.exists():
@@ -817,6 +1022,17 @@ def ops_daily_cleanup(db: Session = Depends(get_db)):
                 p.unlink(missing_ok=True)
             job.local_audio_path = None
             cleaned_count += 1
+
+        output_dir = work_dir / "output"
+        source_p = output_dir / names["source_filename"]
+        if source_p.exists():
+            freed_bytes += source_p.stat().st_size
+            source_p.unlink(missing_ok=True)
+
+        diag_p = output_dir / names["diagnostics_filename"]
+        if diag_p.exists():
+            freed_bytes += diag_p.stat().st_size
+            diag_p.unlink(missing_ok=True)
 
         chunks_dir = work_dir / "jobs" / job.id
         if chunks_dir.exists():

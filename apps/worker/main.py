@@ -202,14 +202,26 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                 if ffmpeg_attempt == 2:
                     raise
 
+        from herald.audio.artifact_generator import ensure_source_artifact
+
         job.local_audio_path = audio_info["output_path"]
         job.audio_bytes = audio_info["file_bytes"]
         job.audio_duration_seconds = audio_info["duration_seconds"]
         job.audio_sha256 = audio_info["sha256"]
+        job.audio_ready_at = datetime.now(UTC)
+        job.kokoro_voice = voice
+        job.kokoro_speed = speed
+        job.gemini_model = settings.GEMINI_MODEL
         db.commit()
 
+        # Generate source text artifact
+        try:
+            ensure_source_artifact(job, output_dir)
+        except Exception as se:
+            logger.warning(f"Source artifact creation warning for job '{job.id}': {se}")
+
         transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
-        logger.info(f"Successfully rendered audio for job '{job.id}': {output_mp3_path}")
+        logger.info(f"Successfully rendered audio and source artifact for job '{job.id}': {output_mp3_path}")
 
         try:
             shutil.rmtree(chunks_dir)
