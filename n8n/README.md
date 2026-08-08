@@ -3,7 +3,7 @@
 This directory contains 7 version-controlled JSON workflow exports for n8n:
 
 1. `workflows/email-intake.json`: Polling Gmail trigger (simplify OFF, attachments disabled), Herald API intake call, Gemini script generation, and immediate submission acknowledgment reply with completion ETA.
-2. `workflows/completion-dispatcher.json`: Schedule trigger calling atomic `/delivery/claim`, uploading 3 canonical artifacts (`.mp3`, `_source.txt`, `_diagnostics.json`) to Google Drive, calling `/drive-complete` independently per artifact, sending formatted link-only Gmail completion reply, and calling `/delivery-complete`.
+2. `workflows/completion-dispatcher.json`: Schedule trigger calling atomic `/delivery/claim`, uploading mode-aware canonical artifacts (`.mp3`, `_source.txt`, `_script.json`, `_diagnostics.md`, and optional `_research.json`, `_research_notes.md`) to Google Drive, calling `/drive-complete` independently per artifact, sending formatted link-only Gmail completion reply, and calling `/delivery-complete`.
 3. `workflows/error-handler.json`: Global error trigger workflow capturing execution failures and sending diagnostic alert emails.
 4. `workflows/daily-cleanup.json`: Automated daily cleanup of temporary local MP3, source text, and diagnostics JSON files for `COMPLETE` jobs older than 48 hours.
 5. `workflows/stale-job-recovery.json`: Hourly check detecting stuck or abandoned active worker claims.

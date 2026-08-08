@@ -290,10 +290,9 @@
         "type": "n8n-nodes-base.scheduleTrigger",
         "typeVersion": 1.1,
         "position": [
-          -1248,
-          160
-        ],
-        "id": "a2190e6e-c004-41d9-bad9-fc239fae95b0"
+          200,
+          300
+        ]
       },
       {
         "parameters": {
@@ -314,10 +313,9 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 3,
         "position": [
-          -1008,
-          160
-        ],
-        "id": "64aa909e-0cca-4a10-844e-6f23e277ed16"
+          420,
+          300
+        ]
       },
       {
         "parameters": {
@@ -334,92 +332,64 @@
         "type": "n8n-nodes-base.if",
         "typeVersion": 1,
         "position": [
-          -752,
-          160
-        ],
-        "id": "df7dfeb9-19c0-429f-815f-a8714cb17c9a"
+          640,
+          300
+        ]
       },
       {
         "parameters": {
           "conditions": {
             "boolean": [
               {
-                "value1": "={{ $json.job.needs_email }}",
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_audio_upload }}",
                 "value2": true
               }
             ]
           }
         },
-        "name": "Check Needs Email",
+        "name": "Check Needs Audio Upload",
         "type": "n8n-nodes-base.if",
         "typeVersion": 1,
         "position": [
-          -496,
-          160
-        ],
-        "id": "106a9c7e-2432-4b84-8836-27bd3e8137ae"
+          860,
+          250
+        ]
       },
       {
         "parameters": {
-          "conditions": {
-            "boolean": [
-              {
-                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_upload }}",
-                "value2": true
-              }
-            ]
-          }
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_audio_path }}",
+          "options": {}
         },
-        "name": "Check Needs Drive Upload",
-        "type": "n8n-nodes-base.if",
-        "typeVersion": 1,
-        "position": [
-          -256,
-          160
-        ],
-        "id": "18ddb22e-df88-4709-8542-a6e0bd5ed9cb"
-      },
-      {
-        "parameters": {
-          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_audio_path }}"
-        },
-        "name": "Read Local MP3 File For Drive",
+        "name": "Read Local MP3 File",
         "type": "n8n-nodes-base.readBinaryFile",
         "typeVersion": 1,
         "position": [
-          0,
-          0
-        ],
-        "id": "fe9ba8db-e134-427e-a140-f30a5bde9db4"
+          1080,
+          150
+        ]
       },
       {
         "parameters": {
-          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_title }}.mp3",
-          "driveId": {
-            "__rl": true,
-            "mode": "list",
-            "value": "My Drive"
-          },
-          "folderId": {
-            "__rl": true,
-            "mode": "list",
-            "value": "root",
-            "cachedResultName": "/ (Root folder)"
-          },
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.audio_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
           "options": {}
         },
-        "name": "Upload to Google Drive",
+        "name": "Upload Audio to Google Drive",
         "type": "n8n-nodes-base.googleDrive",
         "typeVersion": 3,
         "position": [
-          256,
-          0
+          1300,
+          150
         ],
-        "id": "50fdc14c-99d6-4880-816b-7cb29f73999c",
         "credentials": {
-          "googleDriveOAuth2Api": {
-            "id": "NOf3UwlSjmc0cLmR",
-            "name": "Google Drive account"
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
           }
         }
       },
@@ -438,21 +408,455 @@
           },
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink || ('https://drive.google.com/file/d/' + $json.id + '/view') }}\",\n  \"drive_job_key\": \"{{ $('Claim Delivery Job (Atomic)').item.json.job.drive_job_key }}\"\n}",
+          "jsonBody": "={\n  \"artifact_type\": \"audio\",\n  \"drive_file_id\": \"{{ $json.id }}\",\n  \"drive_web_link\": \"{{ $json.webViewLink }}\",\n  \"drive_job_key\": \"{{ $('Claim Delivery Job (Atomic)').item.json.job.drive_job_key }}\"\n}",
           "options": {}
         },
-        "name": "Record Drive Metadata",
+        "name": "Record Audio Drive Metadata",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 3,
         "position": [
-          512,
-          0
-        ],
-        "id": "1ed988e2-abe5-47be-8192-e70f91469474"
+          1520,
+          150
+        ]
       },
       {
         "parameters": {
-          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}",
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_source_upload }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Source Upload",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          1740,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_source_path }}",
+          "options": {}
+        },
+        "name": "Read Local Source TXT File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          1960,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.source_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
+          "options": {}
+        },
+        "name": "Upload Source to Google Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          2180,
+          150
+        ],
+        "credentials": {
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.HERALD_API_KEY }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"artifact_type\": \"source\",\n  \"source_drive_file_id\": \"{{ $json.id }}\",\n  \"source_drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+          "options": {}
+        },
+        "name": "Record Source Drive Metadata",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 3,
+        "position": [
+          2400,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_script_upload }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Script Upload",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          2620,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_script_path }}",
+          "options": {}
+        },
+        "name": "Read Local Script JSON File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          2840,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.script_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
+          "options": {}
+        },
+        "name": "Upload Script to Google Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          3060,
+          150
+        ],
+        "credentials": {
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.HERALD_API_KEY }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"artifact_type\": \"script\",\n  \"script_drive_file_id\": \"{{ $json.id }}\",\n  \"script_drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+          "options": {}
+        },
+        "name": "Record Script Drive Metadata",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 3,
+        "position": [
+          3280,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_research_upload }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Research Upload",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          3500,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_research_path }}",
+          "options": {}
+        },
+        "name": "Read Local Research JSON File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          3720,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.research_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
+          "options": {}
+        },
+        "name": "Upload Research to Google Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          3940,
+          150
+        ],
+        "credentials": {
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.HERALD_API_KEY }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"artifact_type\": \"research\",\n  \"research_drive_file_id\": \"{{ $json.id }}\",\n  \"research_drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+          "options": {}
+        },
+        "name": "Record Research Drive Metadata",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 3,
+        "position": [
+          4160,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_research_notes_upload }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Research Notes Upload",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          4380,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_research_notes_path }}",
+          "options": {}
+        },
+        "name": "Read Local Research Notes MD File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          4600,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.research_notes_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
+          "options": {}
+        },
+        "name": "Upload Research Notes to Google Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          4820,
+          150
+        ],
+        "credentials": {
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.HERALD_API_KEY }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"artifact_type\": \"research_notes\",\n  \"research_notes_drive_file_id\": \"{{ $json.id }}\",\n  \"research_notes_drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+          "options": {}
+        },
+        "name": "Record Research Notes Drive Metadata",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 3,
+        "position": [
+          5040,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_diagnostics_upload }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Diagnostics Upload",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          5260,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_diagnostics_path }}",
+          "options": {}
+        },
+        "name": "Read Local Diagnostics Markdown File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          5480,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "authentication": "oAuth2",
+          "operation": "upload",
+          "fileContentKey": "data",
+          "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.diagnostics_filename }}",
+          "parents": [
+            "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
+          ],
+          "options": {}
+        },
+        "name": "Upload Diagnostics to Google Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          5700,
+          150
+        ],
+        "credentials": {
+          "googleDriveOAuth2": {
+            "id": "1",
+            "name": "Herald Google Drive Account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/drive-complete",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.HERALD_API_KEY }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"artifact_type\": \"diagnostics\",\n  \"diagnostics_drive_file_id\": \"{{ $json.id }}\",\n  \"diagnostics_drive_web_link\": \"{{ $json.webViewLink }}\"\n}",
+          "options": {}
+        },
+        "name": "Record Diagnostics Drive Metadata",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 3,
+        "position": [
+          5920,
+          150
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $('Claim Delivery Job (Atomic)').item.json.job.needs_email }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "name": "Check Needs Email",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          6140,
+          250
+        ]
+      },
+      {
+        "parameters": {
+          "method": "GET",
+          "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/completion-email",
           "sendHeaders": true,
           "headerParameters": {
             "parameters": [
@@ -464,35 +868,36 @@
           },
           "options": {}
         },
-        "name": "Fetch Job Stats",
+        "name": "Fetch Final Completion Email",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 3,
         "position": [
-          752,
-          160
-        ],
-        "id": "72cf69ee-b87f-48a4-b2d4-4a8a98373254"
+          6360,
+          150
+        ]
       },
       {
         "parameters": {
+          "resource": "message",
           "operation": "reply",
           "messageId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.gmail_message_id }}",
-          "message": "=Your Herald podcast is ready!\n\nTITLE\n{{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_title }}\n\n{{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.episode_description }}\n\nLISTEN\nGoogle Drive: {{ $json.drive_web_link }}\n\nEPISODE DETAILS\nDuration: {{ Math.floor($json.audio_duration_seconds / 60) }}m {{ $json.audio_duration_seconds % 60 }}s\nFile size: {{ ($json.audio_bytes / 1024 / 1024).toFixed(2) }} MB\nRequested mode: {{ $json.request_mode }}\nSource type: {{ $json.source_type }}\nSource title: {{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.source_title || 'Not provided' }}\nScript estimate: {{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.estimated_minutes }} minutes\nScript segments: {{ $('Claim Delivery Job (Atomic)').item.json.job.script_json.segments.length }}\n\nSTATS FOR NERDS\nJob ID: {{ $json.id }}\nAudio bytes: {{ Number($json.audio_bytes || 0).toLocaleString('en-US') }}\nTTS chunks completed: {{ $json.completed_chunk_index }}\nProcessing attempts: {{ $json.attempt_count }}\nDrive file ID: {{ $json.drive_file_id }}\nDrive job key: {{ $json.drive_job_key }}\nCreated: {{ $json.created_at }}\nLast updated: {{ $json.updated_at }}\nScript warnings: {{ (($('Claim Delivery Job (Atomic)').item.json.job.script_json.warnings || []).join('; ')) || 'None' }}\n\nThe MP3 is stored in your private Herald Episodes Google Drive folder. This email contains a Drive link only; no audio attachment is included.",
-          "options": {}
+          "emailType": "html",
+          "message": "={{ $json.html }}",
+          "options": {
+            "appendAttribution": false
+          }
         },
-        "name": "Send Drive Link Reply",
+        "name": "Send Link-Only Reply",
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.1,
         "position": [
-          1008,
-          160
+          6580,
+          150
         ],
-        "id": "0550c08e-d417-437e-a8a6-00ce002ae2a5",
-        "webhookId": "c1d40544-eda7-42e7-b0cf-11667319f53e",
         "credentials": {
           "gmailOAuth2": {
-            "id": "maWllUWTHAOd1pH7",
-            "name": "Gmail account"
+            "id": "1",
+            "name": "Herald Gmail Account"
           }
         }
       },
@@ -518,10 +923,9 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 3,
         "position": [
-          1264,
-          160
-        ],
-        "id": "d472cf60-e44a-4231-b88e-7492bbe857c0"
+          6800,
+          250
+        ]
       }
     ],
     "connections": {
@@ -551,6 +955,312 @@
         "main": [
           [
             {
+              "node": "Check Needs Audio Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Audio Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local MP3 File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Source Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local MP3 File": {
+        "main": [
+          [
+            {
+              "node": "Upload Audio to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Audio to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Audio Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Audio Drive Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Needs Source Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Source Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local Source TXT File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Script Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local Source TXT File": {
+        "main": [
+          [
+            {
+              "node": "Upload Source to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Source to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Source Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Source Drive Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Needs Script Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Script Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local Script JSON File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Research Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local Script JSON File": {
+        "main": [
+          [
+            {
+              "node": "Upload Script to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Script to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Script Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Script Drive Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Needs Research Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Research Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local Research JSON File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Research Notes Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local Research JSON File": {
+        "main": [
+          [
+            {
+              "node": "Upload Research to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Research to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Research Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Research Drive Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Needs Research Notes Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Research Notes Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local Research Notes MD File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Diagnostics Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local Research Notes MD File": {
+        "main": [
+          [
+            {
+              "node": "Upload Research Notes to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Research Notes to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Research Notes Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Research Notes Drive Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Needs Diagnostics Upload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Needs Diagnostics Upload": {
+        "main": [
+          [
+            {
+              "node": "Read Local Diagnostics Markdown File",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Check Needs Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Local Diagnostics Markdown File": {
+        "main": [
+          [
+            {
+              "node": "Upload Diagnostics to Google Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Diagnostics to Google Drive": {
+        "main": [
+          [
+            {
+              "node": "Record Diagnostics Drive Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record Diagnostics Drive Metadata": {
+        "main": [
+          [
+            {
               "node": "Check Needs Email",
               "type": "main",
               "index": 0
@@ -562,76 +1272,32 @@
         "main": [
           [
             {
-              "node": "Check Needs Drive Upload",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Check Needs Drive Upload": {
-        "main": [
-          [
-            {
-              "node": "Read Local MP3 File For Drive",
+              "node": "Fetch Final Completion Email",
               "type": "main",
               "index": 0
             }
           ],
           [
             {
-              "node": "Fetch Job Stats",
+              "node": "Record Delivery Complete",
               "type": "main",
               "index": 0
             }
           ]
         ]
       },
-      "Read Local MP3 File For Drive": {
+      "Fetch Final Completion Email": {
         "main": [
           [
             {
-              "node": "Upload to Google Drive",
+              "node": "Send Link-Only Reply",
               "type": "main",
               "index": 0
             }
           ]
         ]
       },
-      "Upload to Google Drive": {
-        "main": [
-          [
-            {
-              "node": "Record Drive Metadata",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Record Drive Metadata": {
-        "main": [
-          [
-            {
-              "node": "Fetch Job Stats",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Fetch Job Stats": {
-        "main": [
-          [
-            {
-              "node": "Send Drive Link Reply",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Send Drive Link Reply": {
+      "Send Link-Only Reply": {
         "main": [
           [
             {
