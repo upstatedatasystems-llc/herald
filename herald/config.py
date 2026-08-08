@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     MAX_ACTIVE_TTS_JOBS: int = 1
     TTS_MAX_CHUNK_CHARS: int = 500
     KOKORO_HEALTH_GRACE_SECONDS: int = 120
+    KOKORO_SYNTHESIS_TIMEOUT_SECONDS: int = 180
 
     # ETA Calculation
     TTS_ESTIMATED_REALTIME_FACTOR: float = 2.5

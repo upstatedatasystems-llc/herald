@@ -18,6 +18,10 @@ class KokoroTTSError(Exception):
     """Exception raised when Kokoro TTS synthesis fails."""
 
 
+class KokoroTTSTimeoutError(KokoroTTSError):
+    """Exception raised specifically when Kokoro synthesis HTTP request times out."""
+
+
 class KokoroClient(BaseTTSEngine):
     """
     Kokoro-FastAPI engine client over internal OpenAI-compatible speech endpoint.
@@ -98,12 +102,14 @@ class KokoroClient(BaseTTSEngine):
         output_path: Path,
         voice: str | None = None,
         speed: float | None = None,
+        timeout: float | None = None,
     ) -> Path:
         """
         Synthesize text chunk to audio output file via OpenAI-compatible endpoint.
         """
         use_voice = voice or self.voice
         use_speed = speed if speed is not None else self.speed
+        synthesis_timeout = timeout if timeout is not None else getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -134,12 +140,19 @@ class KokoroClient(BaseTTSEngine):
             "speed": use_speed,
         }
 
+        import time
+        start_time = time.monotonic()
+
         try:
-            logger.info(f"Synthesizing chunk ({len(text)} chars) with Kokoro voice '{use_voice}'")
-            with httpx.Client(timeout=60.0) as client:
+            logger.info(f"Synthesizing chunk ({len(text)} chars) with Kokoro voice '{use_voice}' (Timeout: {synthesis_timeout}s)")
+            with httpx.Client(timeout=synthesis_timeout) as client:
                 response = client.post(endpoint, json=payload)
 
+            elapsed = time.monotonic() - start_time
+
             if response.status_code != 200:
+                if output_path.exists():
+                    output_path.unlink(missing_ok=True)
                 raise KokoroTTSError(
                     f"Kokoro API error ({response.status_code}): {response.text}"
                 )
@@ -148,11 +161,23 @@ class KokoroClient(BaseTTSEngine):
                 f.write(response.content)
 
             if output_path.stat().st_size == 0:
+                if output_path.exists():
+                    output_path.unlink(missing_ok=True)
                 raise KokoroTTSError("Generated audio chunk file is 0 bytes")
 
+            logger.info(f"Kokoro synthesis completed in {elapsed:.1f}s for {len(text)} chars")
             return output_path
 
+        except (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            elapsed = time.monotonic() - start_time
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
+            raise KokoroTTSTimeoutError(
+                f"Kokoro synthesis timed out after {elapsed:.1f}s (configured timeout: {synthesis_timeout}s): {e}"
+            )
         except Exception as e:
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
             if isinstance(e, KokoroTTSError):
                 raise
             raise KokoroTTSError(f"Kokoro synthesis failed: {e}")
