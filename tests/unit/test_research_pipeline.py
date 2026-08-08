@@ -218,3 +218,104 @@ def test_research_artifacts_generation(tmp_path):
     assert "Coherence time reached 5ms" in md_content
     assert "Nature Benchmark" in md_content
     assert "https://nature.com/articles/q1" in md_content
+
+
+def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch, db_session):
+    """
+    Integration test exercising POST /api/v1/script/generate endpoint for Research mode.
+    Verifies that logging calls (logger.info) in Stage 1a, 1b, 2, 3 execute cleanly
+    without NameError or unhandled runtime exceptions.
+    """
+    from fastapi.testclient import TestClient
+    from apps.api.main import app
+    from herald.db.models import JobState, PodcastJob
+    from herald.gemini.schema import PodcastScriptResponse, ResearchAuditResponse, ResearchDossierResponse
+
+    monkeypatch.setattr(settings, "HERALD_ENV", "testing")
+
+    job_id = "job-api-research-test-001"
+    job = PodcastJob(
+        id=job_id,
+        gmail_message_id="msg-api-res-1",
+        sender_email="auth@example.com",
+        request_mode=RequestMode.RESEARCH.value,
+        research_depth="high",
+        source_type="email_body",
+        source_hash="hash-api-res-1",
+        source_text="Primary article source material for quantum research.",
+        custom_title="Quantum Endpoint Test",
+        status=JobState.SOURCE_READY.value,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    # Mock Gemini Research calls
+    def mock_grounded_research(source_text, research_depth):
+        return {
+            "raw_text": "Grounded evidence text",
+            "search_count": 2,
+            "source_count": 1,
+            "research_sources": [
+                {
+                    "source_id": "S1",
+                    "title": "Grounded Source",
+                    "url": "https://example.com/s1",
+                    "domain": "example.com",
+                    "retrieved_at": datetime.now(UTC).isoformat(),
+                    "search_query": "quantum research",
+                }
+            ],
+        }
+
+    def mock_normalize_dossier(source_text, grounded_research_data):
+        return ResearchDossierResponse(
+            source_summary="Summary",
+            verification=[
+                {
+                    "source_claim": "Claim",
+                    "status": "supported",
+                    "notes": "Verified",
+                    "source_ids": ["S1"],
+                }
+            ],
+            useful_context=[],
+            outdated_or_uncertain=[],
+            research_sources=grounded_research_data["research_sources"],
+        )
+
+    def mock_generate_script(source_text, request_mode, research_dossier=None, source_title=None):
+        return PodcastScriptResponse(
+            episode_title="Quantum Endpoint Test",
+            episode_description="Description",
+            estimated_minutes=3,
+            segments=[
+                {"order": 1, "heading": "Intro", "narration": "Welcome to the podcast narration."}
+            ],
+            warnings=[],
+        )
+
+    def mock_audit_script(source_text, research_dossier, script_dict):
+        return ResearchAuditResponse(has_material_issues=False)
+
+    monkeypatch.setattr("apps.api.main.generate_grounded_research", mock_grounded_research)
+    monkeypatch.setattr("apps.api.main.normalize_research_dossier", mock_normalize_dossier)
+    monkeypatch.setattr("apps.api.main.generate_podcast_script", mock_generate_script)
+    monkeypatch.setattr("apps.api.main.audit_research_script", mock_audit_script)
+
+    client = TestClient(app)
+    res = client.post("/api/v1/script/generate", json={"job_id": job_id})
+
+    assert res.status_code == 200, f"Expected 200 OK, got {res.status_code}: {res.text}"
+    data = res.json()
+    assert data["job_id"] == job_id
+    assert data["status"] == JobState.QUEUED_TTS.value
+    assert data["request_mode"] == "research"
+    assert data["research_depth"] == "high"
+
+    # Verify database persistence across all pipeline stages
+    updated_job = db_session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+    assert updated_job.research_grounding_json is not None
+    assert updated_job.research_json is not None
+    assert updated_job.script_json is not None
+    assert updated_job.research_audit_json is not None
+

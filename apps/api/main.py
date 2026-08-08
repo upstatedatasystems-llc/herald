@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -8,6 +9,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("herald.api")
 
 from herald.audio.artifact_generator import (
     ensure_research_artifact,
