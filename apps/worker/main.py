@@ -214,11 +214,23 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         job.gemini_model = settings.GEMINI_MODEL
         db.commit()
 
-        # Generate source text artifact
+        # Generate local artifacts
         try:
+            from herald.audio.artifact_generator import (
+                ensure_research_artifact,
+                ensure_research_notes_artifact,
+                ensure_script_artifact,
+                ensure_source_artifact,
+            )
+
             ensure_source_artifact(job, output_dir)
+            ensure_script_artifact(job, output_dir)
+
+            if (job.request_mode or "").lower() == "research" and job.research_json:
+                ensure_research_artifact(job, output_dir)
+                ensure_research_notes_artifact(job, output_dir)
         except Exception as se:
-            logger.warning(f"Source artifact creation warning for job '{job.id}': {se}")
+            logger.warning(f"Artifact creation warning for job '{job.id}': {se}")
 
         transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
         logger.info(f"Successfully rendered audio and source artifact for job '{job.id}': {output_mp3_path}")

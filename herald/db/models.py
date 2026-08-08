@@ -41,6 +41,7 @@ class JobState(str, enum.Enum):
 class RequestMode(str, enum.Enum):
     BRIEF = "brief"
     STANDARD = "standard"
+    RESEARCH = "research"
     DETAILED = "detailed"
 
 
@@ -58,6 +59,7 @@ class PodcastJob(Base):
     sender_email = Column(String(255), nullable=False, index=True)
 
     request_mode = Column(String(20), nullable=False, default=RequestMode.STANDARD.value)
+    research_depth = Column(String(20), nullable=True)
     source_type = Column(String(20), nullable=False, default=SourceType.EMAIL_BODY.value)
     source_url = Column(Text, nullable=True)
     source_hash = Column(String(64), nullable=False, index=True)
@@ -80,8 +82,17 @@ class PodcastJob(Base):
     claim_owner = Column(String(100), nullable=True)
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Gemini script output JSON (Appendix C schema)
+    # Gemini script output JSON
     script_json = Column(JSON, nullable=True)
+
+    # Research mode data fields
+    research_grounding_json = Column(JSON, nullable=True)
+    research_json = Column(JSON, nullable=True)
+    research_model = Column(String(50), nullable=True)
+    research_search_count = Column(Integer, nullable=True)
+    research_source_count = Column(Integer, nullable=True)
+    research_audit_json = Column(JSON, nullable=True)
+    research_repair_count = Column(Integer, nullable=False, default=0)
 
     # Audio synthesis tracking
     completed_chunk_index = Column(Integer, nullable=False, default=0)
@@ -99,8 +110,14 @@ class PodcastJob(Base):
     drive_web_link = Column(String(512), nullable=True)
     source_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
     source_drive_web_link = Column(String(512), nullable=True)
+    script_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    script_drive_web_link = Column(String(512), nullable=True)
     diagnostics_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
     diagnostics_drive_web_link = Column(String(512), nullable=True)
+    research_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    research_drive_web_link = Column(String(512), nullable=True)
+    research_notes_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    research_notes_drive_web_link = Column(String(512), nullable=True)
     drive_job_key = Column(String(100), nullable=True, index=True)
     gmail_result_message_id = Column(String(255), nullable=True)
     drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)

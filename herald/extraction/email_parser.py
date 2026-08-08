@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 
 from herald.config import settings
 from herald.db.models import RequestMode
+from herald.extraction.source_cleaner import clean_source_text
 
 
 class SourceClassification(str, Enum):
@@ -26,6 +27,8 @@ class EmailParseResult:
         custom_voice: str | None = None,
         custom_speed: float | None = None,
         custom_title: str | None = None,
+        research_depth: str | None = None,
+        warnings: list[str] | None = None,
     ):
         self.mode = mode
         self.clean_text = clean_text
@@ -35,18 +38,25 @@ class EmailParseResult:
         self.custom_voice = custom_voice
         self.custom_speed = custom_speed
         self.custom_title = custom_title
+        self.research_depth = research_depth
+        self.warnings = warnings or []
 
 
 EXACT_SUBJECT_MAP = {
-    "podcast: brief": RequestMode.BRIEF,
-    "podcast: standard": RequestMode.STANDARD,
-    "podcast: detailed": RequestMode.DETAILED,
+    "podcast: brief": (RequestMode.BRIEF, None),
+    "podcast: standard": (RequestMode.STANDARD, None),
+    "podcast: detailed": (RequestMode.RESEARCH, "medium"),
+    "podcast: research": (RequestMode.RESEARCH, None),
+    "podcast: research low": (RequestMode.RESEARCH, "low"),
+    "podcast: research medium": (RequestMode.RESEARCH, "medium"),
+    "podcast: research high": (RequestMode.RESEARCH, "high"),
 }
 
 DIRECTIVE_PATTERNS = {
     "voice": re.compile(r"^\s*Voice\s*:\s*([a-zA-Z0-9_-]+)\s*$", re.IGNORECASE),
     "speed": re.compile(r"^\s*Speed\s*:\s*([0-9.]+)\s*$", re.IGNORECASE),
     "title": re.compile(r"^\s*Title\s*:\s*(.+)\s*$", re.IGNORECASE),
+    "research": re.compile(r"^\s*Research\s*:\s*([a-zA-Z0-9_-]+)\s*$", re.IGNORECASE),
 }
 
 GENERIC_DIRECTIVE_PATTERN = re.compile(r"^\s*([a-zA-Z0-9_-]+)\s*:\s*(.*)$")
@@ -68,13 +78,14 @@ PERMITTED_URL_LABELS = {
 }
 
 
-def parse_subject_mode(subject: str) -> RequestMode | None:
+def parse_subject_mode_and_depth(subject: str) -> tuple[RequestMode, str | None] | tuple[None, None]:
     """
     Parse email subject. Repeatedly strip leading Re:, Fwd:, FW: prefixes conservatively.
     Require the entire remaining normalized subject to match EXACTLY one valid command.
+    Returns (RequestMode, depth_from_subject) or (None, None).
     """
     if not subject:
-        return None
+        return None, None
 
     clean = subject.strip()
     old_clean = None
@@ -84,22 +95,33 @@ def parse_subject_mode(subject: str) -> RequestMode | None:
         clean = re.sub(r"^\s*(?:Re|Fwd|FW|RE|FWD)\s*:\s*", "", clean, flags=re.IGNORECASE).strip()
 
     normalized = clean.lower()
-    return EXACT_SUBJECT_MAP.get(normalized)
+    match = EXACT_SUBJECT_MAP.get(normalized)
+    if match:
+        return match[0], match[1]
+    return None, None
 
 
-def parse_directives(text: str) -> tuple[str, str | None, float | None, str | None]:
+def parse_subject_mode(subject: str) -> RequestMode | None:
+    """Convenience wrapper returning RequestMode or None for backwards compatibility."""
+    mode, _ = parse_subject_mode_and_depth(subject)
+    return mode
+
+
+def parse_directives(text: str) -> tuple[str, str | None, float | None, str | None, str | None]:
     """
-    Parse optional top-of-body directives (Voice:, Speed:, Title:) from first non-empty lines.
-    Rejects duplicate directives, unknown directives, or overlong titles with ValueError.
+    Parse optional top-of-body directives (Voice:, Speed:, Title:, Research:) from first non-empty lines.
+    Rejects duplicate directives, unknown directives, or invalid values.
+    Returns (clean_text, voice, speed, title, research_depth).
     """
     if not text:
-        return text, None, None, None
+        return text, None, None, None, None
 
     lines = text.splitlines()
     remaining_lines = []
     custom_voice = None
     custom_speed = None
     custom_title = None
+    custom_research_depth = None
 
     allowed_voices = settings.get_allowed_voices_list()
     in_header_zone = True
@@ -149,17 +171,28 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
                 custom_title = t_val
                 continue
 
+            m_research = DIRECTIVE_PATTERNS["research"].match(stripped)
+            if m_research:
+                if "research" in seen_directives:
+                    raise ValueError("Duplicate directive 'Research:' detected.")
+                seen_directives.add("research")
+                r_val = m_research.group(1).strip().lower()
+                if r_val not in ("low", "medium", "high"):
+                    raise ValueError(f"Invalid directive 'Research: {r_val}'. Research depth must be one of: low, medium, high")
+                custom_research_depth = r_val
+                continue
+
             m_generic = GENERIC_DIRECTIVE_PATTERN.match(stripped)
             if m_generic:
                 key = m_generic.group(1).strip()
-                if key.lower() not in ("voice", "speed", "title", "http", "https", "article", "link", "source", "url"):
-                    raise ValueError(f"Unknown or invalid directive '{key}:'. Allowed directives are Voice:, Speed:, Title:")
+                if key.lower() not in ("voice", "speed", "title", "research", "http", "https", "article", "link", "source", "url"):
+                    raise ValueError(f"Unknown or invalid directive '{key}:'. Allowed directives are Voice:, Speed:, Title:, Research:")
 
         in_header_zone = False
         remaining_lines.append(line)
 
     clean_text_without_directives = "\n".join(remaining_lines).strip()
-    return clean_text_without_directives, custom_voice, custom_speed, custom_title
+    return clean_text_without_directives, custom_voice, custom_speed, custom_title, custom_research_depth
 
 
 def clean_email_text(text: str) -> str:
@@ -253,10 +286,10 @@ def process_email_message(
     """
     Process incoming email content, check subject mode, parse directives, clean body, classify source type.
     """
-    mode = parse_subject_mode(subject)
+    mode, subject_depth = parse_subject_mode_and_depth(subject)
     if not mode:
         raise ValueError(
-            f"Unsupported subject line: '{subject}'. Expected exact subject: 'Podcast: Brief', 'Podcast: Standard', or 'Podcast: Detailed'."
+            f"Unsupported subject line: '{subject}'. Expected exact subject: 'Podcast: Brief', 'Podcast: Standard', or 'Podcast: Research'."
         )
 
     if body_text and len(body_text.strip()) > 20:
@@ -266,13 +299,30 @@ def process_email_message(
     else:
         raw_content = body_text or ""
 
-    clean_content, custom_voice, custom_speed, custom_title = parse_directives(raw_content)
+    clean_content, custom_voice, custom_speed, custom_title, body_depth = parse_directives(raw_content)
     clean_content = clean_email_text(clean_content)
+    clean_content = clean_source_text(clean_content)
 
     if not clean_content or len(clean_content) > settings.HERALD_MAX_SOURCE_CHARS:
         raise ValueError(
             f"Content length ({len(clean_content)} chars) is invalid or exceeds limit of {settings.HERALD_MAX_SOURCE_CHARS} characters."
         )
+
+    warnings: list[str] = []
+    research_depth: str | None = None
+
+    if mode == RequestMode.RESEARCH:
+        if subject_depth:
+            research_depth = subject_depth
+            if body_depth and body_depth != subject_depth:
+                warnings.append(f"Explicit subject research depth '{subject_depth}' overrode body directive 'Research: {body_depth}'.")
+        elif body_depth:
+            research_depth = body_depth
+        else:
+            research_depth = "medium"
+    else:
+        if body_depth:
+            warnings.append(f"Body directive 'Research: {body_depth}' ignored for non-Research mode ({mode.value}).")
 
     urls = extract_urls(clean_content)
     classification, detected_url = classify_source_content(clean_content, urls)
@@ -291,4 +341,7 @@ def process_email_message(
         custom_voice=custom_voice,
         custom_speed=custom_speed,
         custom_title=custom_title,
+        research_depth=research_depth,
+        warnings=warnings,
     )
+

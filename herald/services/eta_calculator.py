@@ -6,6 +6,42 @@ from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 
 
+def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> dict:
+    """
+    Centralized programmatic duration & word count calculator.
+    Uses ~150 WPM baseline for Kokoro at speed 1.0.
+    Returns dict with narration_word_count, predicted_duration_seconds, estimated_minutes.
+    """
+    if not script_json or not isinstance(script_json, dict):
+        return {
+            "narration_word_count": 0,
+            "predicted_duration_seconds": 300,
+            "estimated_minutes": 5,
+        }
+
+    segments = script_json.get("segments", [])
+    total_words = 0
+    for seg in segments:
+        narration = seg.get("narration", "") if isinstance(seg, dict) else ""
+        total_words += len(narration.split())
+
+    speed = kokoro_speed if kokoro_speed and kokoro_speed > 0 else 1.0
+    wpm = 150.0 * speed
+    predicted_seconds = int(round((total_words / wpm) * 60.0)) if total_words > 0 else 300
+    estimated_minutes = max(1, int(round(predicted_seconds / 60.0)))
+
+    # Fallback to legacy estimated_minutes field if present without segments
+    if not segments and "estimated_minutes" in script_json and script_json["estimated_minutes"]:
+        estimated_minutes = int(script_json["estimated_minutes"])
+        predicted_seconds = estimated_minutes * 60
+
+    return {
+        "narration_word_count": total_words,
+        "predicted_duration_seconds": predicted_seconds,
+        "estimated_minutes": estimated_minutes,
+    }
+
+
 def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
     """
     Calculate approximate best-effort completion time for a podcast job.
@@ -15,10 +51,8 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
     overhead_seconds = settings.DELIVERY_ESTIMATED_OVERHEAD_SECONDS
 
     # 1. Estimate duration for current job
-    current_minutes = 5.0
-    if job.script_json and isinstance(job.script_json, dict):
-        current_minutes = float(job.script_json.get("estimated_minutes", 5.0))
-
+    dur_info = calculate_script_duration(job.script_json, job.custom_speed or settings.KOKORO_SPEED)
+    current_minutes = dur_info["estimated_minutes"]
     current_audio_seconds = current_minutes * 60.0
 
     # 2. Estimate queue work ahead (jobs created before current_job)
@@ -41,12 +75,11 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
 
     for j in ahead_jobs:
         jobs_ahead_count += 1
-        j_script = j.script_json or {}
-        j_minutes = float(j_script.get("estimated_minutes", 5.0))
-        j_audio_seconds = j_minutes * 60.0
+        j_dur = calculate_script_duration(j.script_json, j.custom_speed or settings.KOKORO_SPEED)
+        j_audio_seconds = j_dur["predicted_duration_seconds"]
 
         if j.status == JobState.SYNTHESIZING.value and j.completed_chunk_index > 0:
-            segments = j_script.get("segments", [])
+            segments = (j.script_json or {}).get("segments", [])
             total_segments = max(len(segments), 1)
             completed_ratio = min(1.0, max(0.0, j.completed_chunk_index / total_segments))
             remaining_audio_seconds = j_audio_seconds * (1.0 - completed_ratio)

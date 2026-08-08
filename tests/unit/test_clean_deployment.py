@@ -103,13 +103,21 @@ def test_alembic_004_to_005_migration_with_existing_completed_jobs(tmp_path, mon
     session.commit()
     session.close()
 
-    # 3. Upgrade to head (005_drive_artifacts)
-    command.upgrade(alembic_cfg, "head")
+    # 3. Upgrade to 005_drive_artifacts and then 006_research_mode_fields
+    command.upgrade(alembic_cfg, "005_drive_artifacts")
 
-    # 4. Verify resulting Alembic version is exactly '005_drive_artifacts' and fits in VARCHAR(32)
+    # 4. Verify resulting Alembic version is '005_drive_artifacts' and fits in VARCHAR(32)
+    session = Session()
+    ver_005 = session.execute(sa_text("SELECT version_num FROM alembic_version")).scalar()
+    assert ver_005 == "005_drive_artifacts"
+    assert len(ver_005) <= 32
+    session.close()
+
+    # Upgrade to 006
+    command.upgrade(alembic_cfg, "006_research_mode_fields")
     session = Session()
     new_ver = session.execute(sa_text("SELECT version_num FROM alembic_version")).scalar()
-    assert new_ver == "005_drive_artifacts"
+    assert new_ver == "006_research_mode_fields"
     assert len(new_ver) <= 32
 
     # 5. Verify columns exist and live job record is preserved cleanly
@@ -119,6 +127,9 @@ def test_alembic_004_to_005_migration_with_existing_completed_jobs(tmp_path, mon
     assert "source_drive_web_link" in cols
     assert "diagnostics_drive_file_id" in cols
     assert "diagnostics_drive_web_link" in cols
+    assert "research_depth" in cols
+    assert "research_json" in cols
+    assert "research_model" in cols
     assert "audio_ready_at" in cols
     assert "kokoro_voice" in cols
     assert "kokoro_speed" in cols

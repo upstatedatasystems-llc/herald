@@ -141,14 +141,18 @@ def format_completion_email(
     kokoro_voice: str,
     kokoro_speed: float,
     script_warnings: list[str] | None = None,
+    research_notes_drive_link: str | None = None,
+    research_notes_drive_id: str | None = None,
 ) -> dict[str, str]:
     """
     Generate HTML completion reply email with polished product card design and plain-text fallback.
     Applies canonical Google Drive URL fallbacks when web_link is missing but file_id exists.
+    Includes human-readable Research Notes link when present.
     """
     audio_url = get_canonical_drive_url(drive_file_id, drive_web_link) or "#"
     source_url = get_canonical_drive_url(source_drive_id, source_drive_link)
     diag_url = get_canonical_drive_url(diagnostics_drive_id, diagnostics_drive_link)
+    notes_url = get_canonical_drive_url(research_notes_drive_id, research_notes_drive_link)
 
     safe_title = html.escape(episode_title or "Herald Episode")
     safe_desc = html.escape(episode_description or "")
@@ -197,6 +201,14 @@ def format_completion_email(
         diag_link_html = '<span style="color: #94a3b8;">N/A</span>'
         diag_text_val = "N/A"
 
+    # Research Notes link HTML
+    if notes_url:
+        notes_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Research Notes</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(notes_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View Research Notes</a></td></tr>'
+        notes_text_val = f"- Research Notes: {notes_url}\n"
+    else:
+        notes_link_html = ""
+        notes_text_val = ""
+
     warnings_html = ""
     if script_warnings:
         safe_warns = "<br>".join(html.escape(w) for w in script_warnings)
@@ -216,6 +228,7 @@ def format_completion_email(
         f"FILES:\n"
         f"- Audio MP3: {audio_url}\n"
         f"- Original Source: {source_text_val}\n"
+        f"{notes_text_val}"
         f"- Diagnostics: {diag_text_val}\n\n"
         f"STATS FOR NERDS:\n"
         f"- Job ID: {job_id}\n"
@@ -299,6 +312,7 @@ def format_completion_email(
                   <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Original Source</td>
                   <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{source_link_html}</td>
                 </tr>
+                {notes_link_html}
                 <tr>
                   <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Diagnostics</td>
                   <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{diag_link_html}</td>
@@ -336,3 +350,5 @@ def format_completion_email(
 </html>"""
 
     return {"text": text_body, "html": html_body}
+
+

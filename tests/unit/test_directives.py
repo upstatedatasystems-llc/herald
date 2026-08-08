@@ -10,10 +10,11 @@ Title: Special Episode Headline
 
 Here is the actual article content following the directives."""
 
-    text, voice, speed, title = parse_directives(raw_body)
+    text, voice, speed, title, research_depth = parse_directives(raw_body)
     assert voice == "af_bella"
     assert speed == 1.1
     assert title == "Special Episode Headline"
+    assert research_depth is None
     assert "Voice:" not in text
     assert "Speed:" not in text
     assert "Title:" not in text

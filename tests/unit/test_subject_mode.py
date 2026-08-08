@@ -13,8 +13,8 @@ def test_parse_subject_mode_standard():
 
 
 def test_parse_subject_mode_detailed():
-    assert parse_subject_mode("Podcast: Detailed") == RequestMode.DETAILED
-    assert parse_subject_mode("podcast: detailed") == RequestMode.DETAILED
+    assert parse_subject_mode("Podcast: Detailed") == RequestMode.RESEARCH
+    assert parse_subject_mode("podcast: detailed") == RequestMode.RESEARCH
 
 
 def test_parse_subject_mode_fallback():

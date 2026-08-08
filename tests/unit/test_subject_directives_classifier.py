@@ -12,7 +12,7 @@ from herald.extraction.email_parser import (
 def test_exact_subject_matching():
     assert parse_subject_mode("Podcast: Brief") == RequestMode.BRIEF
     assert parse_subject_mode("Fwd: Re: Podcast: Standard") == RequestMode.STANDARD
-    assert parse_subject_mode("FW: Podcast: Detailed") == RequestMode.DETAILED
+    assert parse_subject_mode("FW: Podcast: Detailed") == RequestMode.RESEARCH
 
     # Substring matches must be rejected (return None)
     assert parse_subject_mode("Weekly Podcast: Briefing") is None

@@ -10,6 +10,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from herald.audio.artifact_generator import (
+    ensure_research_artifact,
+    ensure_research_notes_artifact,
+    ensure_script_artifact,
     ensure_source_artifact,
     generate_diagnostics_artifact,
     get_artifact_filenames,
@@ -24,17 +27,25 @@ from herald.extraction.email_parser import (
     compute_source_hash,
     process_email_message,
 )
+from herald.extraction.source_cleaner import clean_source_text
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
-from herald.gemini.client import GeminiError, generate_podcast_script
+from herald.gemini.client import (
+    GeminiError,
+    audit_research_script,
+    generate_grounded_research,
+    generate_podcast_script,
+    normalize_research_dossier,
+    repair_research_script,
+)
 from herald.services.email_formatter import (
     format_acknowledgment_email,
     format_completion_email,
 )
-from herald.services.eta_calculator import calculate_job_eta
+from herald.services.eta_calculator import calculate_job_eta, calculate_script_duration
 from herald.tts.kokoro_client import KokoroClient
 
 app = FastAPI(
@@ -97,13 +108,19 @@ class GenerateScriptRequest(BaseModel):
 
 
 class DriveCompleteRequest(BaseModel):
-    artifact_type: str = Field(default="audio", description="Artifact type: audio, source, or diagnostics")
+    artifact_type: str = Field(default="audio", description="Artifact type: audio, source, script, diagnostics, research, research_notes")
     drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for audio MP3")
     drive_web_link: str | None = Field(None, description="Web link to audio Google Drive file")
     source_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for source text")
     source_drive_web_link: str | None = Field(None, description="Web link to source text Google Drive file")
+    script_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for script JSON")
+    script_drive_web_link: str | None = Field(None, description="Web link to script JSON Google Drive file")
     diagnostics_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for diagnostics JSON")
     diagnostics_drive_web_link: str | None = Field(None, description="Web link to diagnostics JSON Google Drive file")
+    research_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for research JSON")
+    research_drive_web_link: str | None = Field(None, description="Web link to research JSON Google Drive file")
+    research_notes_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for research notes Markdown")
+    research_notes_drive_web_link: str | None = Field(None, description="Web link to research notes Markdown Google Drive file")
     drive_job_key: str | None = Field(None, description="Herald job key stored in Drive appProperties")
 
 
@@ -122,6 +139,7 @@ class JobStatusResponse(BaseModel):
     gmail_thread_id: str | None
     sender_email: str
     request_mode: str
+    research_depth: str | None = None
     source_type: str
     source_url: str | None
     status: str
@@ -137,13 +155,23 @@ class JobStatusResponse(BaseModel):
     drive_web_link: str | None
     source_drive_file_id: str | None
     source_drive_web_link: str | None
+    script_drive_file_id: str | None = None
+    script_drive_web_link: str | None = None
     diagnostics_drive_file_id: str | None
     diagnostics_drive_web_link: str | None
+    research_drive_file_id: str | None = None
+    research_drive_web_link: str | None = None
+    research_notes_drive_file_id: str | None = None
+    research_notes_drive_web_link: str | None = None
     drive_job_key: str | None
     gmail_result_message_id: str | None
     kokoro_voice: str | None
     kokoro_speed: float | None
     gemini_model: str | None
+    research_model: str | None = None
+    research_search_count: int | None = None
+    research_source_count: int | None = None
+    research_repair_count: int | None = 0
     error_code: str | None
     error_detail: str | None
     created_at: str
@@ -330,6 +358,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         gmail_thread_id=req.gmail_thread_id,
         sender_email=sender,
         request_mode=parsed.mode.value,
+        research_depth=parsed.research_depth,
         source_type=source_type,
         source_url=source_url,
         source_hash=parsed.source_hash,
@@ -350,9 +379,10 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         transition_job_state(db, job, JobState.EXTRACTING.value, component="herald-api")
         try:
             title, extracted_text, canonical_url = extract_article_from_url(source_url)
-            job.source_text = f"Title: {title}\n\n{extracted_text}"
+            cleaned_extracted = clean_source_text(extracted_text)
+            job.source_text = f"Title: {title}\n\n{cleaned_extracted}"
             job.source_url = canonical_url
-            job.source_hash = compute_source_hash(extracted_text, canonical_url)
+            job.source_hash = compute_source_hash(cleaned_extracted, canonical_url)
             db.commit()
         except (SSRFVulnerabilityError, ArticleExtractionError) as e:
             transition_job_state(
@@ -404,7 +434,7 @@ def extract_url(req: ExtractUrlRequest):
     tags=["Scripting"],
 )
 def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(get_db)):
-    """Generate Gemini podcast script matching Appendix C schema and transition job state to QUEUED_TTS."""
+    """Generate Gemini podcast script adhering to requested mode and transition job state to QUEUED_TTS."""
     job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -420,23 +450,95 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
     transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-api")
 
     try:
-        script = generate_podcast_script(
-            source_text=job.source_text,
-            request_mode=job.request_mode.lower(),
-            source_title=job.custom_title,
-        )
-        job.script_json = script.model_dump()
-        db.commit()
+        req_mode = (job.request_mode or "standard").lower()
+
+        if req_mode == "research":
+            # Stage 1a: Grounded Research Call using GEMINI_RESEARCH_MODEL
+            if not job.research_grounding_json:
+                logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")
+                grounded_data = generate_grounded_research(
+                    source_text=job.source_text,
+                    research_depth=job.research_depth or "medium",
+                )
+                job.research_grounding_json = grounded_data
+                job.research_search_count = grounded_data.get("search_count", 0)
+                job.research_source_count = grounded_data.get("source_count", 0)
+                db.commit()
+
+            # Stage 1b: Normalize Research Dossier using GEMINI_MODEL
+            if not job.research_json:
+                logger.info(f"Executing Stage 1b Dossier Normalization for job '{job.id}'")
+                dossier = normalize_research_dossier(
+                    source_text=job.source_text,
+                    grounded_research_data=job.research_grounding_json,
+                )
+                job.research_json = dossier.model_dump()
+                job.research_model = settings.GEMINI_RESEARCH_MODEL
+                db.commit()
+
+            # Stage 2: Script Generation from SOURCE + VERIFIED_RESEARCH
+            if not job.script_json:
+                logger.info(f"Executing Stage 2 Research Scripting for job '{job.id}'")
+                script = generate_podcast_script(
+                    source_text=job.source_text,
+                    request_mode="research",
+                    research_dossier=job.research_json,
+                    source_title=job.custom_title,
+                )
+                job.script_json = script.model_dump()
+                db.commit()
+
+            # Stage 3: Post-Generation Research Audit
+            if not job.research_audit_json:
+                logger.info(f"Executing Stage 3 Research Audit for job '{job.id}'")
+                audit = audit_research_script(
+                    source_text=job.source_text,
+                    research_dossier=job.research_json,
+                    script_dict=job.script_json,
+                )
+                job.research_audit_json = audit.model_dump()
+                db.commit()
+
+            # Stage 4: Single-Pass Script Repair if material issues found
+            audit_data = job.research_audit_json or {}
+            if audit_data.get("has_material_issues") and job.research_repair_count == 0:
+                logger.info(f"Executing Stage 4 Targeted Script Repair for job '{job.id}'")
+                repaired_script = repair_research_script(
+                    source_text=job.source_text,
+                    research_dossier=job.research_json,
+                    script_dict=job.script_json,
+                    audit_result=audit_data,
+                )
+                job.script_json = repaired_script.model_dump()
+                job.research_repair_count = 1
+                db.commit()
+
+        else:
+            # Brief or Standard mode
+            if not job.script_json:
+                script = generate_podcast_script(
+                    source_text=job.source_text,
+                    request_mode=req_mode,
+                    source_title=job.custom_title,
+                )
+                job.script_json = script.model_dump()
+                db.commit()
 
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-api")
         transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-api")
 
+        script_obj = job.script_json or {}
+        episode_title = script_obj.get("episode_title", job.custom_title or "Herald Episode")
+        segments = script_obj.get("segments", [])
+
+        dur_info = calculate_script_duration(script_obj, job.custom_speed or settings.KOKORO_SPEED)
         eta_info = calculate_job_eta(db, job)
+
         ack = format_acknowledgment_email(
             job_id=job.id,
-            episode_title=script.episode_title,
+            episode_title=episode_title,
             request_mode=job.request_mode,
-            estimated_minutes=script.estimated_minutes,
+            estimated_minutes=dur_info["estimated_minutes"],
             estimated_completion_range=eta_info["estimated_completion_range"],
         )
 
@@ -444,11 +546,12 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             "job_id": job.id,
             "gmail_message_id": job.gmail_message_id,
             "status": job.status,
-            "episode_title": script.episode_title,
+            "episode_title": episode_title,
             "request_mode": job.request_mode,
-            "estimated_minutes": script.estimated_minutes,
+            "research_depth": job.research_depth,
+            "estimated_minutes": dur_info["estimated_minutes"],
             "estimated_completion_range": eta_info["estimated_completion_range"],
-            "segments_count": len(script.segments),
+            "segments_count": len(segments),
             "acknowledgment_email_text": ack["text"],
             "acknowledgment_email_html": ack["html"],
         }
@@ -545,26 +648,52 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     output_dir = work_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Regenerate local source and diagnostics files if missing locally
+    # Regenerate local artifacts if missing locally
     ensure_source_artifact(job, output_dir)
+    ensure_script_artifact(job, output_dir)
     names = get_artifact_filenames(job)
 
     local_audio_path = job.local_audio_path or str(output_dir / names["audio_filename"])
     local_source_path = str(output_dir / names["source_filename"])
+    local_script_path = str(output_dir / names["script_filename"])
     local_diagnostics_path = str(output_dir / names["diagnostics_filename"])
 
     generate_diagnostics_artifact(job, output_dir)
 
     needs_audio_upload = not bool(job.drive_file_id and job.drive_web_link)
     needs_source_upload = not bool(job.source_drive_file_id and job.source_drive_web_link)
+    needs_script_upload = bool(job.script_json and not (job.script_drive_file_id and job.script_drive_web_link))
     needs_diagnostics_upload = not bool(job.diagnostics_drive_file_id and job.diagnostics_drive_web_link)
-    needs_email = not bool(job.delivered_at or job.gmail_result_message_id)
 
-    if needs_email or needs_audio_upload or needs_source_upload or needs_diagnostics_upload:
+    is_research_mode = (job.request_mode or "").lower() == "research"
+    needs_research_upload = False
+    needs_research_notes_upload = False
+    local_research_path = None
+    local_research_notes_path = None
+
+    if is_research_mode and job.research_json:
+        ensure_research_artifact(job, output_dir)
+        ensure_research_notes_artifact(job, output_dir)
+        local_research_path = str(output_dir / names["research_filename"])
+        local_research_notes_path = str(output_dir / names["research_notes_filename"])
+        needs_research_upload = not bool(job.research_drive_file_id and job.research_drive_web_link)
+        needs_research_notes_upload = not bool(job.research_notes_drive_file_id and job.research_notes_drive_web_link)
+
+    needs_email = not bool(job.delivered_at or job.gmail_result_message_id)
+    needs_upload = (
+        needs_audio_upload
+        or needs_source_upload
+        or needs_script_upload
+        or needs_diagnostics_upload
+        or needs_research_upload
+        or needs_research_notes_upload
+    )
+
+    if needs_email or needs_upload:
         action = "deliver_artifacts_and_email"
         if job.status == JobState.DELIVERING.value:
             target_state = JobState.DELIVERING.value
-        elif needs_audio_upload or needs_source_upload or needs_diagnostics_upload:
+        elif needs_upload:
             target_state = JobState.UPLOADING.value
         else:
             target_state = JobState.DELIVERING.value
@@ -588,7 +717,6 @@ def claim_delivery_job(db: Session = Depends(get_db)):
 
     script = job.script_json or {}
     segments = script.get("segments", [])
-    warnings = script.get("warnings", [])
 
     return {
         "claimed": True,
@@ -600,24 +728,39 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "sender_email": job.sender_email,
             "audio_filename": names["audio_filename"],
             "source_filename": names["source_filename"],
+            "script_filename": names["script_filename"],
             "diagnostics_filename": names["diagnostics_filename"],
+            "research_filename": names["research_filename"] if is_research_mode else None,
+            "research_notes_filename": names["research_notes_filename"] if is_research_mode else None,
             "local_audio_path": local_audio_path,
             "local_source_path": local_source_path,
+            "local_script_path": local_script_path,
             "local_diagnostics_path": local_diagnostics_path,
+            "local_research_path": local_research_path,
+            "local_research_notes_path": local_research_notes_path,
             "audio_bytes": job.audio_bytes,
             "audio_duration_seconds": job.audio_duration_seconds,
             "drive_file_id": job.drive_file_id,
             "drive_web_link": job.drive_web_link,
             "source_drive_file_id": job.source_drive_file_id,
             "source_drive_web_link": job.source_drive_web_link,
+            "script_drive_file_id": job.script_drive_file_id,
+            "script_drive_web_link": job.script_drive_web_link,
             "diagnostics_drive_file_id": job.diagnostics_drive_file_id,
             "diagnostics_drive_web_link": job.diagnostics_drive_web_link,
+            "research_drive_file_id": job.research_drive_file_id,
+            "research_drive_web_link": job.research_drive_web_link,
+            "research_notes_drive_file_id": job.research_notes_drive_file_id,
+            "research_notes_drive_web_link": job.research_notes_drive_web_link,
             "drive_job_key": job.drive_job_key or f"herald_job_{job.id}",
             "script_json": job.script_json,
             "needs_audio_upload": needs_audio_upload,
             "needs_source_upload": needs_source_upload,
+            "needs_script_upload": needs_script_upload,
             "needs_diagnostics_upload": needs_diagnostics_upload,
-            "needs_upload": (needs_audio_upload or needs_source_upload or needs_diagnostics_upload),
+            "needs_research_upload": needs_research_upload,
+            "needs_research_notes_upload": needs_research_notes_upload,
+            "needs_upload": needs_upload,
             "needs_email": needs_email,
             "action": action,
         },
@@ -649,18 +792,19 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
 
     created_iso = job.created_at.isoformat() if job.created_at else ""
     completed_iso = job.completed_at.isoformat() if job.completed_at else None
+    dur_info = calculate_script_duration(script, job.kokoro_speed or job.custom_speed or 1.0)
 
     formatted_email = format_completion_email(
         job_id=job.id,
         episode_title=job.custom_title or script.get("episode_title", "Herald Episode"),
         episode_description=script.get("episode_description", ""),
         drive_web_link=job.drive_web_link,
-        duration_seconds=job.audio_duration_seconds or 0,
+        duration_seconds=job.audio_duration_seconds or dur_info["predicted_duration_seconds"],
         file_bytes=job.audio_bytes or 0,
         request_mode=job.request_mode,
         source_type=job.source_type,
         source_title=job.custom_title or script.get("episode_title"),
-        script_estimated_minutes=float(script.get("estimated_minutes", 5.0)),
+        script_estimated_minutes=float(dur_info["estimated_minutes"]),
         segments_count=len(segments),
         sha256=job.audio_sha256 or "",
         chunk_count=job.completed_chunk_index or 0,
@@ -676,6 +820,8 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
         kokoro_voice=job.kokoro_voice or job.custom_voice or "af_heart",
         kokoro_speed=job.kokoro_speed or job.custom_speed or 1.0,
         script_warnings=warnings,
+        research_notes_drive_link=job.research_notes_drive_web_link,
+        research_notes_drive_id=job.research_notes_drive_file_id,
     )
 
     return {
@@ -702,10 +848,13 @@ def update_drive_complete(
     if job.status == JobState.COMPLETE.value:
         if (req.drive_file_id and job.drive_file_id and job.drive_file_id != req.drive_file_id) or \
            (req.source_drive_file_id and job.source_drive_file_id and job.source_drive_file_id != req.source_drive_file_id) or \
-           (req.diagnostics_drive_file_id and job.diagnostics_drive_file_id and job.diagnostics_drive_file_id != req.diagnostics_drive_file_id):
+           (req.script_drive_file_id and job.script_drive_file_id and job.script_drive_file_id != req.script_drive_file_id) or \
+           (req.diagnostics_drive_file_id and job.diagnostics_drive_file_id and job.diagnostics_drive_file_id != req.diagnostics_drive_file_id) or \
+           (req.research_drive_file_id and job.research_drive_file_id and job.research_drive_file_id != req.research_drive_file_id) or \
+           (req.research_notes_drive_file_id and job.research_notes_drive_file_id and job.research_notes_drive_file_id != req.research_notes_drive_file_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Conflicting Drive file ID on COMPLETE job: existing vs new",
+                detail="Conflicting Drive file ID on COMPLETE job: existing vs new",
             )
         return {
             "job_id": job.id,
@@ -743,6 +892,18 @@ def update_drive_complete(
             job.source_drive_web_link = req.source_drive_web_link
         updated_any = True
 
+    # Script JSON Drive ID
+    if req.script_drive_file_id:
+        if job.script_drive_file_id and job.script_drive_file_id != req.script_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting script Drive file ID: existing '{job.script_drive_file_id}' vs new '{req.script_drive_file_id}'",
+            )
+        job.script_drive_file_id = req.script_drive_file_id
+        if req.script_drive_web_link:
+            job.script_drive_web_link = req.script_drive_web_link
+        updated_any = True
+
     # Diagnostics JSON Drive ID
     if req.diagnostics_drive_file_id:
         if job.diagnostics_drive_file_id and job.diagnostics_drive_file_id != req.diagnostics_drive_file_id:
@@ -755,6 +916,30 @@ def update_drive_complete(
             job.diagnostics_drive_web_link = req.diagnostics_drive_web_link
         updated_any = True
 
+    # Research JSON Drive ID
+    if req.research_drive_file_id:
+        if job.research_drive_file_id and job.research_drive_file_id != req.research_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting research Drive file ID: existing '{job.research_drive_file_id}' vs new '{req.research_drive_file_id}'",
+            )
+        job.research_drive_file_id = req.research_drive_file_id
+        if req.research_drive_web_link:
+            job.research_drive_web_link = req.research_drive_web_link
+        updated_any = True
+
+    # Research Notes Markdown Drive ID
+    if req.research_notes_drive_file_id:
+        if job.research_notes_drive_file_id and job.research_notes_drive_file_id != req.research_notes_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting research notes Drive file ID: existing '{job.research_notes_drive_file_id}' vs new '{req.research_notes_drive_file_id}'",
+            )
+        job.research_notes_drive_file_id = req.research_notes_drive_file_id
+        if req.research_notes_drive_web_link:
+            job.research_notes_drive_web_link = req.research_notes_drive_web_link
+        updated_any = True
+
     if req.drive_job_key:
         job.drive_job_key = req.drive_job_key
 
@@ -763,7 +948,6 @@ def update_drive_complete(
 
     db.commit()
 
-    # Regenerate local diagnostics JSON file so it includes updated audio and source Drive IDs
     output_dir = Path(settings.HERALD_WORK_DIR) / "output"
     try:
         generate_diagnostics_artifact(job, output_dir)
@@ -782,8 +966,14 @@ def update_drive_complete(
         "drive_web_link": job.drive_web_link,
         "source_drive_file_id": job.source_drive_file_id,
         "source_drive_web_link": job.source_drive_web_link,
+        "script_drive_file_id": job.script_drive_file_id,
+        "script_drive_web_link": job.script_drive_web_link,
         "diagnostics_drive_file_id": job.diagnostics_drive_file_id,
         "diagnostics_drive_web_link": job.diagnostics_drive_web_link,
+        "research_drive_file_id": job.research_drive_file_id,
+        "research_drive_web_link": job.research_drive_web_link,
+        "research_notes_drive_file_id": job.research_notes_drive_file_id,
+        "research_notes_drive_web_link": job.research_notes_drive_web_link,
     }
 
 
