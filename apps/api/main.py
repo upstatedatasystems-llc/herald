@@ -19,6 +19,7 @@ from herald.audio.artifact_generator import (
     ensure_source_artifact,
     generate_diagnostics_artifact,
     get_artifact_filenames,
+    get_required_artifact_types,
 )
 from herald.audio.ffmpeg_builder import check_free_disk_mb
 from herald.config import settings
@@ -783,10 +784,20 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if not (job.drive_file_id and job.source_drive_file_id and job.diagnostics_drive_file_id):
+    req_types = get_required_artifact_types(job)
+    attr_map = {
+        "audio": job.drive_file_id,
+        "source": job.source_drive_file_id,
+        "script": job.script_drive_file_id,
+        "diagnostics": job.diagnostics_drive_file_id,
+        "research": job.research_drive_file_id,
+        "research_notes": job.research_notes_drive_file_id,
+    }
+    missing = [t for t in req_types if not attr_map.get(t)]
+    if missing:
         raise HTTPException(
             status_code=400,
-            detail="Cannot generate completion email: missing required Drive artifact IDs",
+            detail=f"Cannot generate completion email: missing required Drive artifact IDs ({', '.join(missing)})",
         )
 
     script = job.script_json or {}
@@ -958,7 +969,12 @@ def update_drive_complete(
         pass
 
     if job.status != JobState.DELIVERING.value and (
-        job.drive_file_id or job.source_drive_file_id or job.diagnostics_drive_file_id
+        job.drive_file_id
+        or job.source_drive_file_id
+        or job.script_drive_file_id
+        or job.diagnostics_drive_file_id
+        or job.research_drive_file_id
+        or job.research_notes_drive_file_id
     ):
         transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete")
 
@@ -988,7 +1004,7 @@ def update_drive_complete(
 def update_delivery_complete(
     job_id: str, req: DeliveryCompleteRequest | None = None, db: Session = Depends(get_db)
 ):
-    """Record successful Gmail delivery and transition job to COMPLETE. Requires all 3 Drive artifact IDs."""
+    """Record successful Gmail delivery and transition job to COMPLETE. Requires all mode-appropriate Drive artifact IDs."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1008,14 +1024,17 @@ def update_delivery_complete(
             "message": "Job already COMPLETE.",
         }
 
-    # Ensure all 3 Drive artifacts exist before transitioning to COMPLETE
-    missing = []
-    if not job.drive_file_id:
-        missing.append("audio_file_id")
-    if not job.source_drive_file_id:
-        missing.append("source_file_id")
-    if not job.diagnostics_drive_file_id:
-        missing.append("diagnostics_file_id")
+    # Ensure all mode-appropriate Drive artifacts exist before transitioning to COMPLETE
+    req_types = get_required_artifact_types(job)
+    attr_map = {
+        "audio": job.drive_file_id,
+        "source": job.source_drive_file_id,
+        "script": job.script_drive_file_id,
+        "diagnostics": job.diagnostics_drive_file_id,
+        "research": job.research_drive_file_id,
+        "research_notes": job.research_notes_drive_file_id,
+    }
+    missing = [t for t in req_types if not attr_map.get(t)]
 
     if missing:
         raise HTTPException(
@@ -1042,6 +1061,13 @@ def update_delivery_complete(
 
     if job.status != JobState.COMPLETE.value:
         transition_job_state(db, job, JobState.COMPLETE.value, component="n8n-delivery-complete")
+
+    # Finalize local diagnostics Markdown report from the final COMPLETE database state
+    output_dir = Path(settings.HERALD_WORK_DIR) / "output"
+    try:
+        generate_diagnostics_artifact(job, output_dir)
+    except Exception:
+        pass
 
     return {
         "job_id": job.id,

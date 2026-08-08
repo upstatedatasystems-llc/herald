@@ -98,6 +98,14 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     )
     assert res_diag.status_code == 200
 
+    # 7b. Record script upload
+    res_script = client.post(
+        f"/api/v1/jobs/{job.id}/drive-complete",
+        headers=AUTH_HEADERS,
+        json={"artifact_type": "script", "script_drive_file_id": "script-drive-id-4", "script_drive_web_link": "http://drive/script"},
+    )
+    assert res_script.status_code == 200
+
     # 8. Now fetching completion email succeeds and contains fresh Drive links!
     res_email = client.get(f"/api/v1/jobs/{job.id}/completion-email", headers=AUTH_HEADERS)
     assert res_email.status_code == 200
@@ -126,11 +134,11 @@ def test_cleanup_all_three_local_artifacts(db_session, tmp_path, monkeypatch):
 
     mp3_file = output_dir / "test_cleanup.mp3"
     src_file = output_dir / "test_cleanup_source.txt"
-    diag_file = output_dir / "test_cleanup_diagnostics.json"
+    diag_file = output_dir / "test_cleanup_diagnostics.md"
 
     mp3_file.write_bytes(b"dummy mp3 data")
     src_file.write_text("dummy source text")
-    diag_file.write_text("{}")
+    diag_file.write_text("# Diagnostics")
 
     old_completed = datetime.now(UTC) - timedelta(hours=50)
 
