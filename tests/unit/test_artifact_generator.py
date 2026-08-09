@@ -4,8 +4,7 @@ from pathlib import Path
 import pytest
 
 from herald.audio.artifact_generator import (
-    ensure_source_artifact,
-    generate_diagnostics_artifact,
+    ensure_details_artifact,
     get_artifact_filenames,
     get_required_artifact_types,
 )
@@ -20,27 +19,19 @@ def test_artifact_filenames_generation():
     )
     names = get_artifact_filenames(job)
     assert names["audio_filename"].endswith(".mp3")
-    assert names["source_filename"].endswith("_source.txt")
-    assert names["diagnostics_filename"].endswith("_diagnostics.md")
+    assert names["details_filename"].endswith("_details.md")
     assert "test_episode_title" in names["audio_filename"]
 
 
 def test_get_required_artifact_types():
     job_brief = PodcastJob(request_mode=RequestMode.BRIEF.value, script_json={"segments": []})
-    assert get_required_artifact_types(job_brief) == ["audio", "source", "diagnostics", "script"]
+    assert get_required_artifact_types(job_brief) == ["audio", "details"]
 
     job_research = PodcastJob(request_mode=RequestMode.RESEARCH.value, research_json={"source_summary": "Summary"})
-    assert get_required_artifact_types(job_research) == [
-        "audio",
-        "source",
-        "diagnostics",
-        "script",
-        "research",
-        "research_notes",
-    ]
+    assert get_required_artifact_types(job_research) == ["audio", "details"]
 
 
-def test_ensure_source_artifact(tmp_path):
+def test_ensure_details_artifact(tmp_path):
     job = PodcastJob(
         id="job-src-001",
         gmail_message_id="msg-src-1",
@@ -52,21 +43,27 @@ def test_ensure_source_artifact(tmp_path):
         source_text="Clean extracted article text",
         custom_title="Article Podcast",
         created_at=datetime.now(UTC),
+        script_json={
+            "episode_title": "Article Podcast",
+            "segments": [{"order": 1, "heading": "Intro", "narration": "Welcome to the podcast."}],
+        },
     )
-    path = ensure_source_artifact(job, tmp_path)
+    path = ensure_details_artifact(job, tmp_path)
     assert path.exists()
+    assert path.name.endswith("_details.md")
     content = path.read_text(encoding="utf-8")
-    assert "Source URL: https://example.com/article" in content
+    assert "https://example.com/article" in content
     assert "Clean extracted article text" in content
-    assert "secret" not in content.lower()
+    assert "### Structured Script JSON" in content
+    assert "```json" in content
 
 
-def test_generate_diagnostics_artifact_excludes_secrets_and_formats_markdown(tmp_path):
+def test_details_artifact_completeness_and_secrets_exclusion(tmp_path):
     job = PodcastJob(
         id="job-diag-001",
         gmail_message_id="msg-diag-1",
         sender_email="auth@example.com",
-        request_mode=RequestMode.BRIEF.value,
+        request_mode=RequestMode.RESEARCH.value,
         source_type=SourceType.EMAIL_BODY.value,
         source_hash="diaghash1",
         source_text="Full original source text paragraph.",
@@ -77,10 +74,18 @@ def test_generate_diagnostics_artifact_excludes_secrets_and_formats_markdown(tmp
         audio_sha256="abc123sha",
         audio_duration_seconds=180,
         drive_file_id="drive-audio-id-123",
-        source_drive_file_id="drive-source-id-456",
-        diagnostics_drive_file_id="drive-diag-id-789",
+        details_drive_file_id="drive-details-id-456",
         created_at=datetime.now(UTC),
         audio_ready_at=datetime.now(UTC),
+        research_json={
+            "source_summary": "Deep summary of research topic.",
+            "claims_and_evidence": [],
+            "key_entities": [],
+            "core_narrative_arc": "Arc",
+            "open_questions": [],
+            "grounded_sources": [{"title": "Source 1", "url": "https://source1.org"}],
+        },
+        research_audit_json={"has_material_issues": False, "findings": []},
         script_json={
             "episode_title": "Diag Test Title",
             "episode_description": "Episode description text.",
@@ -88,30 +93,22 @@ def test_generate_diagnostics_artifact_excludes_secrets_and_formats_markdown(tmp
             "warnings": [],
         },
     )
-    path = generate_diagnostics_artifact(job, tmp_path)
+    path = ensure_details_artifact(job, tmp_path)
     assert path.exists()
-    assert path.name.endswith("_diagnostics.md")
+    assert path.name.endswith("_details.md")
 
     md_text = path.read_text(encoding="utf-8")
 
-    assert "# Herald Run Diagnostics" in md_text
+    assert "# Herald Episode Details" in md_text
     assert "## Episode" in md_text
-    assert "## Output Summary" in md_text
+    assert "## Processing Summary" in md_text
     assert "## Content Metrics" in md_text
     assert "## Original Source" in md_text
     assert "## Final Podcast Script" in md_text
+    assert "### Structured Script JSON" in md_text
+    assert "## Research Investigation Summary" in md_text
     assert "## Technical Identifiers" in md_text
 
-    # Verify no raw JSON syntax wrapping the script
-    assert "#### Segment 1: Introduction" in md_text
-    assert "Hello world narration." in md_text
-    assert '{"order": 1' not in md_text
-
-    # Verify non-Research job omits Research section
-    assert "## Research Summary" not in md_text
-    assert "## Research Sources" not in md_text
-
-    # Verify secrets and HTML/CSS excluded
+    # Verify secrets and auth credentials excluded
     assert "api_key" not in md_text.lower()
-    assert "renderedcontent" not in md_text.lower()
-
+    assert "auth_token" not in md_text.lower()

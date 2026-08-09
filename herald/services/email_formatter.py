@@ -131,25 +131,27 @@ def format_completion_email(
     chunk_count: int,
     retry_attempts: int,
     drive_file_id: str | None,
-    source_drive_link: str | None,
-    source_drive_id: str | None,
-    diagnostics_drive_link: str | None,
-    diagnostics_drive_id: str | None,
-    created_at_iso: str,
-    completed_at_iso: str | None,
-    gemini_model: str,
-    kokoro_voice: str,
-    kokoro_speed: float,
+    source_drive_link: str | None = None,
+    source_drive_id: str | None = None,
+    diagnostics_drive_link: str | None = None,
+    diagnostics_drive_id: str | None = None,
+    created_at_iso: str = "",
+    completed_at_iso: str | None = None,
+    gemini_model: str = "gemini-3.5-flash",
+    kokoro_voice: str = "af_heart",
+    kokoro_speed: float = 1.0,
     script_warnings: list[str] | None = None,
     research_notes_drive_link: str | None = None,
     research_notes_drive_id: str | None = None,
+    details_drive_link: str | None = None,
+    details_drive_id: str | None = None,
 ) -> dict[str, str]:
     """
     Generate HTML completion reply email with polished product card design and plain-text fallback.
     Applies canonical Google Drive URL fallbacks when web_link is missing but file_id exists.
-    Includes human-readable Research Notes link when present.
     """
     audio_url = get_canonical_drive_url(drive_file_id, drive_web_link) or "#"
+    details_url = get_canonical_drive_url(details_drive_id, details_drive_link)
     source_url = get_canonical_drive_url(source_drive_id, source_drive_link)
     diag_url = get_canonical_drive_url(diagnostics_drive_id, diagnostics_drive_link)
     notes_url = get_canonical_drive_url(research_notes_drive_id, research_notes_drive_link)
@@ -185,34 +187,53 @@ def format_completion_email(
         except Exception:
             pass
 
-    # Source link HTML
+    # Details Companion Link HTML
+    if details_url:
+        details_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Episode Details File</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(details_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View Companion Details (.md)</a></td></tr>'
+        details_text_val = details_url
+    else:
+        details_link_html = ""
+        details_text_val = None
+
+    # Source link HTML (fallback for legacy)
     if source_url:
-        source_link_html = f'<a href="{html.escape(source_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View source</a>'
+        source_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Original Source</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(source_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View source</a></td></tr>'
         source_text_val = source_url
     else:
-        source_link_html = '<span style="color: #94a3b8;">N/A</span>'
-        source_text_val = "N/A"
+        source_link_html = ""
+        source_text_val = None
 
-    # Diagnostics link HTML
+    # Diagnostics link HTML (fallback for legacy)
     if diag_url:
-        diag_link_html = f'<a href="{html.escape(diag_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View stats</a>'
+        diag_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Diagnostics</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(diag_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View stats</a></td></tr>'
         diag_text_val = diag_url
     else:
-        diag_link_html = '<span style="color: #94a3b8;">N/A</span>'
-        diag_text_val = "N/A"
+        diag_link_html = ""
+        diag_text_val = None
 
-    # Research Notes link HTML
+    # Research Notes link HTML (fallback for legacy)
     if notes_url:
         notes_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Research Notes</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(notes_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View Research Notes</a></td></tr>'
-        notes_text_val = f"- Research Notes: {notes_url}\n"
+        notes_text_val = notes_url
     else:
         notes_link_html = ""
-        notes_text_val = ""
+        notes_text_val = None
+
 
     warnings_html = ""
     if script_warnings:
         safe_warns = "<br>".join(html.escape(w) for w in script_warnings)
         warnings_html = f'<tr><td style="padding: 6px 0; font-size: 13px; color: #64748b; width: 140px;">Script Warnings</td><td style="padding: 6px 0; font-size: 13px; color: #dc2626; font-weight: 500;">{safe_warns}</td></tr>'
+
+    text_files_str = f"- Audio MP3: {audio_url}\n"
+    if details_text_val:
+        text_files_str += f"- Details (.md): {details_text_val}\n"
+    if source_text_val:
+        text_files_str += f"- Original Source: {source_text_val}\n"
+    if notes_text_val:
+        text_files_str += f"- Research Notes: {notes_text_val}\n"
+    if diag_text_val:
+        text_files_str += f"- Diagnostics: {diag_text_val}\n"
 
     text_body = (
         f"HERALD — EPISODE READY\n\n"
@@ -226,10 +247,7 @@ def format_completion_email(
         f"Script Estimate: {script_estimated_minutes} min\n"
         f"Segments: {segments_count}\n\n"
         f"FILES:\n"
-        f"- Audio MP3: {audio_url}\n"
-        f"- Original Source: {source_text_val}\n"
-        f"{notes_text_val}"
-        f"- Diagnostics: {diag_text_val}\n\n"
+        f"{text_files_str}\n"
         f"STATS FOR NERDS:\n"
         f"- Job ID: {job_id}\n"
         f"- SHA-256: {sha256}\n"
@@ -308,16 +326,12 @@ def format_completion_email(
                   <td style="padding: 6px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f8fafc;">Audio</td>
                   <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{safe_audio_url}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">Listen</a></td>
                 </tr>
-                <tr>
-                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Original Source</td>
-                  <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{source_link_html}</td>
-                </tr>
+                {details_link_html}
+                {source_link_html}
                 {notes_link_html}
-                <tr>
-                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Diagnostics</td>
-                  <td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;">{diag_link_html}</td>
-                </tr>
+                {diag_link_html}
               </table>
+
 
               <!-- Stats for Nerds Section -->
               <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; font-size: 13px;">

@@ -1,10 +1,14 @@
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from herald.db.models import PodcastJob, SourceType
+from herald.db.connection import SessionLocal
+from herald.db.models import JobProcessingMetric, PodcastJob, SourceType
 from herald.services.eta_calculator import calculate_script_duration
+
+logger = logging.getLogger("herald.artifact_generator")
 
 
 def get_job_basename(job: PodcastJob) -> str:
@@ -25,200 +29,67 @@ def get_job_basename(job: PodcastJob) -> str:
     return f"{now_str}_{slug}_{short_id}"
 
 
+def ensure_source_artifact(job: PodcastJob, output_dir: Path) -> Path:
+    """Legacy helper stub pointing to unified details artifact generator."""
+    return ensure_details_artifact(job, output_dir)
+
+
+def ensure_script_artifact(job: PodcastJob, output_dir: Path) -> Path:
+    """Legacy helper stub pointing to unified details artifact generator."""
+    return ensure_details_artifact(job, output_dir)
+
+
+def ensure_research_artifact(job: PodcastJob, output_dir: Path) -> Path:
+    """Legacy helper stub pointing to unified details artifact generator."""
+    return ensure_details_artifact(job, output_dir)
+
+
+def ensure_research_notes_artifact(job: PodcastJob, output_dir: Path) -> Path:
+    """Legacy helper stub pointing to unified details artifact generator."""
+    return ensure_details_artifact(job, output_dir)
+
+
+def generate_diagnostics_artifact(job: PodcastJob, output_dir: Path) -> Path:
+    """Legacy helper stub pointing to unified details artifact generator."""
+    return ensure_details_artifact(job, output_dir)
+
+
+
 def get_artifact_filenames(job: PodcastJob) -> dict[str, str]:
     """Return canonical filenames for all job artifacts."""
     base = get_job_basename(job)
     return {
         "basename": base,
         "audio_filename": f"{base}.mp3",
-        "source_filename": f"{base}_source.txt",
-        "script_filename": f"{base}_script.json",
-        "diagnostics_filename": f"{base}_diagnostics.md",
-        "research_filename": f"{base}_research.json",
-        "research_notes_filename": f"{base}_research_notes.md",
+        "details_filename": f"{base}_details.md",
     }
 
 
 def get_required_artifact_types(job: PodcastJob) -> list[str]:
     """
     Central helper returning mode-aware list of required artifact keys for a job.
-    Returns:
-      - Brief / Standard: ['audio', 'source', 'script', 'diagnostics']
-      - Research mode: ['audio', 'source', 'script', 'diagnostics', 'research', 'research_notes']
+    In Phase 1, ALL job modes produce exactly TWO primary Drive artifacts: audio and details.
     """
-    reqs = ["audio", "source", "diagnostics"]
-    if job.script_json or (job.request_mode or "").lower() in ("brief", "standard", "research"):
-        reqs.append("script")
-
-    if (job.request_mode or "").lower() == "research":
-        reqs.extend(["research", "research_notes"])
-
-    return reqs
+    return ["audio", "details"]
 
 
-def ensure_source_artifact(job: PodcastJob, target_dir: Path) -> Path:
+def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | None = None) -> Path:
     """
-    Atomically generate or verify local source text artifact (<basename>_source.txt).
+    Atomically generate or regenerate unified local Markdown companion artifact (<basename>_details.md).
+    Consolidates episode metadata, processing & performance summary, content metrics,
+    original source text, final podcast script (rendered Markdown + fenced script_json),
+    pipeline timeline, errors/warnings, research notes & dossiers (for research jobs), and technical IDs.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     names = get_artifact_filenames(job)
-    source_path = target_dir / names["source_filename"]
-
-    if source_path.exists() and source_path.stat().st_size > 0:
-        return source_path
-
-    if job.source_type == SourceType.URL.value and job.source_url:
-        created_str = (job.created_at or datetime.now(UTC)).isoformat()
-        script = job.script_json or {}
-        source_title = job.custom_title or script.get("episode_title") or "Unknown Title"
-
-        header = (
-            f"Herald Source Material\n"
-            f"Source URL: {job.source_url}\n"
-            f"Source Title: {source_title}\n"
-            f"Job ID: {job.id}\n"
-            f"Retrieved At: {created_str}\n"
-            f"{'=' * 50}\n\n"
-        )
-        content = header + (job.source_text or "")
-    else:
-        content = job.source_text or ""
-
-    tmp_path = source_path.with_suffix(".txt.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    os.replace(tmp_path, source_path)
-    return source_path
-
-
-def ensure_script_artifact(job: PodcastJob, target_dir: Path) -> Path:
-    """
-    Atomically generate local script JSON artifact (<basename>_script.json).
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    names = get_artifact_filenames(job)
-    script_path = target_dir / names["script_filename"]
-
-    data = job.script_json or {}
-    tmp_path = script_path.with_suffix(".json.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    os.replace(tmp_path, script_path)
-    return script_path
-
-
-def ensure_research_artifact(job: PodcastJob, target_dir: Path) -> Path:
-    """
-    Atomically generate machine-readable research JSON artifact (<basename>_research.json).
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    names = get_artifact_filenames(job)
-    res_path = target_dir / names["research_filename"]
-
-    data = job.research_json or {}
-    tmp_path = res_path.with_suffix(".json.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    os.replace(tmp_path, res_path)
-    return res_path
-
-
-def ensure_research_notes_artifact(job: PodcastJob, target_dir: Path) -> Path:
-    """
-    Atomically generate human-readable Markdown Research Notes artifact (<basename>_research_notes.md).
-    Includes summary, verification, context, uncertainty, numbered source list, search metrics.
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    names = get_artifact_filenames(job)
-    notes_path = target_dir / names["research_notes_filename"]
-
-    dossier = job.research_json or {}
-    script = job.script_json or {}
-    title = job.custom_title or script.get("episode_title") or "Herald Research Episode"
-    depth = (job.research_depth or "medium").capitalize()
-
-    lines = [
-        f"# Research Notes: {title}",
-        f"**Research Depth**: {depth}",
-        f"**Research Model**: {job.research_model or 'gemini-2.5-flash'}",
-        f"**Total Search Queries**: {job.research_search_count or 0}",
-        f"**Unique Grounded Sources**: {job.research_source_count or 0}",
-        f"**Script Repair Pass**: {'Executed' if job.research_repair_count else 'None'}",
-        "",
-        "## Investigation Summary",
-        dossier.get("source_summary", "No summary provided."),
-        "",
-        "## Claim Verification",
-    ]
-
-    verifications = dossier.get("verification", [])
-    if verifications:
-        for v in verifications:
-            s_ids = ", ".join(v.get("source_ids", [])) or "N/A"
-            lines.append(f"- **Claim**: {v.get('source_claim')}")
-            lines.append(f"  - **Status**: `{v.get('status')}`")
-            lines.append(f"  - **Notes**: {v.get('notes')}")
-            lines.append(f"  - **Sources**: {s_ids}")
-    else:
-        lines.append("No specific claim verifications recorded.")
-
-    lines.extend(["", "## Additional Context & Updates"])
-    useful = dossier.get("useful_context", [])
-    if useful:
-        for u in useful:
-            s_ids = ", ".join(u.get("source_ids", [])) or "N/A"
-            lines.append(f"- **Fact**: {u.get('fact')}")
-            lines.append(f"  - **Why it matters**: {u.get('why_it_matters')}")
-            lines.append(f"  - **Sources**: {s_ids}")
-    else:
-        lines.append("No additional context recorded.")
-
-    lines.extend(["", "## Discrepancies & Uncertainties"])
-    uncertain = dossier.get("outdated_or_uncertain", [])
-    if uncertain:
-        for item in uncertain:
-            lines.append(f"- {item}")
-    else:
-        lines.append("No material discrepancies or unresolved uncertainties detected.")
-
-    lines.extend(["", "## Grounded Research Sources"])
-    sources = dossier.get("research_sources", [])
-    if sources:
-        for s in sources:
-            sid = s.get("source_id", "")
-            s_title = s.get("title", "Source")
-            url = s.get("url", "#")
-            domain = s.get("domain", "")
-            lines.append(f"1. **[{sid}] [{s_title}]({url})** — *{domain}* (Query: `{s.get('search_query', '')}`)")
-    else:
-        lines.append("No external sources recorded.")
-
-    content = "\n".join(lines)
-    tmp_path = notes_path.with_suffix(".md.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    os.replace(tmp_path, notes_path)
-    return notes_path
-
-
-def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
-    """
-    Atomically generate or update local diagnostics Markdown artifact (<basename>_diagnostics.md).
-    Builds a human-readable processing and audit report without Gemini API calls.
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    names = get_artifact_filenames(job)
-    diag_path = target_dir / names["diagnostics_filename"]
+    details_path = target_dir / names["details_filename"]
 
     script = job.script_json or {}
     segments = script.get("segments", [])
     warnings = script.get("warnings", [])
     dossier = job.research_json or {}
     audit = job.research_audit_json or {}
+    is_research = (job.request_mode or "").lower() == "research"
 
     created_iso = job.created_at.isoformat() if job.created_at else "N/A"
     audio_ready_iso = job.audio_ready_at.isoformat() if job.audio_ready_at else "N/A"
@@ -241,7 +112,6 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
     if actual_duration and actual_duration > 0 and narration_words > 0:
         actual_wpm = round(narration_words / (actual_duration / 60.0), 2)
 
-    is_research = (job.request_mode or "").lower() == "research"
     audit_pass = "PASS" if not audit.get("has_material_issues") else "FAIL (Repaired)"
 
     if actual_duration:
@@ -256,8 +126,40 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
     else:
         size_str = "N/A"
 
+    # Query metrics safely for performance summary table
+    stage_metrics_map: dict[str, Any] = {}
+    m_rows = []
+    if db is not None:
+        try:
+            m_rows = db.query(JobProcessingMetric).filter(JobProcessingMetric.job_id == job.id).all()
+        except Exception as e:
+            logger.warning(f"Could not load performance metrics from passed db: {e}")
+
+    if not m_rows and hasattr(job, "metrics") and job.metrics:
+        try:
+            m_rows = list(job.metrics)
+        except Exception:
+            pass
+
+    if not m_rows:
+        try:
+            db_m = SessionLocal()
+            try:
+                m_rows = (
+                    db_m.query(JobProcessingMetric)
+                    .filter(JobProcessingMetric.job_id == job.id)
+                    .all()
+                )
+            finally:
+                db_m.close()
+        except Exception as me:
+            logger.warning(f"Could not load performance metrics for details artifact generation: {me}")
+
+    for r in m_rows:
+        stage_metrics_map[r.stage] = r
+
     lines = [
-        "# Herald Run Diagnostics",
+        "# Herald Episode Details",
         "",
         "## Episode",
         f"- **Title**: {job.custom_title or script.get('episode_title', 'Herald Episode')}",
@@ -271,26 +173,55 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
         f"- **Source Type**: `{job.source_type}`",
         f"- **Source Title / URL**: {job.source_url or job.custom_title or 'N/A'}",
         f"- **Created At**: {created_iso}",
+        f"- **Audio Ready At**: {audio_ready_iso}",
         f"- **Completed At**: {completed_iso}",
-        f"- **Total Processing Duration**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Duration**: N/A",
         "",
-        "## Output Summary",
+        "## Processing Summary",
+        f"- **Overall Status**: `{job.status}`",
+        f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
+        f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
         f"- **Audio Duration**: {dur_str}",
         f"- **Audio File Size**: {size_str}",
+        f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
         f"- **TTS Chunks**: {job.completed_chunk_index or 0}",
-        f"- **Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
-        f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
+        f"- **Synthesis Attempt Count**: {job.synthesis_attempt_count or 0}",
+        f"- **Total Processing Time**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Time**: N/A",
     ])
+
     if is_research:
         lines.extend([
             f"- **Research Model**: `{job.research_model or 'gemini-2.5-flash'}`",
-            f"- **Search Query Count**: {job.research_search_count or 0}",
-            f"- **Grounded Source Count**: {job.research_source_count or 0}",
-            f"- **Script Repair Count**: {job.research_repair_count or 0}",
+            f"- **Search Queries Executed**: {job.research_search_count or 0}",
+            f"- **Grounded Sources Count**: {job.research_source_count or 0}",
+            f"- **Research Repair Count**: {job.research_repair_count or 0}",
             f"- **Research Audit Status**: `{audit_pass}`",
         ])
-    else:
-        lines.append("- **Audit Status**: `PASS`")
+
+    # Add Performance Metrics subsection if data is present
+    if stage_metrics_map:
+        lines.extend(["", "### Performance Metrics Summary"])
+        metric_order = [
+            ("EMAIL_DETECTION_WAIT", "Email Detection Wait"),
+            ("INTAKE_TOTAL", "Intake Total"),
+            ("URL_EXTRACTION", "URL Extraction"),
+            ("GEMINI_SCRIPT", "Gemini Script Generation"),
+            ("RESEARCH_GROUNDING", "Research Grounding"),
+            ("RESEARCH_NORMALIZATION", "Research Normalization"),
+            ("RESEARCH_SCRIPT", "Research Scripting"),
+            ("RESEARCH_AUDIT", "Research Audit"),
+            ("RESEARCH_REPAIR", "Research Repair"),
+            ("TTS_QUEUE_WAIT", "TTS Queue Wait"),
+            ("TTS_CHUNKING", "TTS Chunking"),
+            ("TTS_TOTAL", "TTS Total Synthesis"),
+            ("FFMPEG_ENCODING", "FFmpeg Assembly"),
+            ("DELIVERY_DISPATCH_WAIT", "Delivery Dispatch Wait"),
+            ("DRIVE_AUDIO_UPLOAD", "Drive Audio Upload"),
+        ]
+        for stage_key, label in metric_order:
+            if stage_key in stage_metrics_map:
+                m = stage_metrics_map[stage_key]
+                dur_txt = f"{m.duration_ms} ms ({m.duration_ms / 1000.0:.2f}s)" if m.duration_ms is not None else "N/A"
+                lines.append(f"- **{label}**: {dur_txt} [`{m.status}`]")
 
     lines.extend([
         "",
@@ -304,43 +235,65 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
     ])
 
     if is_research:
-        lines.extend(["", "## Research Summary"])
-        sources = dossier.get("research_sources", [])
-        queries = [s.get("search_query") for s in sources if s.get("search_query")]
-        if queries:
-            lines.append("**Search Queries Executed**:")
-            for q in dict.fromkeys(queries):
-                lines.append(f"- `{q}`")
-        else:
-            lines.append("- **Search Queries Executed**: None recorded")
+        lines.extend(["", "## Research Investigation Summary"])
+        lines.append(dossier.get("source_summary", "No research summary recorded."))
 
+        lines.extend(["", "## Claim Verification"])
         verifications = dossier.get("verification", [])
         if verifications:
-            lines.append("\n**Claim Verifications**:")
             for v in verifications:
-                s_ids = ", ".join(v.get("source_ids", []))
-                lines.append(f"- **{v.get('source_claim')}** (`{v.get('status')}`): {v.get('notes')} [Sources: {s_ids}]")
+                s_ids = ", ".join(v.get("source_ids", [])) or "N/A"
+                lines.append(f"- **Claim**: {v.get('source_claim')}")
+                lines.append(f"  - **Status**: `{v.get('status')}`")
+                lines.append(f"  - **Notes**: {v.get('notes')}")
+                lines.append(f"  - **Sources**: {s_ids}")
+        else:
+            lines.append("No claim verifications recorded.")
 
+        lines.extend(["", "## Additional Context & Updates"])
         useful = dossier.get("useful_context", [])
         if useful:
-            lines.append("\n**Useful Context Added**:")
             for u in useful:
-                lines.append(f"- **{u.get('fact')}**: {u.get('why_it_matters')}")
+                s_ids = ", ".join(u.get("source_ids", [])) or "N/A"
+                lines.append(f"- **Fact**: {u.get('fact')}")
+                lines.append(f"  - **Why it matters**: {u.get('why_it_matters')}")
+                lines.append(f"  - **Sources**: {s_ids}")
+        else:
+            lines.append("No additional context recorded.")
 
+        lines.extend(["", "## Discrepancies & Uncertainties"])
         uncertain = dossier.get("outdated_or_uncertain", [])
         if uncertain:
-            lines.append("\n**Contradictions & Discrepancies**:")
             for item in uncertain:
                 lines.append(f"- {item}")
+        else:
+            lines.append("No material discrepancies or unresolved uncertainties detected.")
 
-        lines.append(f"\n- **Audit Result**: `{audit_pass}`")
-        lines.append(f"- **Targeted Script Repair Pass**: {'Executed' if job.research_repair_count else 'Not required'}")
+        lines.extend(["", "## Grounded Research Sources"])
+        sources = dossier.get("research_sources", [])
+        if sources:
+            for s in sources:
+                sid = s.get("source_id", "S")
+                stitle = s.get("title", "Source")
+                surl = s.get("url", "#")
+                domain = s.get("domain", "")
+                query = s.get("search_query", "")
+                lines.append(f"1. **[{sid}] [{stitle}]({surl})** — *{domain}* (Query: `{query}`)")
+        else:
+            lines.append("No grounded research sources recorded.")
 
     lines.extend(["", "## Original Source"])
-    if job.source_text:
-        lines.append(job.source_text.strip())
-    else:
-        lines.append("No source text recorded.")
+    if job.source_type == SourceType.URL.value and job.source_url:
+        created_str = (job.created_at or datetime.now(UTC)).isoformat()
+        source_title = job.custom_title or script.get("episode_title") or "Unknown Title"
+        lines.extend([
+            f"**Source URL**: {job.source_url}",
+            f"**Source Title**: {source_title}",
+            f"**Retrieved At**: {created_str}",
+            "---",
+            "",
+        ])
+    lines.append(job.source_text.strip() if job.source_text else "No source text recorded.")
 
     lines.extend(["", "## Final Podcast Script"])
     lines.append(f"### {script.get('episode_title', 'Untitled Episode')}")
@@ -359,47 +312,34 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
         for w in warnings:
             lines.append(f"- {w}")
 
-    if is_research:
-        lines.extend(["", "## Research Sources"])
-        sources = dossier.get("research_sources", [])
-        if sources:
-            for s in sources:
-                lines.append(
-                    f"1. **[{s.get('source_id', 'S')}] {s.get('title', 'Source')}** — [{s.get('domain', 'link')}]({s.get('url', '#')}) (Query: `{s.get('search_query', '')}`)"
-                )
-        else:
-            lines.append("No grounded research sources recorded.")
-
+    # Preserve full structured script JSON in a fenced section
     lines.extend([
         "",
-        "## Audio / TTS",
-        "- **Engine**: Kokoro TTS",
-        f"- **Voice**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}`",
-        f"- **Speed**: `{job.kokoro_speed or job.custom_speed or 1.0}`",
-        f"- **Chunk Count**: {job.completed_chunk_index or 0}",
-        f"- **Synthesis Attempts**: {job.synthesis_attempt_count or 0}",
-        f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-        f"- **Final Duration**: {dur_str}",
-        f"- **Final Byte Size**: {size_str}",
-        f"- **Local Path**: `{job.local_audio_path or 'N/A'}`",
-        "",
-        "## Delivery",
-        f"- **Drive Status**: {'Uploaded' if (job.drive_file_id and job.drive_web_link) else 'Pending'}",
-        f"- **Email Status**: {'Delivered' if (job.delivered_at or job.gmail_result_message_id) else 'Pending'}",
-        f"- **Delivery Attempt Count**: {job.delivery_attempt_count or 0}",
-        "- **Drive Artifact Links / IDs**:",
-        f"  - **Audio MP3**: {job.drive_web_link or 'N/A'} (ID: `{job.drive_file_id or 'N/A'}`)",
-        f"  - **Source TXT**: {job.source_drive_web_link or 'N/A'} (ID: `{job.source_drive_file_id or 'N/A'}`)",
-        f"  - **Script JSON**: {job.script_drive_web_link or 'N/A'} (ID: `{job.script_drive_file_id or 'N/A'}`)",
-        f"  - **Diagnostics MD**: {job.diagnostics_drive_web_link or 'N/A'} (ID: `{job.diagnostics_drive_file_id or 'N/A'}`)",
+        "### Structured Script JSON",
+        "```json",
+        json.dumps(script, indent=2, ensure_ascii=False),
+        "```",
     ])
-    if is_research:
+
+    if is_research and job.research_json:
         lines.extend([
-            f"  - **Research JSON**: {job.research_drive_web_link or 'N/A'} (ID: `{job.research_drive_file_id or 'N/A'}`)",
-            f"  - **Research Notes MD**: {job.research_notes_drive_web_link or 'N/A'} (ID: `{job.research_notes_drive_file_id or 'N/A'}`)",
+            "",
+            "### Structured Research Dossier JSON",
+            "```json",
+            json.dumps(job.research_json, indent=2, ensure_ascii=False),
+            "```",
         ])
 
-    lines.extend(["", "## Pipeline Timeline"])
+    if is_research and job.research_audit_json:
+        lines.extend([
+            "",
+            "### Research Audit JSON",
+            "```json",
+            json.dumps(job.research_audit_json, indent=2, ensure_ascii=False),
+            "```",
+        ])
+
+    lines.extend(["", "## Pipeline Transition Timeline"])
     timeline_entries = []
     if hasattr(job, "transitions") and job.transitions:
         for t in sorted(job.transitions, key=lambda x: x.created_at or datetime.min):
@@ -437,17 +377,20 @@ def generate_diagnostics_artifact(job: PodcastJob, target_dir: Path) -> Path:
     lines.extend([
         "",
         "## Technical Identifiers",
+        f"- **Job ID**: `{job.id}`",
         f"- **Gmail Message ID**: `{job.gmail_message_id or 'N/A'}`",
         f"- **Gmail Thread ID**: `{job.gmail_thread_id or 'N/A'}`",
         f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
         f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
         f"- **Drive Job Key**: `{job.drive_job_key or 'N/A'}`",
+        f"- **Audio Drive File ID**: `{job.drive_file_id or 'N/A'}`",
+        f"- **Details Drive File ID**: `{job.details_drive_file_id or 'N/A'}`",
     ])
 
     content = "\n".join(lines)
-    tmp_path = diag_path.with_suffix(".md.tmp")
+    tmp_path = details_path.with_suffix(".md.tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(content)
 
-    os.replace(tmp_path, diag_path)
-    return diag_path
+    os.replace(tmp_path, details_path)
+    return details_path

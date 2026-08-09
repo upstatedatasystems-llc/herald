@@ -70,6 +70,8 @@ class PodcastJob(Base):
     custom_speed = Column(Float, nullable=True)
     custom_title = Column(String(255), nullable=True)
 
+    gmail_received_at = Column(DateTime(timezone=True), nullable=True)
+
     # State tracking
     status = Column(String(50), nullable=False, default=JobState.RECEIVED.value, index=True)
     attempt_count = Column(Integer, nullable=False, default=0)
@@ -108,6 +110,8 @@ class PodcastJob(Base):
     # Delivery & Google Drive metadata
     drive_file_id = Column(String(255), nullable=True)
     drive_web_link = Column(String(512), nullable=True)
+    details_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
+    details_drive_web_link = Column(String(512), nullable=True)
     source_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
     source_drive_web_link = Column(String(512), nullable=True)
     script_drive_file_id = Column(String(255), nullable=True, unique=True, index=True)
@@ -138,6 +142,7 @@ class PodcastJob(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     transitions = relationship("JobStateTransition", back_populates="job", cascade="all, delete-orphan")
+    metrics = relationship("JobProcessingMetric", back_populates="job", cascade="all, delete-orphan")
 
 
 class JobStateTransition(Base):
@@ -155,5 +160,33 @@ class JobStateTransition(Base):
     job = relationship("PodcastJob", back_populates="transitions")
 
 
+class JobProcessingMetric(Base):
+    __tablename__ = "job_processing_metrics"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage = Column(String(50), nullable=False)
+    substage = Column(String(50), nullable=True)
+    attempt = Column(Integer, nullable=True)
+    sequence_index = Column(Integer, nullable=True)
+
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    duration_ms = Column(BigInteger, nullable=True)
+    status = Column(String(50), nullable=False)
+
+    input_chars = Column(Integer, nullable=True)
+    output_bytes = Column(BigInteger, nullable=True)
+    audio_duration_ms = Column(BigInteger, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+
+    job = relationship("PodcastJob", back_populates="metrics")
+
+
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
 Index("idx_podcast_jobs_claim", PodcastJob.status, PodcastJob.claimed_at)
+Index("idx_job_processing_metrics_job_stage", JobProcessingMetric.job_id, JobProcessingMetric.stage)
+Index("idx_job_processing_metrics_stage_created", JobProcessingMetric.stage, JobProcessingMetric.created_at)
+Index("idx_job_processing_metrics_job_seq", JobProcessingMetric.job_id, JobProcessingMetric.sequence_index)
+

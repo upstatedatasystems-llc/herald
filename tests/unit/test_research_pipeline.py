@@ -204,17 +204,14 @@ def test_research_artifacts_generation(tmp_path):
         research_repair_count=0,
     )
 
-    p_script = ensure_script_artifact(job, tmp_path)
-    p_json = ensure_research_artifact(job, tmp_path)
-    p_md = ensure_research_notes_artifact(job, tmp_path)
+    from herald.audio.artifact_generator import ensure_details_artifact
+    p_details = ensure_details_artifact(job, tmp_path)
 
-    assert p_script.exists()
-    assert p_json.exists()
-    assert p_md.exists()
+    assert p_details.exists()
+    assert p_details.name.endswith("_details.md")
 
-    md_content = p_md.read_text(encoding="utf-8")
-    assert "# Research Notes: Quantum Physics Upgrade" in md_content
-    assert "High" in md_content
+    md_content = p_details.read_text(encoding="utf-8")
+    assert "# Herald Episode Details" in md_content
     assert "Coherence time reached 5ms" in md_content
     assert "Nature Benchmark" in md_content
     assert "https://nature.com/articles/q1" in md_content

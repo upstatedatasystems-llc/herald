@@ -68,6 +68,10 @@
             {
               "name": "body_html",
               "value": "={{ $json.html || '' }}"
+            },
+            {
+              "name": "gmail_received_at",
+              "value": "={{ $json.internalDate || $json.date || '' }}"
             }
           ]
         },

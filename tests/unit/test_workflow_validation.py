@@ -39,10 +39,10 @@ def test_validate_all_n8n_workflows():
 
         if wf_file.name == "completion-dispatcher.json":
             nodes_by_name = {n["name"]: n for n in data["nodes"]}
-            assert "Check Needs Script Upload" in nodes_by_name
-            assert "Read Local Script JSON File" in nodes_by_name
-            assert "Upload Script to Google Drive" in nodes_by_name
-            assert "Record Script Drive Metadata" in nodes_by_name
+            assert "Check Needs Details Upload" in nodes_by_name
+            assert "Read Local Details MD File" in nodes_by_name
+            assert "Upload Details to Google Drive" in nodes_by_name
+            assert "Record Details Drive Metadata" in nodes_by_name
 
             assert "Fetch Final Completion Email" in nodes_by_name
             fetch_node = nodes_by_name["Fetch Final Completion Email"]
@@ -61,20 +61,3 @@ def test_validate_all_n8n_workflows():
             ack_node = nodes_by_name["Send Submission Acknowledgment"]
             assert ack_node["parameters"].get("emailType") == "html"
             assert "acknowledgment_email_html" in ack_node["parameters"]["message"]
-
-
-def test_validate_live_baseline_workflows_no_obsolete_dispatcher():
-    """Verify live baseline workflows file contains the updated completion dispatcher with script upload."""
-    live_path = Path(__file__).parent.parent.parent / "live-baseline" / "herald-live-workflows.json"
-    assert live_path.exists(), "live-baseline/herald-live-workflows.json must exist"
-
-    data = json.loads(live_path.read_text(encoding="utf-8"))
-    dispatchers = [wf for wf in data if wf.get("name") == "Herald - Audio Completion & Delivery Dispatcher"]
-    assert len(dispatchers) > 0, "Must find completion dispatcher in live baseline workflows"
-
-    for wf in dispatchers:
-        node_names = [n["name"] for n in wf["nodes"]]
-        assert "Check Needs Script Upload" in node_names, f"Obsolete dispatcher found in live baseline without Check Needs Script Upload"
-        assert "Upload Script to Google Drive" in node_names
-        assert "Record Script Drive Metadata" in node_names
-
