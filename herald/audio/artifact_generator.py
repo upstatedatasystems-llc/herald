@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from sqlalchemy.orm import Session
 
 from herald.db.connection import SessionLocal
 from herald.db.models import JobProcessingMetric, PodcastJob, SourceType

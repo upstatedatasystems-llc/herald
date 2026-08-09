@@ -13,6 +13,7 @@
         "filters": {
           "q": "in:inbox subject:(Podcast:) -from:upstatedatasystems@gmail.com"
         },
+        "simple": false,
         "downloadAttachments": false
       },
       "name": "Gmail Trigger - Herald Intake",

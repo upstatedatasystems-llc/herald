@@ -113,7 +113,7 @@
         150
       ],
       "credentials": {
-        "googleDriveOAuth2": {
+        "googleDriveOAuth2Api": {
           "id": "1",
           "name": "Herald Google Drive Account"
         }
@@ -196,7 +196,7 @@
         150
       ],
       "credentials": {
-        "googleDriveOAuth2": {
+        "googleDriveOAuth2Api": {
           "id": "1",
           "name": "Herald Google Drive Account"
         }

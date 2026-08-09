@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("herald.api")
@@ -761,51 +761,27 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     now = datetime.now(UTC)
     stale_cutoff = now - timedelta(minutes=15)
 
-    candidate_jobs = (
-        db.query(PodcastJob)
-        .filter(
-            PodcastJob.status.in_([
-                JobState.AUDIO_READY.value,
-                JobState.UPLOADING.value,
-                JobState.DELIVERING.value,
-                JobState.FAILED_RETRYABLE.value,
-            ])
-        )
-        .order_by(PodcastJob.updated_at.asc())
-        .with_for_update(skip_locked=True)
-        .all()
+    eligible_filter = or_(
+        PodcastJob.status == JobState.AUDIO_READY.value,
+        and_(
+            PodcastJob.status.in_([JobState.UPLOADING.value, JobState.DELIVERING.value]),
+            or_(PodcastJob.last_heartbeat_at.is_(None), PodcastJob.last_heartbeat_at <= stale_cutoff),
+            or_(PodcastJob.claimed_at.is_(None), PodcastJob.claimed_at <= stale_cutoff),
+        ),
+        and_(
+            PodcastJob.status == JobState.FAILED_RETRYABLE.value,
+            PodcastJob.failed_stage.notin_(["INTAKE", "VALIDATING", "EXTRACTING", "SCRIPTING", "SYNTHESIZING", "ENCODING"]),
+            or_(PodcastJob.next_retry_at.is_(None), PodcastJob.next_retry_at <= now),
+        ),
     )
 
-    eligible_job = None
-    for job in candidate_jobs:
-        if job.status == JobState.COMPLETE.value:
-            continue
-
-        if job.status == JobState.FAILED_RETRYABLE.value:
-            if job.failed_stage in ("INTAKE", "VALIDATING", "EXTRACTING", "SCRIPTING", "SYNTHESIZING", "ENCODING"):
-                continue
-            if job.next_retry_at:
-                nr = job.next_retry_at
-                if nr.tzinfo is None:
-                    nr = nr.replace(tzinfo=UTC)
-                if nr > now:
-                    continue
-            eligible_job = job
-            break
-
-        elif job.status in (JobState.UPLOADING.value, JobState.DELIVERING.value):
-            last_active = job.last_heartbeat_at or job.claimed_at
-            if last_active:
-                if last_active.tzinfo is None:
-                    last_active = last_active.replace(tzinfo=UTC)
-                if last_active > stale_cutoff and job.claim_owner == "n8n-completion-dispatcher":
-                    continue
-            eligible_job = job
-            break
-
-        elif job.status == JobState.AUDIO_READY.value:
-            eligible_job = job
-            break
+    eligible_job = (
+        db.query(PodcastJob)
+        .filter(eligible_filter)
+        .order_by(PodcastJob.updated_at.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
 
     if not eligible_job:
         return {"claimed": False, "action": "none", "job": None}
@@ -820,20 +796,14 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     output_dir = work_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Record DELIVERY_DISPATCH_WAIT metric
-    if job.audio_ready_at:
-        wait_ms = max(0, int((now - ensure_utc(job.audio_ready_at)).total_seconds() * 1000))
-        record_stage_metric(
-            job_id=job.id,
-            stage="DELIVERY_DISPATCH_WAIT",
-            started_at=job.audio_ready_at,
-            finished_at=now,
-            duration_ms=wait_ms,
-            status="success",
-        )
+    # Capture DELIVERY_DISPATCH_WAIT metrics data before commit
+    audio_ready_at_val = job.audio_ready_at
+    wait_ms = None
+    if audio_ready_at_val:
+        wait_ms = max(0, int((now - ensure_utc(audio_ready_at_val)).total_seconds() * 1000))
 
     # Generate unified companion details artifact
-    ensure_details_artifact(job, output_dir)
+    ensure_details_artifact(job, output_dir, db=db)
     names = get_artifact_filenames(job)
 
     local_audio_path = job.local_audio_path or str(output_dir / names["audio_filename"])
@@ -871,6 +841,17 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
 
+    # Record DELIVERY_DISPATCH_WAIT metric AFTER db.commit() to release row lock
+    if audio_ready_at_val and wait_ms is not None:
+        record_stage_metric(
+            job_id=job.id,
+            stage="DELIVERY_DISPATCH_WAIT",
+            started_at=audio_ready_at_val,
+            finished_at=now,
+            duration_ms=wait_ms,
+            status="success",
+        )
+
     return {
         "claimed": True,
         "action": action,
@@ -879,20 +860,22 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "gmail_message_id": job.gmail_message_id,
             "gmail_thread_id": job.gmail_thread_id,
             "sender_email": job.sender_email,
-            "audio_filename": names["audio_filename"],
-            "details_filename": names["details_filename"],
+            "request_mode": job.request_mode,
+            "status": job.status,
+            "delivery_attempt_count": job.delivery_attempt_count,
             "local_audio_path": local_audio_path,
+            "audio_filename": names["audio_filename"],
             "local_details_path": local_details_path,
-            "audio_bytes": job.audio_bytes,
-            "audio_duration_seconds": job.audio_duration_seconds,
+            "details_filename": names["details_filename"],
+            "needs_audio_upload": needs_audio_upload,
+            "needs_details_upload": needs_details_upload,
+            "needs_email": needs_email,
             "drive_file_id": job.drive_file_id,
             "drive_web_link": job.drive_web_link,
             "details_drive_file_id": job.details_drive_file_id,
             "details_drive_web_link": job.details_drive_web_link,
             "drive_job_key": job.drive_job_key or f"herald_job_{job.id}",
             "script_json": job.script_json,
-            "needs_audio_upload": needs_audio_upload,
-            "needs_details_upload": needs_details_upload,
             "needs_source_upload": False,
             "needs_script_upload": False,
             "needs_diagnostics_upload": False,
@@ -1016,55 +999,30 @@ def update_drive_complete(
     if dur_ms is None and t_start and t_finish:
         dur_ms = max(0, int((t_finish - t_start).total_seconds() * 1000))
 
-    if req.artifact_type == "audio" or req.drive_file_id:
-        if req.drive_file_id:
-            if job.drive_file_id and job.drive_file_id != req.drive_file_id:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Conflicting audio Drive file ID: existing '{job.drive_file_id}' vs new '{req.drive_file_id}'",
-                )
-            job.drive_file_id = req.drive_file_id
-            if req.drive_web_link:
-                job.drive_web_link = req.drive_web_link
-            updated_any = True
+    is_audio = req.artifact_type == "audio" or req.drive_file_id
+    is_details = req.artifact_type == "details" or req.details_drive_file_id
 
-        record_stage_metric(
-            job_id=job.id,
-            stage="DRIVE_AUDIO_UPLOAD",
-            started_at=t_start,
-            finished_at=t_finish,
-            duration_ms=dur_ms,
-            status="success",
-            output_bytes=job.audio_bytes,
-        )
+    if is_audio and req.drive_file_id:
+        if job.drive_file_id and job.drive_file_id != req.drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting audio Drive file ID: existing '{job.drive_file_id}' vs new '{req.drive_file_id}'",
+            )
+        job.drive_file_id = req.drive_file_id
+        if req.drive_web_link:
+            job.drive_web_link = req.drive_web_link
+        updated_any = True
 
-        # Requirement 6: Regenerate details.md AFTER audio upload metric is recorded but BEFORE details.md is uploaded
-        output_dir = Path(settings.HERALD_WORK_DIR) / "output"
-        try:
-            ensure_details_artifact(job, output_dir)
-        except Exception as de:
-            logger.warning(f"Could not regenerate details artifact after audio upload: {de}")
-
-    elif req.artifact_type == "details" or req.details_drive_file_id:
-        if req.details_drive_file_id:
-            if job.details_drive_file_id and job.details_drive_file_id != req.details_drive_file_id:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Conflicting details Drive file ID: existing '{job.details_drive_file_id}' vs new '{req.details_drive_file_id}'",
-                )
-            job.details_drive_file_id = req.details_drive_file_id
-            if req.details_drive_web_link:
-                job.details_drive_web_link = req.details_drive_web_link
-            updated_any = True
-
-        record_stage_metric(
-            job_id=job.id,
-            stage="DRIVE_DETAILS_UPLOAD",
-            started_at=t_start,
-            finished_at=t_finish,
-            duration_ms=dur_ms,
-            status="success",
-        )
+    if is_details and req.details_drive_file_id:
+        if job.details_drive_file_id and job.details_drive_file_id != req.details_drive_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicting details Drive file ID: existing '{job.details_drive_file_id}' vs new '{req.details_drive_file_id}'",
+            )
+        job.details_drive_file_id = req.details_drive_file_id
+        if req.details_drive_web_link:
+            job.details_drive_web_link = req.details_drive_web_link
+        updated_any = True
 
     # Legacy field handling for backwards compatibility
     if req.source_drive_file_id:
@@ -1099,12 +1057,41 @@ def update_drive_complete(
     if updated_any:
         job.drive_uploaded_at = datetime.now(UTC)
 
-    db.commit()
-
     if job.status != JobState.DELIVERING.value and (
         job.drive_file_id or job.details_drive_file_id
     ):
-        transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete")
+        transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete", commit=False)
+
+    db.commit()
+    db.refresh(job)
+
+    # Record telemetry AFTER db.commit() to release row lock
+    if is_audio:
+        record_stage_metric(
+            job_id=job.id,
+            stage="DRIVE_AUDIO_UPLOAD",
+            started_at=t_start,
+            finished_at=t_finish,
+            duration_ms=dur_ms,
+            status="success",
+            output_bytes=job.audio_bytes,
+        )
+
+        output_dir = Path(settings.HERALD_WORK_DIR) / "output"
+        try:
+            ensure_details_artifact(job, output_dir, db=db)
+        except Exception as de:
+            logger.warning(f"Could not regenerate details artifact after audio upload: {de}")
+
+    elif is_details:
+        record_stage_metric(
+            job_id=job.id,
+            stage="DRIVE_DETAILS_UPLOAD",
+            started_at=t_start,
+            finished_at=t_finish,
+            duration_ms=dur_ms,
+            status="success",
+        )
 
     return {
         "job_id": job.id,
