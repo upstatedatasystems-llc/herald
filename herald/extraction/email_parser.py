@@ -274,9 +274,14 @@ def classify_source_content(clean_text: str, urls: list[str]) -> tuple[SourceCla
 
 def compute_source_hash(text: str, canonical_url: str | None = None) -> str:
     """Compute a deterministic SHA-256 fingerprint for deduplication."""
-    content = text.strip()
+    content = text.strip() if text else ""
     if canonical_url:
-        content += f"||url={canonical_url.strip()}"
+        canon_url_str = canonical_url.strip()
+        non_url_text = URL_REGEX.sub("", content).strip().lower()
+        if not non_url_text or non_url_text in PERMITTED_URL_LABELS:
+            content = f"url={canon_url_str}"
+        else:
+            content = f"{content}||url={canon_url_str}"
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 

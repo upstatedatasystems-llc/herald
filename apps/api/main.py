@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("herald.api")
@@ -404,20 +405,54 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         source_type = SourceType.URL.value
         source_url = parsed.detected_url
 
-    existing_hash_job = (
+    # 2. Check for duplicate content AND matching generation settings
+    if source_url:
+        source_filter = or_(
+            PodcastJob.source_hash == parsed.source_hash,
+            and_(PodcastJob.source_url.isnot(None), PodcastJob.source_url == source_url),
+        )
+    else:
+        source_filter = PodcastJob.source_hash == parsed.source_hash
+
+    candidate_jobs = (
         db.query(PodcastJob)
-        .filter(PodcastJob.source_hash == parsed.source_hash)
-        .filter(PodcastJob.status.in_([JobState.QUEUED_TTS.value, JobState.COMPLETE.value]))
-        .first()
+        .filter(source_filter)
+        .filter(PodcastJob.status != JobState.FAILED_FINAL.value)
+        .all()
     )
-    if existing_hash_job:
+
+    req_mode = parsed.mode.value
+    req_depth = (parsed.research_depth or "").lower().strip()
+    req_voice = (parsed.custom_voice or "").strip()
+    req_speed = round(float(parsed.custom_speed), 2) if parsed.custom_speed is not None else None
+    req_title = (parsed.custom_title or "").strip()
+
+    duplicate_job = None
+    for c_job in candidate_jobs:
+        c_mode = c_job.request_mode
+        c_depth = (c_job.research_depth or "").lower().strip()
+        c_voice = (c_job.custom_voice or c_job.kokoro_voice or "").strip()
+        c_speed = round(float(c_job.custom_speed or c_job.kokoro_speed), 2) if (c_job.custom_speed or c_job.kokoro_speed) is not None else None
+        c_title = (c_job.custom_title or "").strip()
+
+        if (
+            c_mode == req_mode
+            and c_depth == req_depth
+            and c_voice == req_voice
+            and c_speed == req_speed
+            and c_title == req_title
+        ):
+            duplicate_job = c_job
+            break
+
+    if duplicate_job:
         return IntakeResponse(
-            job_id=existing_hash_job.id,
-            status=existing_hash_job.status,
-            request_mode=existing_hash_job.request_mode,
-            source_type=existing_hash_job.source_type,
+            job_id=duplicate_job.id,
+            status=duplicate_job.status,
+            request_mode=duplicate_job.request_mode,
+            source_type=duplicate_job.source_type,
             is_duplicate=True,
-            message="Identical content hash already processed.",
+            message="Identical source content and generation settings already processed.",
         )
 
     job_id = str(uuid.uuid4())
@@ -442,9 +477,32 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         drive_job_key=drive_key,
         status=JobState.RECEIVED.value,
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+
+    try:
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+    except IntegrityError as ie:
+        db.rollback()
+        if req.gmail_message_id and req.gmail_message_id.strip():
+            racing_job = (
+                db.query(PodcastJob)
+                .filter(PodcastJob.gmail_message_id == req.gmail_message_id.strip())
+                .first()
+            )
+            if racing_job:
+                return IntakeResponse(
+                    job_id=racing_job.id,
+                    status=racing_job.status,
+                    request_mode=racing_job.request_mode,
+                    source_type=racing_job.source_type,
+                    is_duplicate=True,
+                    message="Message ID has already been processed.",
+                )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Database constraint collision on intake: {ie}",
+        )
 
     # Record Intake & Email Detection Wait metrics safely
     t_intake_finish = datetime.now(UTC)
