@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -65,10 +66,12 @@ class PodcastJob(Base):
     source_hash = Column(String(64), nullable=False, index=True)
     source_text = Column(Text, nullable=False)
 
-    # Optional top-of-body directives
+    # Optional top-of-body or subject directives
     custom_voice = Column(String(50), nullable=True)
     custom_speed = Column(Float, nullable=True)
     custom_title = Column(String(255), nullable=True)
+    tts_chunk_chars = Column(Integer, nullable=True, default=500)
+    verify_final_script = Column(Boolean, nullable=True, default=False)
 
     gmail_received_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -84,8 +87,10 @@ class PodcastJob(Base):
     claim_owner = Column(String(100), nullable=True)
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Gemini script output JSON
+    # Gemini script output JSON & verification
     script_json = Column(JSON, nullable=True)
+    verify_audit_json = Column(JSON, nullable=True)
+    verify_repair_count = Column(Integer, nullable=False, default=0)
 
     # Research mode data fields
     research_grounding_json = Column(JSON, nullable=True)
@@ -96,7 +101,7 @@ class PodcastJob(Base):
     research_audit_json = Column(JSON, nullable=True)
     research_repair_count = Column(Integer, nullable=False, default=0)
 
-    # Audio synthesis tracking
+    # Audio synthesis & telemetry tracking
     completed_chunk_index = Column(Integer, nullable=False, default=0)
     local_audio_path = Column(String(512), nullable=True)
     audio_bytes = Column(BigInteger, nullable=True)
@@ -106,6 +111,7 @@ class PodcastJob(Base):
     kokoro_voice = Column(String(50), nullable=True)
     kokoro_speed = Column(Float, nullable=True)
     gemini_model = Column(String(50), nullable=True)
+    tts_resource_metrics_json = Column(JSON, nullable=True)
 
     # Delivery & Google Drive metadata
     drive_file_id = Column(String(255), nullable=True)
@@ -126,6 +132,7 @@ class PodcastJob(Base):
     gmail_result_message_id = Column(String(255), nullable=True)
     drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+    details_finalized_at = Column(DateTime(timezone=True), nullable=True)
 
     # Error details
     error_code = Column(String(100), nullable=True)
