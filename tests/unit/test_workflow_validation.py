@@ -65,8 +65,22 @@ def test_validate_all_n8n_workflows():
             assert "Record Delivery Complete" in nodes_by_name
             assert "Read Final Details MD File" in nodes_by_name
             assert "Update Details in Google Drive" in nodes_by_name
-            assert nodes_by_name["Update Details in Google Drive"]["parameters"].get("operation") == "update"
+            update_node = nodes_by_name["Update Details in Google Drive"]
+            assert update_node["parameters"].get("operation") == "update"
+            assert update_node["parameters"].get("options", {}).get("changeFileContent") is True, "Update Details node must explicitly enable changeFileContent"
+            assert update_node["parameters"].get("fileContentKey") == "data" or update_node["parameters"].get("options", {}).get("fileContentKey") == "data", "Binary input property must be 'data'"
+            assert "details_drive_file_id" in update_node["parameters"].get("fileId", ""), "Drive update must target existing details_drive_file_id"
+
             assert "Record Details Finalized" in nodes_by_name
+            connections = data["connections"]
+            assert "Update Details in Google Drive" in connections
+            downstream_nodes = [c["node"] for c in connections["Update Details in Google Drive"]["main"][0]]
+            assert "Record Details Finalized" in downstream_nodes, "Record Details Finalized must be downstream only of successful Drive update"
+
+            gdrive_nodes = [n for n in data["nodes"] if n.get("type") == "n8n-nodes-base.googleDrive"]
+            assert len(gdrive_nodes) == 3, f"Expected 3 Google Drive nodes, found {len(gdrive_nodes)}"
+            upload_nodes = [n for n in gdrive_nodes if n.get("parameters", {}).get("operation") == "upload"]
+            assert len(upload_nodes) == 2, f"Expected exactly 2 Google Drive upload nodes (audio + details), found {len(upload_nodes)}"
 
         if wf_file.name == "email-intake.json":
             nodes_by_name = {n["name"]: n for n in data["nodes"]}

@@ -375,7 +375,10 @@
         "operation": "update",
         "fileId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.details_drive_file_id || $('Record Details Drive Metadata').item.json.details_drive_file_id || $('Upload Details to Google Drive').item.json.id }}",
         "fileContentKey": "data",
-        "options": {}
+        "options": {
+          "changeFileContent": true,
+          "fileContentKey": "data"
+        }
       },
       "name": "Update Details in Google Drive",
       "type": "n8n-nodes-base.googleDrive",

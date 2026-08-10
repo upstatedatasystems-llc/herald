@@ -176,7 +176,6 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         f"- **Created At**: {created_iso}",
         f"- **Audio Ready At**: {audio_ready_iso}",
         f"- **Completed At**: {completed_iso}",
-        f"- **Details Finalized At**: {job.details_finalized_at.isoformat() if getattr(job, 'details_finalized_at', None) else 'N/A'}",
         "",
         "## Processing Summary",
         f"- **Overall Status**: `{job.status}`",
