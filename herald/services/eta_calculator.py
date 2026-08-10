@@ -9,7 +9,7 @@ from herald.db.models import JobState, PodcastJob
 def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> dict:
     """
     Centralized programmatic duration & word count calculator.
-    Uses ~150 WPM baseline for Kokoro at speed 1.0.
+    Uses NARRATION_WORDS_PER_MINUTE (default 136 WPM) baseline for Kokoro adjusted for speed.
     Returns dict with narration_word_count, predicted_duration_seconds, estimated_minutes.
     """
     if not script_json or not isinstance(script_json, dict):
@@ -26,8 +26,12 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
         total_words += len(narration.split())
 
     speed = kokoro_speed if kokoro_speed and kokoro_speed > 0 else 1.0
-    wpm = 150.0 * speed
-    predicted_seconds = int(round((total_words / wpm) * 60.0)) if total_words > 0 else 300
+    wpm_base = getattr(settings, "NARRATION_WORDS_PER_MINUTE", 136.0)
+    wpm_effective = wpm_base * speed
+
+    # Add ~1.5s pause allowance per segment boundary
+    pause_allowance_sec = len(segments) * 1.5
+    predicted_seconds = int(round(((total_words / wpm_effective) * 60.0) + pause_allowance_sec)) if total_words > 0 else 300
     estimated_minutes = max(1, int(round(predicted_seconds / 60.0)))
 
     # Fallback to legacy estimated_minutes field if present without segments
@@ -45,15 +49,41 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
 def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
     """
     Calculate approximate best-effort completion time for a podcast job.
+    Uses weighted RTF from recent successful Kokoro request metrics when available.
     Counts only jobs created ahead of the target job in QUEUED_TTS, SYNTHESIZING, or ENCODING.
     """
-    realtime_factor = settings.TTS_ESTIMATED_REALTIME_FACTOR
-    overhead_seconds = settings.DELIVERY_ESTIMATED_OVERHEAD_SECONDS
+    fallback_rtf = getattr(settings, "TTS_ESTIMATED_REALTIME_FACTOR", 2.4)
+    overhead_seconds = getattr(settings, "DELIVERY_ESTIMATED_OVERHEAD_SECONDS", 60)
+
+    # 0. Query recent successful Kokoro request metrics to calculate weighted RTF
+    realtime_factor = fallback_rtf
+    rtf_source = "fallback"
+
+    try:
+        from herald.db.models import JobProcessingMetric
+        recent_k_metrics = (
+            db.query(JobProcessingMetric)
+            .filter(
+                JobProcessingMetric.stage == "KOKORO_REQUEST",
+                JobProcessingMetric.status == "success",
+            )
+            .order_by(JobProcessingMetric.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        total_wall_ms = sum(m.duration_ms or 0 for m in recent_k_metrics)
+        total_audio_ms = sum(m.audio_duration_ms or 0 for m in recent_k_metrics)
+
+        if total_audio_ms > 10000 and total_wall_ms > 0:
+            realtime_factor = round(total_wall_ms / float(total_audio_ms), 3)
+            rtf_source = "historical"
+    except Exception:
+        pass
 
     # 1. Estimate duration for current job
     dur_info = calculate_script_duration(job.script_json, job.custom_speed or settings.KOKORO_SPEED)
     current_minutes = dur_info["estimated_minutes"]
-    current_audio_seconds = current_minutes * 60.0
+    current_audio_seconds = float(dur_info["predicted_duration_seconds"])
 
     # 2. Estimate queue work ahead (jobs created before current_job)
     queue_ahead_audio_seconds = 0.0
@@ -89,8 +119,10 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
         else:
             queue_ahead_audio_seconds += j_audio_seconds
 
-    total_synthesis_seconds = (queue_ahead_audio_seconds + current_audio_seconds) * realtime_factor
-    total_eta_seconds = int(total_synthesis_seconds + overhead_seconds)
+    predicted_tts_wall_time_seconds = int(round(current_audio_seconds * realtime_factor))
+    estimated_remaining_processing_seconds = int(round((queue_ahead_audio_seconds + current_audio_seconds) * realtime_factor + overhead_seconds))
+
+    total_eta_seconds = estimated_remaining_processing_seconds
 
     # Format human-friendly range
     eta_minutes = math.ceil(total_eta_seconds / 60.0)
@@ -113,8 +145,12 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
     return {
         "job_id": job.id,
         "estimated_minutes": current_minutes,
+        "predicted_audio_duration_seconds": int(current_audio_seconds),
+        "predicted_tts_wall_time_seconds": predicted_tts_wall_time_seconds,
+        "estimated_remaining_processing_seconds": estimated_remaining_processing_seconds,
         "jobs_ahead": jobs_ahead_count,
         "total_eta_seconds": total_eta_seconds,
         "estimated_completion_range": range_text,
         "realtime_factor": realtime_factor,
+        "rtf_source": rtf_source,
     }
