@@ -107,15 +107,15 @@ def test_programmatic_duration_estimation():
         "warnings": [],
     }
 
-    # At speed 1.0 (150 WPM), 300 words = 120 seconds (2 minutes)
+    # At WPM 136 baseline, 300 words + 2 segments (3s pause allowance) = 135 seconds
     dur = calculate_script_duration(script_data, kokoro_speed=1.0)
     assert dur["narration_word_count"] == 300
-    assert dur["predicted_duration_seconds"] == 120
+    assert dur["predicted_duration_seconds"] == 135
     assert dur["estimated_minutes"] == 2
 
-    # At speed 1.2 (180 WPM), 300 words = 100 seconds (2 minutes)
+    # At speed 1.2, 300 words / (136 * 1.2 / 60) + 3s = 113 seconds
     dur_fast = calculate_script_duration(script_data, kokoro_speed=1.2)
-    assert dur_fast["predicted_duration_seconds"] == 100
+    assert dur_fast["predicted_duration_seconds"] == 113
 
 
 def test_system_prompt_includes_spoken_prose_rules():

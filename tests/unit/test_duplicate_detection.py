@@ -213,3 +213,69 @@ def test_concurrent_identical_intake_deduplication(api_client, db_session: Sessi
     d = r.json()
     assert d["is_duplicate"] is True
     assert d["job_id"] == job.id
+
+
+def test_same_source_different_chunk_size_creates_new_job(api_client, db_session: Session):
+    """8. Same source + different chunk-N setting creates a NEW job with identical source_hash."""
+    body = "Article body text for testing chunk size deduplication matching logic."
+
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-chunk-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard chunk-500",
+        "body_text": body,
+    })
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1["is_duplicate"] is False
+
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-chunk-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard chunk-1000",
+        "body_text": body,
+    })
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2["is_duplicate"] is False
+    assert d2["job_id"] != d1["job_id"]
+
+    # Verify source_hash is identical on both jobs in DB
+    j1 = db_session.query(PodcastJob).filter(PodcastJob.id == d1["job_id"]).first()
+    j2 = db_session.query(PodcastJob).filter(PodcastJob.id == d2["job_id"]).first()
+    assert j1.source_hash == j2.source_hash
+    assert j1.tts_chunk_chars == 500
+    assert j2.tts_chunk_chars == 1000
+
+
+def test_same_source_different_verify_creates_new_job(api_client, db_session: Session):
+    """9. Same source + differing verify setting creates a NEW job with identical source_hash."""
+    body = "Article body text for testing verify directive deduplication matching logic."
+
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-verify-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body,
+    })
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1["is_duplicate"] is False
+
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-verify-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard verify",
+        "body_text": body,
+    })
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2["is_duplicate"] is False
+    assert d2["job_id"] != d1["job_id"]
+
+    j1 = db_session.query(PodcastJob).filter(PodcastJob.id == d1["job_id"]).first()
+    j2 = db_session.query(PodcastJob).filter(PodcastJob.id == d2["job_id"]).first()
+    assert j1.source_hash == j2.source_hash
+    assert j1.verify_final_script is False
+    assert j2.verify_final_script is True
+
