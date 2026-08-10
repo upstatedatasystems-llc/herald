@@ -43,6 +43,11 @@ def test_validate_all_n8n_workflows():
             assert "Webhook Trigger - Audio Ready Nudge" in nodes_by_name
             assert "Validate Nudge Header Auth" in nodes_by_name
 
+            auth_node = nodes_by_name["Validate Nudge Header Auth"]
+            auth_val = auth_node["parameters"]["conditions"]["boolean"][0]["value1"]
+            assert "$json.headers" in auth_val, "Validate Nudge Header Auth must use $json.headers"
+            assert "$headers[" not in auth_val, "Validate Nudge Header Auth must not use un-nested $headers"
+
             assert "Check Needs Details Upload" in nodes_by_name
             assert "Read Local Details MD File" in nodes_by_name
             assert "Upload Details to Google Drive" in nodes_by_name

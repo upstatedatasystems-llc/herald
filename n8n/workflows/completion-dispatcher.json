@@ -41,7 +41,7 @@
         "conditions": {
           "boolean": [
             {
-              "value1": "={{ ($headers['x-api-key'] || $headers['x-herald-delivery-token']) === ($env.DELIVERY_NUDGE_SECRET || $env.HERALD_API_KEY) }}",
+              "value1": "={{ ($json.headers['x-api-key'] || $json.headers['x-herald-delivery-token']) === ($env.DELIVERY_NUDGE_SECRET || $env.HERALD_API_KEY) }}",
               "value2": true
             }
           ]
