@@ -15,6 +15,7 @@ from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob
 from herald.db.state_machine import transition_job_state
+from herald.services.resource_monitor import TTSResourceMonitor
 from herald.tts.chunker import chunk_podcast_script
 from herald.tts.kokoro_client import (
     KokoroClient,
@@ -123,10 +124,19 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     db.commit()
     db.refresh(job)
 
-    # Record TTS_QUEUE_WAIT metric
+    # Record TTS_QUEUE_WAIT metric from exact QUEUED_TTS entry timestamp
     try:
+        from herald.db.models import JobStateTransition
         from herald.services.performance_metrics import record_stage_metric
-        queue_start = job.created_at or now
+        q_trans = (
+            db.query(JobStateTransition)
+            .filter(JobStateTransition.job_id == job.id, JobStateTransition.to_state == JobState.QUEUED_TTS.value)
+            .order_by(JobStateTransition.created_at.desc())
+            .first()
+        )
+        queue_start = q_trans.created_at if (q_trans and q_trans.created_at) else (job.updated_at or now)
+        if queue_start and queue_start.tzinfo is None:
+            queue_start = queue_start.replace(tzinfo=UTC)
         wait_ms = max(0, int((now - queue_start).total_seconds() * 1000))
         record_stage_metric(
             job_id=job.id,
@@ -168,7 +178,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             raise ValueError("Job script_json contains no segments to synthesize.")
 
         t_chunking_start = datetime.now(UTC)
-        chunks = chunk_podcast_script(segments, max_chars=settings.TTS_MAX_CHUNK_CHARS)
+        target_chunk_chars = job.tts_chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)
+        chunks = chunk_podcast_script(segments, max_chars=target_chunk_chars)
         t_chunking_finish = datetime.now(UTC)
         record_stage_metric(
             job_id=job.id,
@@ -177,132 +188,144 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             finished_at=t_chunking_finish,
             status="success",
             input_chars=sum(len(s.get("narration", "")) for s in segments),
-            metadata_json={"chunk_count": len(chunks)},
+            metadata_json={
+                "chunk_count": len(chunks),
+                "configured_chunk_chars": target_chunk_chars,
+            },
         )
-        logger.info(f"Script split into {len(chunks)} TTS chunks for job '{job.id}' (Voice: {voice}, Speed: {speed}, Timeout: {synthesis_timeout}s)")
+        logger.info(f"Script split into {len(chunks)} TTS chunks (target max: {target_chunk_chars} chars) for job '{job.id}' (Voice: {voice}, Speed: {speed}, Timeout: {synthesis_timeout}s)")
 
         generated_chunk_paths = []
         is_section_end_list = []
 
-        for chunk in chunks:
-            chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
-            is_section_end_list.append(chunk.is_section_end)
+        # Start low-overhead resource monitor strictly around Kokoro synthesis loop
+        monitor = TTSResourceMonitor(interval_seconds=5.0)
+        monitor.start()
 
-            if chunk.index <= job.completed_chunk_index and chunk_file.exists() and chunk_file.stat().st_size > 0:
-                try:
-                    validate_audio_file(chunk_file)
-                    logger.info(f"Skipping already completed valid chunk {chunk.index}/{len(chunks)}")
-                    generated_chunk_paths.append(chunk_file)
-                    continue
-                except Exception as ve:
-                    logger.warning(f"Cached chunk {chunk.index} invalid ({ve}), re-synthesizing...")
+        try:
+            for chunk in chunks:
+                chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
+                is_section_end_list.append(chunk.is_section_end)
 
-            chunk_success = False
-            last_chunk_error = None
-            for chunk_attempt in range(1, 3):
-                t0_utc = datetime.now(UTC)
-                t0_mono = time.monotonic()
-                try:
-                    logger.info(
-                        f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
-                        f"{len(chunk.text)} chars | Kokoro timeout: {synthesis_timeout}s"
-                    )
-                    kokoro_client.synthesize_chunk(
-                        text=chunk.text,
-                        output_path=chunk_file,
-                        voice=voice,
-                        speed=speed,
-                        timeout=synthesis_timeout,
-                    )
-                    validate_audio_file(chunk_file)
-                    t1_mono = time.monotonic()
-                    t1_utc = datetime.now(UTC)
-                    elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                    output_bytes = chunk_file.stat().st_size if chunk_file.exists() else 0
+                if chunk.index <= job.completed_chunk_index and chunk_file.exists() and chunk_file.stat().st_size > 0:
+                    try:
+                        validate_audio_file(chunk_file)
+                        logger.info(f"Skipping already completed valid chunk {chunk.index}/{len(chunks)}")
+                        generated_chunk_paths.append(chunk_file)
+                        continue
+                    except Exception as ve:
+                        logger.warning(f"Cached chunk {chunk.index} invalid ({ve}), re-synthesizing...")
 
-                    # 24kHz 16-bit PCM mono WAV = 48,000 bytes/sec (44-byte header)
-                    audio_dur_ms = max(0, int(((output_bytes - 44) / 48000.0) * 1000)) if output_bytes > 44 else None
-                    rtf_val = round((elapsed_ms / float(audio_dur_ms)) if audio_dur_ms and audio_dur_ms > 0 else 0.0, 3)
+                chunk_success = False
+                last_chunk_error = None
+                for chunk_attempt in range(1, 3):
+                    t0_utc = datetime.now(UTC)
+                    t0_mono = time.monotonic()
+                    try:
+                        logger.info(
+                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
+                            f"{len(chunk.text)} chars | Kokoro timeout: {synthesis_timeout}s"
+                        )
+                        kokoro_client.synthesize_chunk(
+                            text=chunk.text,
+                            output_path=chunk_file,
+                            voice=voice,
+                            speed=speed,
+                            timeout=synthesis_timeout,
+                        )
+                        validate_audio_file(chunk_file)
+                        t1_mono = time.monotonic()
+                        t1_utc = datetime.now(UTC)
+                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
+                        output_bytes = chunk_file.stat().st_size if chunk_file.exists() else 0
 
-                    record_stage_metric(
-                        job_id=job.id,
-                        stage="KOKORO_REQUEST",
-                        sequence_index=chunk.index,
-                        attempt=chunk_attempt,
-                        started_at=t0_utc,
-                        finished_at=t1_utc,
-                        duration_ms=elapsed_ms,
-                        status="success",
-                        input_chars=len(chunk.text),
-                        output_bytes=output_bytes,
-                        audio_duration_ms=audio_dur_ms,
-                        metadata_json={
-                            "voice": voice,
-                            "speed": speed,
-                            "rtf": rtf_val,
-                            "timeout_seconds": synthesis_timeout,
-                        },
-                        is_attempt_metric=True,
-                    )
+                        # 24kHz 16-bit PCM mono WAV = 48,000 bytes/sec (44-byte header)
+                        audio_dur_ms = max(0, int(((output_bytes - 44) / 48000.0) * 1000)) if output_bytes > 44 else None
+                        rtf_val = round((elapsed_ms / float(audio_dur_ms)) if audio_dur_ms and audio_dur_ms > 0 else 0.0, 3)
 
-                    logger.info(
-                        f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
-                        f"Completed in {elapsed_ms / 1000.0:.1f}s"
-                    )
-                    chunk_success = True
-                    break
-                except Exception as ce:
-                    t1_mono = time.monotonic()
-                    t1_utc = datetime.now(UTC)
-                    elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                    last_chunk_error = ce
-                    if chunk_file.exists():
-                        chunk_file.unlink(missing_ok=True)
+                        record_stage_metric(
+                            job_id=job.id,
+                            stage="KOKORO_REQUEST",
+                            sequence_index=chunk.index,
+                            attempt=chunk_attempt,
+                            started_at=t0_utc,
+                            finished_at=t1_utc,
+                            duration_ms=elapsed_ms,
+                            status="success",
+                            input_chars=len(chunk.text),
+                            output_bytes=output_bytes,
+                            audio_duration_ms=audio_dur_ms,
+                            metadata_json={
+                                "voice": voice,
+                                "speed": speed,
+                                "rtf": rtf_val,
+                                "timeout_seconds": synthesis_timeout,
+                            },
+                            is_attempt_metric=True,
+                        )
 
-                    is_timeout = isinstance(ce, KokoroTTSTimeoutError) or "timed out" in str(ce).lower()
-                    record_stage_metric(
-                        job_id=job.id,
-                        stage="KOKORO_REQUEST",
-                        sequence_index=chunk.index,
-                        attempt=chunk_attempt,
-                        started_at=t0_utc,
-                        finished_at=t1_utc,
-                        duration_ms=elapsed_ms,
-                        status="failed",
-                        input_chars=len(chunk.text),
-                        metadata_json={
-                            "voice": voice,
-                            "speed": speed,
-                            "timeout_indicator": is_timeout,
-                            "error": str(ce),
-                        },
-                        is_attempt_metric=True,
-                    )
+                        logger.info(
+                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
+                            f"Completed in {elapsed_ms / 1000.0:.1f}s"
+                        )
+                        chunk_success = True
+                        break
+                    except Exception as ce:
+                        t1_mono = time.monotonic()
+                        t1_utc = datetime.now(UTC)
+                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
+                        last_chunk_error = ce
+                        if chunk_file.exists():
+                            chunk_file.unlink(missing_ok=True)
 
+                        is_timeout = isinstance(ce, KokoroTTSTimeoutError) or "timed out" in str(ce).lower()
+                        record_stage_metric(
+                            job_id=job.id,
+                            stage="KOKORO_REQUEST",
+                            sequence_index=chunk.index,
+                            attempt=chunk_attempt,
+                            started_at=t0_utc,
+                            finished_at=t1_utc,
+                            duration_ms=elapsed_ms,
+                            status="failed",
+                            input_chars=len(chunk.text),
+                            metadata_json={
+                                "voice": voice,
+                                "speed": speed,
+                                "timeout_indicator": is_timeout,
+                                "error": str(ce),
+                            },
+                            is_attempt_metric=True,
+                        )
+
+                        if is_timeout:
+                            logger.warning(
+                                f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
+                                f"timed out after {elapsed_ms / 1000.0:.1f}s"
+                            )
+                        else:
+                            logger.warning(
+                                f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
+                                f"failed in {elapsed_ms / 1000.0:.1f}s: {ce}"
+                            )
+                        if chunk_attempt < 2:
+                            time.sleep(1.0)
+
+                if not chunk_success:
+                    is_timeout = isinstance(last_chunk_error, KokoroTTSTimeoutError) or "timed out" in str(last_chunk_error).lower()
+                    msg = f"TTS chunk {chunk.index}/{len(chunks)} failed after 2 attempts: {last_chunk_error}"
                     if is_timeout:
-                        logger.warning(
-                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
-                            f"timed out after {elapsed_ms / 1000.0:.1f}s"
-                        )
-                    else:
-                        logger.warning(
-                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
-                            f"failed in {elapsed_ms / 1000.0:.1f}s: {ce}"
-                        )
-                    if chunk_attempt < 2:
-                        time.sleep(1.0)
+                        raise KokoroTTSTimeoutError(msg)
+                    raise KokoroTTSError(msg)
 
-            if not chunk_success:
-                is_timeout = isinstance(last_chunk_error, KokoroTTSTimeoutError) or "timed out" in str(last_chunk_error).lower()
-                msg = f"TTS chunk {chunk.index}/{len(chunks)} failed after 2 attempts: {last_chunk_error}"
-                if is_timeout:
-                    raise KokoroTTSTimeoutError(msg)
-                raise KokoroTTSError(msg)
-
-            job.completed_chunk_index = chunk.index
-            job.last_heartbeat_at = datetime.now(UTC)
+                job.completed_chunk_index = chunk.index
+                job.last_heartbeat_at = datetime.now(UTC)
+                db.commit()
+                generated_chunk_paths.append(chunk_file)
+        finally:
+            resource_aggregates = monitor.stop()
+            job.tts_resource_metrics_json = resource_aggregates
             db.commit()
-            generated_chunk_paths.append(chunk_file)
 
         t_tts_total_finish = datetime.now(UTC)
         record_stage_metric(
@@ -381,6 +404,22 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
         logger.info(f"Successfully rendered audio and details artifact for job '{job.id}': {output_mp3_path}")
 
+        # Post-commit delivery nudge (Directive 4: ONLY after AUDIO_READY commit)
+        if getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
+            nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
+            nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
+            nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
+            try:
+                import httpx
+                logger.info(f"Sending authenticated post-commit delivery nudge for job '{job.id}' to {nudge_url}")
+                headers = {"Content-Type": "application/json"}
+                if nudge_secret:
+                    headers["X-API-Key"] = nudge_secret
+                    headers["X-Herald-Delivery-Token"] = nudge_secret
+                with httpx.Client(timeout=nudge_timeout) as client:
+                    client.post(nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers)
+            except Exception as ne:
+                logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}). Scheduled polling fallback will process job.")
 
         try:
             shutil.rmtree(chunks_dir)

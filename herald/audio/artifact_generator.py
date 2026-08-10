@@ -176,18 +176,27 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         f"- **Created At**: {created_iso}",
         f"- **Audio Ready At**: {audio_ready_iso}",
         f"- **Completed At**: {completed_iso}",
+        f"- **Details Finalized At**: {job.details_finalized_at.isoformat() if getattr(job, 'details_finalized_at', None) else 'N/A'}",
         "",
         "## Processing Summary",
         f"- **Overall Status**: `{job.status}`",
         f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
         f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
+        f"- **Configured TTS Chunk Size**: `{getattr(job, 'tts_chunk_chars', 500) or 500} chars`",
+        f"- **Script Verification Setting**: `{bool(getattr(job, 'verify_final_script', False))}`",
         f"- **Audio Duration**: {dur_str}",
         f"- **Audio File Size**: {size_str}",
         f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-        f"- **TTS Chunks**: {job.completed_chunk_index or 0}",
+        f"- **TTS Chunks Count**: {job.completed_chunk_index or 0}",
         f"- **Synthesis Attempt Count**: {job.synthesis_attempt_count or 0}",
         f"- **Total Processing Time**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Time**: N/A",
     ])
+
+    v_audit = getattr(job, "verify_audit_json", None) or {}
+    v_rep_count = getattr(job, "verify_repair_count", 0) or 0
+    if getattr(job, "verify_final_script", False):
+        v_status = "PASS" if not v_audit.get("has_material_issues") else f"REPAIRED ({v_rep_count} pass)"
+        lines.append(f"- **Fidelity Verify Status**: `{v_status}`")
 
     if is_research:
         lines.extend([
@@ -196,6 +205,20 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             f"- **Grounded Sources Count**: {job.research_source_count or 0}",
             f"- **Research Repair Count**: {job.research_repair_count or 0}",
             f"- **Research Audit Status**: `{audit_pass}`",
+        ])
+
+    # TTS Resource Monitoring aggregates table if collected
+    r_metrics = getattr(job, "tts_resource_metrics_json", None)
+    if r_metrics and isinstance(r_metrics, dict) and r_metrics.get("sample_count", 0) > 0:
+        lines.extend([
+            "",
+            "### TTS Resource Monitoring Summary (Synthesizing Window)",
+            f"- **Sample Count**: {r_metrics.get('sample_count', 0)} (Interval: ~{r_metrics.get('sample_interval_seconds', 5.0)}s)",
+            f"- **Observed TTS Wall Time**: {r_metrics.get('observed_tts_wall_time_ms', 0)} ms ({r_metrics.get('observed_tts_wall_time_ms', 0) / 1000.0:.2f}s)",
+            f"- **CPU Utilization**: Avg `{r_metrics.get('avg_cpu_percent', 0.0)}%` | Peak `{r_metrics.get('peak_cpu_percent', 0.0)}%`",
+            f"- **Process Memory Peak**: `{r_metrics.get('peak_memory_mb', 0.0)} MB`",
+            f"- **Min Available System Memory**: `{r_metrics.get('minimum_available_memory_mb', 0.0)} MB`",
+            f"- **Swap Usage**: Start `{r_metrics.get('swap_start_mb', 0.0)} MB` | End `{r_metrics.get('swap_end_mb', 0.0)} MB` | Peak `{r_metrics.get('swap_peak_mb', 0.0)} MB`",
         ])
 
     # Add Performance Metrics subsection if data is present
@@ -211,12 +234,17 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             ("RESEARCH_SCRIPT", "Research Scripting"),
             ("RESEARCH_AUDIT", "Research Audit"),
             ("RESEARCH_REPAIR", "Research Repair"),
+            ("VERIFY_AUDIT", "Verify Script Audit"),
+            ("VERIFY_REPAIR", "Verify Script Repair"),
             ("TTS_QUEUE_WAIT", "TTS Queue Wait"),
             ("TTS_CHUNKING", "TTS Chunking"),
             ("TTS_TOTAL", "TTS Total Synthesis"),
             ("FFMPEG_ENCODING", "FFmpeg Assembly"),
             ("DELIVERY_DISPATCH_WAIT", "Delivery Dispatch Wait"),
             ("DRIVE_AUDIO_UPLOAD", "Drive Audio Upload"),
+            ("DRIVE_DETAILS_UPLOAD", "Drive Details Upload"),
+            ("EMAIL_DELIVERY", "Email Delivery"),
+            ("DRIVE_DETAILS_FINALIZE", "Drive Details In-Place Finalize"),
         ]
         for stage_key, label in metric_order:
             if stage_key in stage_metrics_map:

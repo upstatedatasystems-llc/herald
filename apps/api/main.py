@@ -38,10 +38,12 @@ from herald.extraction.url_extractor import (
 from herald.gemini.client import (
     GeminiError,
     audit_research_script,
+    audit_script_fidelity,
     generate_grounded_research,
     generate_podcast_script,
     normalize_research_dossier,
     repair_research_script,
+    repair_script_fidelity,
 )
 from herald.services.email_formatter import (
     format_acknowledgment_email,
@@ -426,6 +428,8 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     req_voice = (parsed.custom_voice or "").strip()
     req_speed = round(float(parsed.custom_speed), 2) if parsed.custom_speed is not None else None
     req_title = (parsed.custom_title or "").strip()
+    req_chunk = parsed.tts_chunk_chars or 500
+    req_verify = bool(parsed.verify_final_script)
 
     duplicate_job = None
     for c_job in candidate_jobs:
@@ -434,6 +438,8 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         c_voice = (c_job.custom_voice or c_job.kokoro_voice or "").strip()
         c_speed = round(float(c_job.custom_speed or c_job.kokoro_speed), 2) if (c_job.custom_speed or c_job.kokoro_speed) is not None else None
         c_title = (c_job.custom_title or "").strip()
+        c_chunk = c_job.tts_chunk_chars if c_job.tts_chunk_chars is not None else 500
+        c_verify = bool(c_job.verify_final_script)
 
         if (
             c_mode == req_mode
@@ -441,6 +447,8 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             and c_voice == req_voice
             and c_speed == req_speed
             and c_title == req_title
+            and c_chunk == req_chunk
+            and c_verify == req_verify
         ):
             duplicate_job = c_job
             break
@@ -474,6 +482,8 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         custom_voice=parsed.custom_voice,
         custom_speed=parsed.custom_speed,
         custom_title=parsed.custom_title,
+        tts_chunk_chars=parsed.tts_chunk_chars,
+        verify_final_script=parsed.verify_final_script,
         drive_job_key=drive_key,
         status=JobState.RECEIVED.value,
     )
@@ -734,6 +744,48 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     is_attempt_metric=True,
                 )
 
+            # Optional final script verification for Research mode when verify=true
+            if job.verify_final_script and not job.verify_audit_json:
+                logger.info(f"Executing Optional Final VERIFY Audit for Research job '{job.id}'")
+                t0 = datetime.now(UTC)
+                v_audit = audit_script_fidelity(
+                    source_text=job.source_text,
+                    script_dict=job.script_json,
+                )
+                t1 = datetime.now(UTC)
+                job.verify_audit_json = v_audit.model_dump()
+                db.commit()
+                record_stage_metric(
+                    job_id=job.id,
+                    stage="VERIFY_AUDIT",
+                    started_at=t0,
+                    finished_at=t1,
+                    status="success",
+                    metadata_json={"has_material_issues": v_audit.has_material_issues},
+                )
+
+                if v_audit.has_material_issues and job.verify_repair_count == 0:
+                    logger.info(f"Executing Optional Final VERIFY Repair for Research job '{job.id}'")
+                    t0 = datetime.now(UTC)
+                    repaired_script = repair_research_script(
+                        source_text=job.source_text,
+                        research_dossier=job.research_json or {},
+                        script_dict=job.script_json,
+                        audit_result=v_audit.model_dump(),
+                    )
+                    t1 = datetime.now(UTC)
+                    job.script_json = repaired_script.model_dump()
+                    job.verify_repair_count = 1
+                    db.commit()
+                    record_stage_metric(
+                        job_id=job.id,
+                        stage="VERIFY_REPAIR",
+                        started_at=t0,
+                        finished_at=t1,
+                        status="success",
+                        is_attempt_metric=True,
+                    )
+
         else:
             # Brief or Standard mode
             if not job.script_json:
@@ -754,6 +806,47 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     status="success",
                     input_chars=len(job.source_text or ""),
                 )
+
+            # Optional script verification for Brief/Standard mode when verify=true
+            if job.verify_final_script and not job.verify_audit_json:
+                logger.info(f"Executing VERIFY Audit for {req_mode.upper()} job '{job.id}'")
+                t0 = datetime.now(UTC)
+                v_audit = audit_script_fidelity(
+                    source_text=job.source_text,
+                    script_dict=job.script_json,
+                )
+                t1 = datetime.now(UTC)
+                job.verify_audit_json = v_audit.model_dump()
+                db.commit()
+                record_stage_metric(
+                    job_id=job.id,
+                    stage="VERIFY_AUDIT",
+                    started_at=t0,
+                    finished_at=t1,
+                    status="success",
+                    metadata_json={"has_material_issues": v_audit.has_material_issues},
+                )
+
+                if v_audit.has_material_issues and job.verify_repair_count == 0:
+                    logger.info(f"Executing VERIFY Repair for {req_mode.upper()} job '{job.id}'")
+                    t0 = datetime.now(UTC)
+                    repaired = repair_script_fidelity(
+                        source_text=job.source_text,
+                        script_dict=job.script_json,
+                        audit_result=v_audit.model_dump(),
+                    )
+                    t1 = datetime.now(UTC)
+                    job.script_json = repaired.model_dump()
+                    job.verify_repair_count = 1
+                    db.commit()
+                    record_stage_metric(
+                        job_id=job.id,
+                        stage="VERIFY_REPAIR",
+                        started_at=t0,
+                        finished_at=t1,
+                        status="success",
+                        is_attempt_metric=True,
+                    )
 
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-api")
         transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-api")
@@ -1275,6 +1368,89 @@ def update_delivery_complete(
         "job_id": job.id,
         "status": job.status,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+class DetailsFinalizedRequest(BaseModel):
+    details_drive_file_id: str | None = Field(None, description="Final Drive file ID for updated Details Markdown")
+    details_drive_web_link: str | None = Field(None, description="Final Drive web link for updated Details Markdown")
+    started_at: Any | None = Field(None, description="Details finalize start timestamp")
+    finished_at: Any | None = Field(None, description="Details finalize finish timestamp")
+    duration_ms: int | None = Field(None, description="Details finalize duration in milliseconds")
+
+
+@app.post(
+    "/api/v1/jobs/{job_id}/details-finalized",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Delivery"],
+)
+def update_details_finalized(
+    job_id: str, req: DetailsFinalizedRequest | None = None, db: Session = Depends(get_db)
+):
+    """
+    Record in-place Google Drive update for companion details artifact after job reaches COMPLETE.
+    Persists details_finalized_at and records stage metric DRIVE_DETAILS_FINALIZE.
+    """
+    job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    now = datetime.now(UTC)
+    if req and req.details_drive_file_id:
+        job.details_drive_file_id = req.details_drive_file_id
+    if req and req.details_drive_web_link:
+        job.details_drive_web_link = req.details_drive_web_link
+
+    job.details_finalized_at = now
+    db.commit()
+
+    t_start = normalize_gmail_timestamp(req.started_at) if req else None
+    t_finish = normalize_gmail_timestamp(req.finished_at) if req else None
+    dur_ms = req.duration_ms if req else None
+    if dur_ms is None and t_start and t_finish:
+        dur_ms = max(0, int((t_finish - t_start).total_seconds() * 1000))
+
+    record_stage_metric(
+        job_id=job.id,
+        stage="DRIVE_DETAILS_FINALIZE",
+        started_at=t_start or now,
+        finished_at=t_finish or now,
+        duration_ms=dur_ms,
+        status="success",
+    )
+
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "details_drive_file_id": job.details_drive_file_id,
+        "details_drive_web_link": job.details_drive_web_link,
+        "details_finalized_at": job.details_finalized_at.isoformat() if job.details_finalized_at else None,
+    }
+
+
+class DeliveryNudgeRequest(BaseModel):
+    job_id: str = Field(..., description="Job ID to nudge delivery for")
+    event: str | None = Field(default="AUDIO_READY")
+
+
+@app.post(
+    "/api/v1/delivery/nudge",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Delivery"],
+)
+def delivery_nudge_endpoint(req: DeliveryNudgeRequest, db: Session = Depends(get_db)):
+    """
+    Protected delivery nudge endpoint. Non-authoritative trigger that wakes n8n delivery dispatcher.
+    Returns HTTP 200 without modifying state (claim_delivery_job remains authoritative).
+    """
+    job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "nudged": True,
+        "job_id": job.id,
+        "status": job.status,
+        "message": "Delivery nudge received; dispatcher awakened.",
     }
 
 
