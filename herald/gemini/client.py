@@ -9,6 +9,7 @@ import httpx
 
 from herald.config import settings
 from herald.gemini.schema import (
+    FidelityAuditResponse,
     PodcastScriptResponse,
     ResearchAuditResponse,
     ResearchDossierResponse,
@@ -666,3 +667,169 @@ Return the corrected PodcastScriptResponse JSON now.
         return PodcastScriptResponse(**json.loads(raw_text))
 
     raise GeminiError("Failed to repair research script.")
+
+
+def audit_script_fidelity(
+    source_text: str,
+    script_dict: dict,
+    api_key: str | None = None,
+    model_name: str | None = None,
+) -> FidelityAuditResponse:
+    """
+    Perform a Gemini fidelity audit against normalized source text for Brief/Standard script validation when verify=true.
+    """
+    key = api_key or settings.GEMINI_API_KEY
+    model = model_name or settings.GEMINI_MODEL
+
+    if not key:
+        raise GeminiAuthError("Gemini API key is not configured.")
+
+    prompt = f"""
+Audit the following podcast script strictly against the primary source material.
+
+<PRIMARY_SOURCE>
+{source_text}
+</PRIMARY_SOURCE>
+
+<PODCAST_SCRIPT>
+{json.dumps(script_dict, indent=2)}
+</PODCAST_SCRIPT>
+
+Check specifically for:
+1. unsupported_factual_claims
+2. incorrect_numbers_dates_names
+3. incorrect_entity_relationships
+4. material_source_misrepresentation
+5. important_omissions_material_meaning
+6. excessive_certainty
+7. accidental_invented_context
+
+Set has_material_issues to true ONLY if material factual errors or severe misrepresentations exist that require script repair.
+If has_material_issues is true, provide concrete repair_instructions.
+"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+    schema_dict = {
+        "type": "OBJECT",
+        "properties": {
+            "unsupported_factual_claims": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "incorrect_numbers_dates_names": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "incorrect_entity_relationships": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "material_source_misrepresentation": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "important_omissions_material_meaning": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "excessive_certainty": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "accidental_invented_context": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "has_material_issues": {"type": "BOOLEAN"},
+            "repair_instructions": {"type": "STRING"},
+        },
+        "required": [
+            "unsupported_factual_claims",
+            "incorrect_numbers_dates_names",
+            "incorrect_entity_relationships",
+            "material_source_misrepresentation",
+            "important_omissions_material_meaning",
+            "excessive_certainty",
+            "accidental_invented_context",
+            "has_material_issues",
+        ],
+    }
+
+    try:
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
+                "responseMimeType": "application/json",
+                "responseSchema": schema_dict,
+            },
+        }
+
+        with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            resp = client.post(url, json=payload)
+
+        if resp.status_code == 200:
+            raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            return FidelityAuditResponse(**json.loads(raw_text))
+    except Exception as e:
+        logger.warning(f"Fidelity audit error: {e}")
+
+    return FidelityAuditResponse(has_material_issues=False)
+
+
+def repair_script_fidelity(
+    source_text: str,
+    script_dict: dict,
+    audit_result: dict,
+    api_key: str | None = None,
+    model_name: str | None = None,
+) -> PodcastScriptResponse:
+    """
+    Perform ONE controlled script repair pass for Brief/Standard script when verify=true.
+    """
+    key = api_key or settings.GEMINI_API_KEY
+    model = model_name or settings.GEMINI_MODEL
+
+    prompt = f"""
+Repair the podcast script to resolve the fidelity audit findings described below.
+
+<AUDIT_FINDINGS>
+{json.dumps(audit_result, indent=2)}
+</AUDIT_FINDINGS>
+
+<PRIMARY_SOURCE>
+{source_text}
+</PRIMARY_SOURCE>
+
+<ORIGINAL_SCRIPT>
+{json.dumps(script_dict, indent=2)}
+</ORIGINAL_SCRIPT>
+
+Return the corrected PodcastScriptResponse JSON now.
+"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+    schema_dict = {
+        "type": "OBJECT",
+        "properties": {
+            "episode_title": {"type": "STRING"},
+            "episode_description": {"type": "STRING"},
+            "source_title": {"type": "STRING"},
+            "segments": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "order": {"type": "INTEGER"},
+                        "heading": {"type": "STRING"},
+                        "narration": {"type": "STRING"},
+                    },
+                    "required": ["order", "heading", "narration"],
+                },
+            },
+            "warnings": {"type": "ARRAY", "items": {"type": "STRING"}},
+        },
+        "required": ["episode_title", "episode_description", "segments", "warnings"],
+    }
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
+            "responseMimeType": "application/json",
+            "responseSchema": schema_dict,
+        },
+    }
+
+    with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+        resp = client.post(url, json=payload)
+
+    if resp.status_code == 200:
+        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return PodcastScriptResponse(**json.loads(raw_text))
+
+    raise GeminiError("Failed to repair script fidelity.")
+

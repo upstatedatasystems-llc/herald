@@ -93,6 +93,7 @@ class ResearchDossierResponse(BaseModel):
     useful_context: list[UsefulContextItem] = Field(default_factory=list, description="Enriched context entries")
     outdated_or_uncertain: list[str] = Field(default_factory=list, description="Outdated claims or unresolved uncertainties")
     research_sources: list[ResearchSource] = Field(default_factory=list, description="Canonical research sources registry")
+    material_sources: list[str] = Field(default_factory=list, description="List of source_ids materially used to support research")
 
 
 class ResearchAuditResponse(BaseModel):
@@ -107,3 +108,18 @@ class ResearchAuditResponse(BaseModel):
     citation_mapping_failures: list[str] = Field(default_factory=list)
     has_material_issues: bool = Field(..., description="True if material defects were found that require repair")
     repair_instructions: str | None = Field(default=None, description="Specific instructions for script repair if material issues exist")
+
+
+class FidelityAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    unsupported_factual_claims: list[str] = Field(default_factory=list)
+    incorrect_numbers_dates_names: list[str] = Field(default_factory=list)
+    incorrect_entity_relationships: list[str] = Field(default_factory=list)
+    material_source_misrepresentation: list[str] = Field(default_factory=list)
+    important_omissions_material_meaning: list[str] = Field(default_factory=list)
+    excessive_certainty: list[str] = Field(default_factory=list)
+    accidental_invented_context: list[str] = Field(default_factory=list)
+    has_material_issues: bool = Field(..., description="True if material fidelity defects exist requiring repair")
+    repair_instructions: str | None = Field(default=None, description="Specific instructions for script repair if material issues exist")
+
