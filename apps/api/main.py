@@ -1440,17 +1440,35 @@ class DeliveryNudgeRequest(BaseModel):
 )
 def delivery_nudge_endpoint(req: DeliveryNudgeRequest, db: Session = Depends(get_db)):
     """
-    Protected delivery nudge endpoint. Non-authoritative trigger that wakes n8n delivery dispatcher.
-    Returns HTTP 200 without modifying state (claim_delivery_job remains authoritative).
+    Public API delivery nudge proxy endpoint. Authenticates external API clients and forwards
+    the delivery nudge to the internal n8n webhook (/webhook/herald-audio-ready).
     """
     job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
+    nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
+    nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
+
+    webhook_dispatched = False
+    try:
+        headers = {"Content-Type": "application/json"}
+        if nudge_secret:
+            headers["X-API-Key"] = nudge_secret
+            headers["X-Herald-Delivery-Token"] = nudge_secret
+        with httpx.Client(timeout=nudge_timeout) as client:
+            client.post(nudge_url, json={"job_id": job.id, "event": req.event or "AUDIO_READY"}, headers=headers)
+        webhook_dispatched = True
+    except Exception as ne:
+        logger.warning(f"Delivery nudge proxy for job '{job.id}' to n8n webhook failed non-fatally: {ne}")
+
     return {
         "nudged": True,
         "job_id": job.id,
         "status": job.status,
-        "message": "Delivery nudge received; dispatcher awakened.",
+        "webhook_dispatched": webhook_dispatched,
+        "message": "Delivery nudge proxy received and dispatched to n8n webhook.",
     }
 
 

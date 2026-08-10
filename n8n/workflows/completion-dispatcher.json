@@ -22,6 +22,41 @@
     },
     {
       "parameters": {
+        "httpMethod": "POST",
+        "path": "herald-audio-ready",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook Trigger - Audio Ready Nudge",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        460
+      ],
+      "webhookId": "herald-audio-ready-nudge"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ ($headers['x-api-key'] || $headers['x-herald-delivery-token']) === ($env.DELIVERY_NUDGE_SECRET || $env.HERALD_API_KEY) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Validate Nudge Header Auth",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        320,
+        460
+      ]
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "http://herald-api:8000/api/v1/delivery/claim",
         "sendHeaders": true,
@@ -39,7 +74,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        420,
+        480,
         300
       ]
     },
@@ -58,7 +93,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        640,
+        680,
         300
       ]
     },
@@ -77,7 +112,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        860,
+        880,
         250
       ]
     },
@@ -109,7 +144,7 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        1300,
+        1280,
         150
       ],
       "credentials": {
@@ -141,7 +176,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        1520,
+        1480,
         150
       ]
     },
@@ -160,7 +195,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        1740,
+        1680,
         250
       ]
     },
@@ -173,7 +208,7 @@
       "type": "n8n-nodes-base.readBinaryFile",
       "typeVersion": 1,
       "position": [
-        1960,
+        1880,
         150
       ]
     },
@@ -192,7 +227,7 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        2180,
+        2080,
         150
       ],
       "credentials": {
@@ -224,7 +259,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        2400,
+        2280,
         150
       ]
     },
@@ -243,7 +278,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        2620,
+        2480,
         250
       ]
     },
@@ -266,7 +301,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        2840,
+        2680,
         150
       ]
     },
@@ -285,7 +320,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        3060,
+        2880,
         150
       ],
       "credentials": {
@@ -317,13 +352,96 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
+        3080,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $('Claim Delivery Job (Atomic)').item.json.job.local_details_path }}",
+        "options": {}
+      },
+      "name": "Read Final Details MD File",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
         3280,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "update",
+        "fileId": "={{ $('Claim Delivery Job (Atomic)').item.json.job.details_drive_file_id || $('Record Details Drive Metadata').item.json.details_drive_file_id || $('Upload Details to Google Drive').item.json.id }}",
+        "fileContentKey": "data",
+        "options": {}
+      },
+      "name": "Update Details in Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3480,
+        250
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "1",
+          "name": "Herald Google Drive Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://herald-api:8000/api/v1/jobs/{{ $('Claim Delivery Job (Atomic)').item.json.job.id }}/details-finalized",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.HERALD_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"details_drive_file_id\": \"{{ $('Claim Delivery Job (Atomic)').item.json.job.details_drive_file_id || $('Record Details Drive Metadata').item.json.details_drive_file_id || $('Upload Details to Google Drive').item.json.id }}\",\n  \"details_drive_web_link\": \"{{ $('Claim Delivery Job (Atomic)').item.json.job.details_drive_web_link || $('Record Details Drive Metadata').item.json.details_drive_web_link || $('Upload Details to Google Drive').item.json.webViewLink }}\"\n}",
+        "options": {}
+      },
+      "name": "Record Details Finalized",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        3680,
         250
       ]
     }
   ],
   "connections": {
     "Schedule Trigger - 1 Min Poll": {
+      "main": [
+        [
+          {
+            "node": "Claim Delivery Job (Atomic)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger - Audio Ready Nudge": {
+      "main": [
+        [
+          {
+            "node": "Validate Nudge Header Auth",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Nudge Header Auth": {
       "main": [
         [
           {
@@ -485,6 +603,39 @@
         [
           {
             "node": "Record Delivery Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Delivery Complete": {
+      "main": [
+        [
+          {
+            "node": "Read Final Details MD File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Final Details MD File": {
+      "main": [
+        [
+          {
+            "node": "Update Details in Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Details in Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Record Details Finalized",
             "type": "main",
             "index": 0
           }

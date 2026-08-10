@@ -39,6 +39,10 @@ def test_validate_all_n8n_workflows():
 
         if wf_file.name == "completion-dispatcher.json":
             nodes_by_name = {n["name"]: n for n in data["nodes"]}
+            assert "Schedule Trigger - 1 Min Poll" in nodes_by_name
+            assert "Webhook Trigger - Audio Ready Nudge" in nodes_by_name
+            assert "Validate Nudge Header Auth" in nodes_by_name
+
             assert "Check Needs Details Upload" in nodes_by_name
             assert "Read Local Details MD File" in nodes_by_name
             assert "Upload Details to Google Drive" in nodes_by_name
@@ -52,6 +56,12 @@ def test_validate_all_n8n_workflows():
             reply_node = nodes_by_name["Send Link-Only Reply"]
             assert reply_node["parameters"].get("emailType") == "html"
             assert "html" in reply_node["parameters"]["message"]
+
+            assert "Record Delivery Complete" in nodes_by_name
+            assert "Read Final Details MD File" in nodes_by_name
+            assert "Update Details in Google Drive" in nodes_by_name
+            assert nodes_by_name["Update Details in Google Drive"]["parameters"].get("operation") == "update"
+            assert "Record Details Finalized" in nodes_by_name
 
         if wf_file.name == "email-intake.json":
             nodes_by_name = {n["name"]: n for n in data["nodes"]}
