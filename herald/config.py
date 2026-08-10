@@ -39,12 +39,22 @@ class Settings(BaseSettings):
     KOKORO_SPEED: float = 1.0
     KOKORO_MODEL_PATH: str = "/opt/herald/models/kokoro"
     MAX_ACTIVE_TTS_JOBS: int = 1
-    TTS_MAX_CHUNK_CHARS: int = 500
+    TTS_CHUNK_DEFAULT_CHARS: int = 500
+    TTS_CHUNK_MIN_CHARS: int = 250
+    TTS_CHUNK_MAX_CHARS: int = 1000
+    TTS_MAX_CHUNK_CHARS: int = 500  # Legacy fallback alias
     KOKORO_HEALTH_GRACE_SECONDS: int = 120
     KOKORO_SYNTHESIS_TIMEOUT_SECONDS: int = 180
 
+    # Event-Driven Delivery Nudge
+    ENABLE_EVENT_DRIVEN_DELIVERY: bool = True
+    DELIVERY_NUDGE_WEBHOOK_URL: str = "http://n8n:5678/webhook/herald-audio-ready"
+    DELIVERY_NUDGE_SECRET: str = ""
+    DELIVERY_NUDGE_TIMEOUT_SECONDS: float = 3.0
+
     # ETA Calculation
-    TTS_ESTIMATED_REALTIME_FACTOR: float = 2.5
+    NARRATION_WORDS_PER_MINUTE: float = 136.0
+    TTS_ESTIMATED_REALTIME_FACTOR: float = 2.4
     DELIVERY_ESTIMATED_OVERHEAD_SECONDS: int = 60
 
     # Directives Bounds

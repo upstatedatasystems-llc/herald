@@ -28,6 +28,8 @@ class EmailParseResult:
         custom_speed: float | None = None,
         custom_title: str | None = None,
         research_depth: str | None = None,
+        tts_chunk_chars: int = 500,
+        verify_final_script: bool = False,
         warnings: list[str] | None = None,
     ):
         self.mode = mode
@@ -39,8 +41,20 @@ class EmailParseResult:
         self.custom_speed = custom_speed
         self.custom_title = custom_title
         self.research_depth = research_depth
+        self.tts_chunk_chars = tts_chunk_chars
+        self.verify_final_script = verify_final_script
         self.warnings = warnings or []
 
+
+BASE_SUBJECT_PATTERNS = [
+    ("podcast: research low", RequestMode.RESEARCH, "low"),
+    ("podcast: research medium", RequestMode.RESEARCH, "medium"),
+    ("podcast: research high", RequestMode.RESEARCH, "high"),
+    ("podcast: research", RequestMode.RESEARCH, None),
+    ("podcast: detailed", RequestMode.RESEARCH, "medium"),
+    ("podcast: brief", RequestMode.BRIEF, None),
+    ("podcast: standard", RequestMode.STANDARD, None),
+]
 
 EXACT_SUBJECT_MAP = {
     "podcast: brief": (RequestMode.BRIEF, None),
@@ -78,14 +92,19 @@ PERMITTED_URL_LABELS = {
 }
 
 
-def parse_subject_mode_and_depth(subject: str) -> tuple[RequestMode, str | None] | tuple[None, None]:
+def parse_subject_directives(subject: str) -> tuple[RequestMode | None, str | None, int, bool]:
     """
-    Parse email subject. Repeatedly strip leading Re:, Fwd:, FW: prefixes conservatively.
-    Require the entire remaining normalized subject to match EXACTLY one valid command.
-    Returns (RequestMode, depth_from_subject) or (None, None).
+    Parse email subject with optional, case-insensitive, order-independent commands.
+    Supports base mode prefixes (Brief, Standard, Research [Low|Medium|High], Detailed)
+    followed by optional directives: 'chunk-N' (min..max) and 'verify'.
+    Returns (RequestMode, research_depth, tts_chunk_chars, verify_final_script).
     """
+    default_chunk = getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)
+    min_chunk = getattr(settings, "TTS_CHUNK_MIN_CHARS", 250)
+    max_chunk = getattr(settings, "TTS_CHUNK_MAX_CHARS", 1000)
+
     if not subject:
-        return None, None
+        return None, None, default_chunk, False
 
     clean = subject.strip()
     old_clean = None
@@ -95,9 +114,61 @@ def parse_subject_mode_and_depth(subject: str) -> tuple[RequestMode, str | None]
         clean = re.sub(r"^\s*(?:Re|Fwd|FW|RE|FWD)\s*:\s*", "", clean, flags=re.IGNORECASE).strip()
 
     normalized = clean.lower()
-    match = EXACT_SUBJECT_MAP.get(normalized)
-    if match:
-        return match[0], match[1]
+    matched_mode = None
+    matched_depth = None
+    remainder = ""
+
+    for prefix, mode, depth in BASE_SUBJECT_PATTERNS:
+        if normalized == prefix or normalized.startswith(prefix + " "):
+            matched_mode = mode
+            matched_depth = depth
+            remainder = clean[len(prefix):].strip()
+            break
+
+    if not matched_mode:
+        return None, None, default_chunk, False
+
+    tts_chunk_chars = default_chunk
+    verify_final_script = False
+    seen_chunk_cmd = False
+
+    if remainder:
+        tokens = remainder.split()
+        for token in tokens:
+            token_norm = token.strip().lower()
+            if not token_norm:
+                continue
+
+            if token_norm.startswith("chunk-"):
+                if seen_chunk_cmd:
+                    raise ValueError(f"Conflicting or duplicate chunk command '{token}' in subject line.")
+                seen_chunk_cmd = True
+                val_str = token_norm[len("chunk-"):]
+                if not val_str.isdigit():
+                    raise ValueError(f"Malformed chunk command '{token}' in subject line. Expected format 'chunk-N' (e.g. chunk-500).")
+                c_val = int(val_str)
+                if not (min_chunk <= c_val <= max_chunk):
+                    raise ValueError(f"Invalid chunk size '{c_val}' in subject line. Chunk size must be between {min_chunk} and {max_chunk} characters.")
+                tts_chunk_chars = c_val
+            elif token_norm == "verify":
+                verify_final_script = True
+            else:
+                raise ValueError(f"Unknown or invalid subject command '{token}' in subject line. Allowed commands are 'verify' and 'chunk-N'.")
+
+    return matched_mode, matched_depth, tts_chunk_chars, verify_final_script
+
+
+def parse_subject_mode_and_depth(subject: str) -> tuple[RequestMode, str | None] | tuple[None, None]:
+    """
+    Parse email subject. Repeatedly strip leading Re:, Fwd:, FW: prefixes conservatively.
+    Returns (RequestMode, depth_from_subject) or (None, None).
+    """
+    try:
+        mode, depth, _, _ = parse_subject_directives(subject)
+        if mode:
+            return mode, depth
+    except ValueError:
+        pass
     return None, None
 
 
@@ -289,12 +360,12 @@ def process_email_message(
     subject: str, body_text: str | None = None, body_html: str | None = None
 ) -> EmailParseResult:
     """
-    Process incoming email content, check subject mode, parse directives, clean body, classify source type.
+    Process incoming email content, parse subject directives, clean body, classify source type.
     """
-    mode, subject_depth = parse_subject_mode_and_depth(subject)
+    mode, subject_depth, tts_chunk_chars, verify_final_script = parse_subject_directives(subject)
     if not mode:
         raise ValueError(
-            f"Unsupported subject line: '{subject}'. Expected exact subject: 'Podcast: Brief', 'Podcast: Standard', or 'Podcast: Research'."
+            f"Unsupported subject line: '{subject}'. Expected subject starting with 'Podcast: Brief', 'Podcast: Standard', or 'Podcast: Research'."
         )
 
     if body_text and len(body_text.strip()) > 20:
@@ -347,6 +418,8 @@ def process_email_message(
         custom_speed=custom_speed,
         custom_title=custom_title,
         research_depth=research_depth,
+        tts_chunk_chars=tts_chunk_chars,
+        verify_final_script=verify_final_script,
         warnings=warnings,
     )
 

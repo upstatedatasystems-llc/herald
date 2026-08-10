@@ -1,5 +1,5 @@
 import re
-
+import unicodedata
 
 PAGE_JUNK_PATTERNS = [
     re.compile(r"^\s*(?:Printable Version|Print this article|Download PDF|Share this story)\s*$", re.IGNORECASE | re.MULTILINE),
@@ -13,6 +13,24 @@ LATEX_WRAPPER_PATTERN = re.compile(r"\[latex\](.*?)\[/latex\]", re.IGNORECASE | 
 TRACKING_URL_PARAM_PATTERN = re.compile(r"([?&])(?:utm_[a-z]+|ref|source|tracking_id|fbclid|gclid)=[^&\s]+", re.IGNORECASE)
 
 
+def sanitize_unicode(text: str) -> str:
+    """
+    Safely normalize Unicode using NFC and strip illegal control characters
+    without destroying legitimate diacritical, accented, or non-ASCII characters.
+    """
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFC", text)
+    # Filter out control characters except tab, newline, and carriage return
+    clean_chars = []
+    for ch in normalized:
+        cat = unicodedata.category(ch)
+        if cat.startswith("C") and ch not in ("\n", "\r", "\t"):
+            continue
+        clean_chars.append(ch)
+    return "".join(clean_chars)
+
+
 def clean_source_text(text: str) -> str:
     """
     Shared deterministic source cleanup for both email body and URL/article sources.
@@ -22,7 +40,7 @@ def clean_source_text(text: str) -> str:
     if not text:
         return ""
 
-    cleaned = text
+    cleaned = sanitize_unicode(text)
 
     # Remove [latex]...[/latex] wrappers while preserving contents
     cleaned = LATEX_WRAPPER_PATTERN.sub(r"\1", cleaned)
