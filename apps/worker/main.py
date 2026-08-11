@@ -274,7 +274,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             resource_aggregates = monitor.stop()
             job.tts_resource_metrics_json = resource_aggregates
             try:
-                db.commit()  # Reset transaction snapshot to read latest committed chunk states
+                db.commit()
+                db.expire_all()
                 from herald.db.models import PodcastTTSChunk
                 total_completed = (
                     db.query(PodcastTTSChunk)
@@ -287,6 +288,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                 if generated_chunk_paths:
                     job.completed_chunk_index = len(generated_chunk_paths)
             db.commit()
+
 
 
 
@@ -352,6 +354,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     )
                     raise
 
+        job.completed_chunk_index = len(chunks)
         job.local_audio_path = audio_info["output_path"]
         job.audio_bytes = audio_info["file_bytes"]
         job.audio_duration_seconds = audio_info["duration_seconds"]
@@ -361,6 +364,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
         job.kokoro_speed = speed
         job.gemini_model = settings.GEMINI_MODEL
         db.commit()
+
 
         # Generate companion details artifact
         try:

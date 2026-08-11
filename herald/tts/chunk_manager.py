@@ -133,7 +133,7 @@ def sync_and_prepare_chunks(
 
     # Clean up obsolete chunk records past current script length
     for idx, old_chunk in existing_by_index.items():
-        if idx >= len(script_chunks):
+        if idx > len(script_chunks):
             if old_chunk.local_path:
                 Path(old_chunk.local_path).unlink(missing_ok=True)
             db.delete(old_chunk)
