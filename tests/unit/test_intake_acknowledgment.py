@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.main import app
 from herald.config import settings
-from herald.db.models import JobState
+from herald.db.models import JobState, PodcastJob
 
 
 @pytest.fixture
@@ -78,7 +78,6 @@ def test_standard_verify_processing_order_preserved(api_client, db_session: Sess
     executes script -> audit -> repair (if needed) -> transition to QUEUED_TTS
     in the exact same processing order as before, without returning a second acknowledgment.
     """
-    # 1. Perform intake with verify=True
     req_data = {
         "gmail_message_id": "msg-ack-test-003",
         "sender_email": "user@example.com",
@@ -116,10 +115,115 @@ def test_standard_verify_processing_order_preserved(api_client, db_session: Sess
         assert r2.status_code == 200, f"Script generation failed: {r2.text}"
         gen_data = r2.json()
 
-        # No acknowledgment email in script generation response
         assert "acknowledgment_email_text" not in gen_data
         assert "acknowledgment_email_html" not in gen_data
 
-        # Execution order verified: script generation first, then verify audit
         assert execution_order == ["SCRIPT_GENERATION", "VERIFY_AUDIT"]
         assert gen_data["status"] == JobState.QUEUED_TTS.value
+
+
+def test_ack_gmail_failure_does_not_gate_script_generation(api_client, db_session: Session):
+    """
+    Prove that even if sending the submission acknowledgment fails or is bypassed,
+    script generation proceeds cleanly without being gated by acknowledgment status.
+    """
+    req_data = {
+        "gmail_message_id": "msg-ack-fail-001",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": "Content for testing script generation independence from acknowledgment sending.",
+    }
+
+    r1 = api_client.post("/api/v1/intake", json=req_data)
+    assert r1.status_code == 200
+    job_id = r1.json()["job_id"]
+
+    mock_script = MagicMock()
+    mock_script.model_dump.return_value = {
+        "episode_title": "Ack Failure Resilience Test Episode",
+        "segments": [{"speaker": "Speaker 1", "text": "Testing script generation without gating."}],
+    }
+
+    with patch("apps.api.main.generate_podcast_script", return_value=mock_script):
+        r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
+        assert r2.status_code == 200
+        assert r2.json()["status"] == JobState.QUEUED_TTS.value
+
+
+def test_replay_at_source_ready_resumes_job_without_new_ack(api_client, db_session: Session):
+    """
+    Prove that replaying intake for a job still in SOURCE_READY:
+    1. Returns is_duplicate=True
+    2. Returns acknowledgment_email_html=None (no new acknowledgment email)
+    3. Leaves job status in SOURCE_READY so script generation can be called to complete processing.
+    """
+    req_data = {
+        "gmail_message_id": "msg-replay-sr-001",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": "Content for testing SOURCE_READY replay resumption.",
+    }
+
+    r1 = api_client.post("/api/v1/intake", json=req_data)
+    assert r1.status_code == 200
+    job_id_1 = r1.json()["job_id"]
+    assert r1.json()["status"] == JobState.SOURCE_READY.value
+
+    # Replay intake call while job is SOURCE_READY
+    r2 = api_client.post("/api/v1/intake", json=req_data)
+    assert r2.status_code == 200
+    data2 = r2.json()
+
+    assert data2["job_id"] == job_id_1
+    assert data2["is_duplicate"] is True
+    assert data2["acknowledgment_email_html"] is None
+    assert data2["status"] == JobState.SOURCE_READY.value
+
+    # Script generation can now resume for the existing job
+    mock_script = MagicMock()
+    mock_script.model_dump.return_value = {
+        "episode_title": "Replay Resumed Episode",
+        "segments": [{"speaker": "Speaker 1", "text": "Resumed from SOURCE_READY."}],
+    }
+
+    with patch("apps.api.main.generate_podcast_script", return_value=mock_script):
+        r3 = api_client.post("/api/v1/script/generate", json={"job_id": job_id_1})
+        assert r3.status_code == 200
+        assert r3.json()["status"] == JobState.QUEUED_TTS.value
+
+
+def test_replay_when_queued_tts_does_not_regenerate_script(api_client, db_session: Session):
+    """
+    Prove that replaying script generation for a job already in QUEUED_TTS (or later)
+    does not re-invoke generate_podcast_script and returns early with existing job status.
+    """
+    req_data = {
+        "gmail_message_id": "msg-replay-queued-001",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": "Content for testing QUEUED_TTS script idempotency.",
+    }
+
+    r1 = api_client.post("/api/v1/intake", json=req_data)
+    job_id = r1.json()["job_id"]
+
+    mock_script = MagicMock()
+    mock_script.model_dump.return_value = {
+        "episode_title": "Idempotent Script Episode",
+        "segments": [{"speaker": "Speaker 1", "text": "Initial generation."}],
+    }
+
+    # Initial script generation
+    with patch("apps.api.main.generate_podcast_script", return_value=mock_script) as mock_gen:
+        r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
+        assert r2.status_code == 200
+        assert r2.json()["status"] == JobState.QUEUED_TTS.value
+        assert mock_gen.call_count == 1
+
+    # Replayed script generation call on job already in QUEUED_TTS
+    with patch("apps.api.main.generate_podcast_script") as mock_gen_2:
+        r3 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
+        assert r3.status_code == 200
+        assert "already exists" in r3.json()["message"]
+        # Must not re-run Gemini script generation
+        assert mock_gen_2.call_count == 0

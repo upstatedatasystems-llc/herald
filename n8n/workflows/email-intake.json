@@ -97,11 +97,57 @@
           ]
         }
       },
-      "name": "Check If New Job",
+      "name": "Check Should Send Acknowledgment",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
         750,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $json.gmail_message_id || $('Gmail Trigger - Herald Intake').item.json.id }}",
+        "emailType": "html",
+        "message": "={{ $json.acknowledgment_email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Send Submission Acknowledgment",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        950,
+        150
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status || $('Call Herald API - Intake').item.json.status }}",
+              "operation": "regex",
+              "value2": "^(RECEIVED|VALIDATING|EXTRACTING|SOURCE_READY)$"
+            }
+          ]
+        }
+      },
+      "name": "Check Needs Script Generation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1150,
         300
       ]
     },
@@ -127,34 +173,9 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        1250,
+        1350,
         250
       ]
-    },
-    {
-      "parameters": {
-        "resource": "message",
-        "operation": "reply",
-        "messageId": "={{ $json.gmail_message_id || $('Gmail Trigger - Herald Intake').item.json.id }}",
-        "emailType": "html",
-        "message": "={{ $json.acknowledgment_email_html }}",
-        "options": {
-          "appendAttribution": false
-        }
-      },
-      "name": "Send Submission Acknowledgment",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
-      "position": [
-        1000,
-        250
-      ],
-      "credentials": {
-        "gmailOAuth2": {
-          "id": "1",
-          "name": "Herald Gmail Account"
-        }
-      }
     }
   ],
   "connections": {
@@ -173,14 +194,14 @@
       "main": [
         [
           {
-            "node": "Check If New Job",
+            "node": "Check Should Send Acknowledgment",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Check If New Job": {
+    "Check Should Send Acknowledgment": {
       "main": [
         [
           {
@@ -188,10 +209,28 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Check Needs Script Generation",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Send Submission Acknowledgment": {
+      "main": [
+        [
+          {
+            "node": "Check Needs Script Generation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Needs Script Generation": {
       "main": [
         [
           {
