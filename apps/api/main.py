@@ -259,10 +259,13 @@ class JobStatusResponse(BaseModel):
 @app.get("/live", tags=["Health"])
 def health_check():
     """Process liveness check endpoint. Returns HTTP 200 when API process is running."""
+    c_cfg = settings.get_concurrency_config()
     return {
         "status": "live",
         "timestamp": datetime.now(UTC).isoformat(),
         "environment": settings.HERALD_ENV,
+        "concurrency_profile": c_cfg.profile,
+        "detected_cpus": c_cfg.detected_cpus,
     }
 
 
@@ -343,12 +346,23 @@ def readiness_check(db: Session = Depends(get_db)):
             detail={"ready": False, "reasons": reasons},
         )
 
+    c_cfg = settings.get_concurrency_config()
     return {
         "ready": True,
         "environment": settings.HERALD_ENV,
         "free_disk_mb": free_mb,
         "kokoro_tts": kokoro_healthy,
+        "concurrency": {
+            "profile": c_cfg.profile,
+            "detected_cpus": c_cfg.detected_cpus,
+            "worker_concurrency": c_cfg.worker_concurrency,
+            "script_concurrency": c_cfg.script_concurrency,
+            "tts_global_slots": c_cfg.tts_global_slots,
+            "tts_per_job": c_cfg.tts_per_job,
+            "ffmpeg_concurrency": c_cfg.ffmpeg_concurrency,
+        },
     }
+
 
 
 @app.post(
@@ -638,6 +652,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             # Stage 1a: Grounded Research Call using GEMINI_RESEARCH_MODEL
             if not job.research_grounding_json:
                 logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")
+
                 t0 = datetime.now(UTC)
                 grounded_data = generate_grounded_research(
                     source_text=job.source_text,

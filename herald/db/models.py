@@ -14,8 +14,10 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
+
 
 from herald.db.connection import Base
 
@@ -85,9 +87,13 @@ class PodcastJob(Base):
 
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     claim_owner = Column(String(100), nullable=True)
+    claimed_by = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
 
     # Gemini script output JSON & verification
+
     script_json = Column(JSON, nullable=True)
     verify_audit_json = Column(JSON, nullable=True)
     verify_repair_count = Column(Integer, nullable=False, default=0)
@@ -150,9 +156,41 @@ class PodcastJob(Base):
 
     transitions = relationship("JobStateTransition", back_populates="job", cascade="all, delete-orphan")
     metrics = relationship("JobProcessingMetric", back_populates="job", cascade="all, delete-orphan")
+    tts_chunks = relationship("PodcastTTSChunk", back_populates="job", cascade="all, delete-orphan")
+
+
+class PodcastTTSChunk(Base):
+    __tablename__ = "podcast_tts_chunks"
+    __table_args__ = (
+        UniqueConstraint("job_id", "chunk_index", name="uq_podcast_tts_chunks_job_index"),
+        Index("idx_tts_chunks_job_status", "job_id", "status"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    text_hash = Column(String(64), nullable=False)
+    status = Column(String(50), nullable=False, default="PENDING", index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    local_path = Column(String(512), nullable=True)
+    audio_duration = Column(Float, nullable=True)
+    claimed_by = Column(String(100), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    job = relationship("PodcastJob", back_populates="tts_chunks")
 
 
 class JobStateTransition(Base):
+
     __tablename__ = "job_state_transitions"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

@@ -2,11 +2,12 @@ import re
 
 
 class TTSChunk:
-    def __init__(self, index: int, text: str, segment_order: int, is_section_end: bool = False):
+    def __init__(self, index: int, text: str, segment_order: int = 1, is_section_end: bool = False):
         self.index = index
         self.text = text
         self.segment_order = segment_order
         self.is_section_end = is_section_end
+
 
 
 def split_text_into_sentences(text: str) -> list[str]:

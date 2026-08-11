@@ -92,7 +92,9 @@ Report your comprehensive grounded findings in detail.
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{max_attempts}")
-            with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+
                 resp = client.post(url, json=payload)
 
             if resp.status_code in (401, 403):
@@ -297,7 +299,9 @@ Requirements:
                 },
             }
 
-            with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+
                 resp = client.post(url, json=payload)
 
             if resp.status_code != 200:
@@ -441,7 +445,9 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 },
             }
 
-            with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+
                 resp = client.post(url, json=payload)
 
             if resp.status_code in (401, 403):

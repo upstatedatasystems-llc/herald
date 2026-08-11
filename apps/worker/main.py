@@ -1,9 +1,12 @@
 import logging
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from herald.audio.ffmpeg_builder import (
@@ -11,11 +14,14 @@ from herald.audio.ffmpeg_builder import (
     join_and_normalize_audio,
     validate_audio_file,
 )
+from herald.concurrency import get_semaphores
 from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob
 from herald.db.state_machine import transition_job_state
+from herald.services.performance_metrics import record_stage_metric
 from herald.services.resource_monitor import TTSResourceMonitor
+from herald.tts.chunk_manager import process_tts_chunks_parallel
 from herald.tts.chunker import chunk_podcast_script
 from herald.tts.kokoro_client import (
     KokoroClient,
@@ -40,10 +46,12 @@ def slugify(text: str, max_len: int = 30) -> str:
 
 def recover_stale_claims(db: Session, stale_minutes: int = 15):
     """
-    Detect jobs stuck in SYNTHESIZING or ENCODING whose latest heartbeat/claim is past stale_minutes,
+    Detect jobs stuck in SYNTHESIZING or ENCODING whose lease or heartbeat has expired,
     and atomically requeue them back to QUEUED_TTS for retry.
     """
-    cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(minutes=stale_minutes)
+    
     stale_jobs = (
         db.query(PodcastJob)
         .filter(
@@ -54,45 +62,68 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
     )
 
     for job in stale_jobs:
-        last_active = job.last_heartbeat_at or job.claimed_at
-        if last_active:
-            if last_active.tzinfo is None:
-                last_active = last_active.replace(tzinfo=UTC)
-            if last_active < cutoff:
-                logger.warning(f"Recovering stale worker claim for job '{job.id}' (last active: {last_active})")
-                job.claimed_at = None
-                job.claim_owner = None
-                job.last_heartbeat_at = None
-                target_state = (
-                    JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.QUEUED_TTS.value
-                )
-                transition_job_state(
-                    db,
-                    job,
-                    target_state,
-                    component="herald-worker-recovery",
-                    message="Recovered stale worker claim after crash or timeout",
-                    force=True,
-                    commit=False,
-                )
-                db.commit()
+        lease_exp = job.lease_expires_at
+        if lease_exp and lease_exp.tzinfo is None:
+            lease_exp = lease_exp.replace(tzinfo=UTC)
+
+        last_active = job.heartbeat_at or job.last_heartbeat_at or job.claimed_at
+        if last_active and last_active.tzinfo is None:
+            last_active = last_active.replace(tzinfo=UTC)
+
+        is_expired = (lease_exp and lease_exp < now) or (last_active and last_active < cutoff)
+
+        if is_expired:
+            logger.warning(f"Recovering stale worker claim for job '{job.id}' (last active: {last_active}, lease: {lease_exp})")
+            job.claimed_at = None
+            job.claim_owner = None
+            job.claimed_by = None
+            job.lease_expires_at = None
+            job.last_heartbeat_at = None
+            job.heartbeat_at = None
+
+            target_state = (
+                JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.QUEUED_TTS.value
+            )
+            transition_job_state(
+                db,
+                job,
+                target_state,
+                component="herald-worker-recovery",
+                message="Recovered stale worker claim after crash or timeout",
+                force=True,
+                commit=False,
+            )
+            db.commit()
+
+            record_stage_metric(
+                job_id=job.id,
+                stage="LEASE_RECOVERY",
+                started_at=last_active or now,
+                finished_at=now,
+                status="recovered",
+                metadata_json={"recovered_from": job.status, "attempts": job.synthesis_attempt_count},
+                is_attempt_metric=True,
+            )
 
 
-def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
+def claim_next_job(db: Session, worker_id: str = "herald-worker", lease_seconds: int = 300) -> Optional[PodcastJob]:
     """
-    Acquire 1 QUEUED_TTS job using SELECT ... FOR UPDATE SKIP LOCKED in 1 transaction, synthesize TTS chunks,
-    assemble with FFmpeg, and transition status to AUDIO_READY.
+    Claim 1 pending job atomically using SELECT ... FOR UPDATE SKIP LOCKED.
     """
+    now = datetime.now(UTC)
     job = (
         db.query(PodcastJob)
-        .filter(PodcastJob.status.in_([JobState.QUEUED_TTS.value, JobState.FAILED_RETRYABLE.value]))
+        .filter(
+            PodcastJob.status.in_([JobState.QUEUED_TTS.value, JobState.FAILED_RETRYABLE.value]),
+            or_(PodcastJob.next_retry_at.is_(None), PodcastJob.next_retry_at <= now),
+        )
         .order_by(PodcastJob.created_at.asc())
         .with_for_update(skip_locked=True)
         .first()
     )
 
     if not job:
-        return False
+        return None
 
     job.synthesis_attempt_count = (job.synthesis_attempt_count or 0) + 1
     if job.synthesis_attempt_count > 3:
@@ -107,27 +138,42 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             message="Exceeded max synthesis attempts",
             error_category="KOKORO_MAX_ATTEMPTS_EXCEEDED",
         )
-        return False
+        return None
 
-    now = datetime.now(UTC)
     job.claimed_at = now
-    job.claim_owner = "herald-worker"
+    job.claim_owner = worker_id
+    job.claimed_by = worker_id
+    job.lease_expires_at = now + timedelta(seconds=lease_seconds)
     job.last_heartbeat_at = now
+    job.heartbeat_at = now
+
     transition_job_state(
         db,
         job,
         JobState.SYNTHESIZING.value,
         component="herald-worker",
-        message="Claimed worker job atomically for TTS synthesis",
+        message=f"Claimed worker job atomically by '{worker_id}' for TTS synthesis",
         commit=False,
     )
     db.commit()
     db.refresh(job)
+    return job
 
-    # Record TTS_QUEUE_WAIT metric from exact QUEUED_TTS entry timestamp
+
+def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = "herald-worker") -> bool:
+    """
+    Acquire 1 QUEUED_TTS job atomically, synthesize TTS chunks concurrently,
+    assemble with FFmpeg, and transition status to AUDIO_READY.
+    """
+    job = claim_next_job(db, worker_id=worker_id)
+    if not job:
+        return False
+
+    now = datetime.now(UTC)
+
+    # Record TTS_QUEUE_WAIT metric
     try:
         from herald.db.models import JobStateTransition
-        from herald.services.performance_metrics import record_stage_metric
         q_trans = (
             db.query(JobStateTransition)
             .filter(JobStateTransition.job_id == job.id, JobStateTransition.to_state == JobState.QUEUED_TTS.value)
@@ -145,6 +191,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             finished_at=now,
             duration_ms=wait_ms,
             status="success",
+            metadata_json={"worker_id": worker_id},
         )
     except Exception as me:
         logger.warning(f"Could not record TTS_QUEUE_WAIT metric for job '{job.id}': {me}")
@@ -158,9 +205,11 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     t_tts_total_start = datetime.now(UTC)
+    concurrency_config = settings.get_concurrency_config()
+    semaphores = get_semaphores(concurrency_config)
 
     try:
-        # Low-disk space check before synthesis begins
+        # Check free disk space before synthesis begins
         free_mb = check_free_disk_mb(work_dir)
         if free_mb < settings.HERALD_MIN_DISK_MB:
             raise KokoroTTSError(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
@@ -181,6 +230,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         target_chunk_chars = job.tts_chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)
         chunks = chunk_podcast_script(segments, max_chars=target_chunk_chars)
         t_chunking_finish = datetime.now(UTC)
+
         record_stage_metric(
             job_id=job.id,
             stage="TTS_CHUNKING",
@@ -193,139 +243,55 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                 "configured_chunk_chars": target_chunk_chars,
             },
         )
-        logger.info(f"Script split into {len(chunks)} TTS chunks (target max: {target_chunk_chars} chars) for job '{job.id}' (Voice: {voice}, Speed: {speed}, Timeout: {synthesis_timeout}s)")
+        logger.info(
+            f"Script split into {len(chunks)} TTS chunks for job '{job.id}' "
+            f"(Voice: {voice}, Speed: {speed}, Timeout: {synthesis_timeout}s, "
+            f"TTS slots global: {concurrency_config.tts_global_slots}, per_job: {concurrency_config.tts_per_job})"
+        )
 
-        generated_chunk_paths = []
-        is_section_end_list = []
+        is_section_end_list = [c.is_section_end for c in chunks]
 
-        # Start low-overhead resource monitor strictly around Kokoro synthesis loop
         monitor = TTSResourceMonitor(interval_seconds=5.0)
         monitor.start()
 
+        generated_chunk_paths = []
         try:
-            for chunk in chunks:
-                chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
-                is_section_end_list.append(chunk.is_section_end)
-
-                if chunk.index <= job.completed_chunk_index and chunk_file.exists() and chunk_file.stat().st_size > 0:
-                    try:
-                        validate_audio_file(chunk_file)
-                        logger.info(f"Skipping already completed valid chunk {chunk.index}/{len(chunks)}")
-                        generated_chunk_paths.append(chunk_file)
-                        continue
-                    except Exception as ve:
-                        logger.warning(f"Cached chunk {chunk.index} invalid ({ve}), re-synthesizing...")
-
-                chunk_success = False
-                last_chunk_error = None
-                for chunk_attempt in range(1, 3):
-                    t0_utc = datetime.now(UTC)
-                    t0_mono = time.monotonic()
-                    try:
-                        logger.info(
-                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
-                            f"{len(chunk.text)} chars | Kokoro timeout: {synthesis_timeout}s"
-                        )
-                        kokoro_client.synthesize_chunk(
-                            text=chunk.text,
-                            output_path=chunk_file,
-                            voice=voice,
-                            speed=speed,
-                            timeout=synthesis_timeout,
-                        )
-                        validate_audio_file(chunk_file)
-                        t1_mono = time.monotonic()
-                        t1_utc = datetime.now(UTC)
-                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                        output_bytes = chunk_file.stat().st_size if chunk_file.exists() else 0
-
-                        # 24kHz 16-bit PCM mono WAV = 48,000 bytes/sec (44-byte header)
-                        audio_dur_ms = max(0, int(((output_bytes - 44) / 48000.0) * 1000)) if output_bytes > 44 else None
-                        rtf_val = round((elapsed_ms / float(audio_dur_ms)) if audio_dur_ms and audio_dur_ms > 0 else 0.0, 3)
-
-                        record_stage_metric(
-                            job_id=job.id,
-                            stage="KOKORO_REQUEST",
-                            sequence_index=chunk.index,
-                            attempt=chunk_attempt,
-                            started_at=t0_utc,
-                            finished_at=t1_utc,
-                            duration_ms=elapsed_ms,
-                            status="success",
-                            input_chars=len(chunk.text),
-                            output_bytes=output_bytes,
-                            audio_duration_ms=audio_dur_ms,
-                            metadata_json={
-                                "voice": voice,
-                                "speed": speed,
-                                "rtf": rtf_val,
-                                "timeout_seconds": synthesis_timeout,
-                            },
-                            is_attempt_metric=True,
-                        )
-
-                        logger.info(
-                            f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt}: "
-                            f"Completed in {elapsed_ms / 1000.0:.1f}s"
-                        )
-                        chunk_success = True
-                        break
-                    except Exception as ce:
-                        t1_mono = time.monotonic()
-                        t1_utc = datetime.now(UTC)
-                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                        last_chunk_error = ce
-                        if chunk_file.exists():
-                            chunk_file.unlink(missing_ok=True)
-
-                        is_timeout = isinstance(ce, KokoroTTSTimeoutError) or "timed out" in str(ce).lower()
-                        record_stage_metric(
-                            job_id=job.id,
-                            stage="KOKORO_REQUEST",
-                            sequence_index=chunk.index,
-                            attempt=chunk_attempt,
-                            started_at=t0_utc,
-                            finished_at=t1_utc,
-                            duration_ms=elapsed_ms,
-                            status="failed",
-                            input_chars=len(chunk.text),
-                            metadata_json={
-                                "voice": voice,
-                                "speed": speed,
-                                "timeout_indicator": is_timeout,
-                                "error": str(ce),
-                            },
-                            is_attempt_metric=True,
-                        )
-
-                        if is_timeout:
-                            logger.warning(
-                                f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
-                                f"timed out after {elapsed_ms / 1000.0:.1f}s"
-                            )
-                        else:
-                            logger.warning(
-                                f"TTS chunk {chunk.index}/{len(chunks)} attempt {chunk_attempt} "
-                                f"failed in {elapsed_ms / 1000.0:.1f}s: {ce}"
-                            )
-                        if chunk_attempt < 2:
-                            time.sleep(1.0)
-
-                if not chunk_success:
-                    is_timeout = isinstance(last_chunk_error, KokoroTTSTimeoutError) or "timed out" in str(last_chunk_error).lower()
-                    msg = f"TTS chunk {chunk.index}/{len(chunks)} failed after 2 attempts: {last_chunk_error}"
-                    if is_timeout:
-                        raise KokoroTTSTimeoutError(msg)
-                    raise KokoroTTSError(msg)
-
-                job.completed_chunk_index = chunk.index
-                job.last_heartbeat_at = datetime.now(UTC)
-                db.commit()
-                generated_chunk_paths.append(chunk_file)
+            generated_chunk_paths = process_tts_chunks_parallel(
+                session_factory=SessionLocal,
+                job_id=job.id,
+                script_chunks=chunks,
+                voice=voice,
+                speed=speed,
+                synthesis_timeout=synthesis_timeout,
+                chunks_dir=chunks_dir,
+                kokoro_client=kokoro_client,
+                global_semaphore=semaphores.global_tts,
+                per_job_semaphore=semaphores.create_per_job_tts_semaphore(),
+                max_workers=concurrency_config.tts_per_job,
+                worker_id=worker_id,
+            )
         finally:
             resource_aggregates = monitor.stop()
             job.tts_resource_metrics_json = resource_aggregates
+            try:
+                db.commit()  # Reset transaction snapshot to read latest committed chunk states
+                from herald.db.models import PodcastTTSChunk
+                total_completed = (
+                    db.query(PodcastTTSChunk)
+                    .filter(PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED")
+                    .count()
+                )
+                if total_completed > 0:
+                    job.completed_chunk_index = total_completed
+            except Exception:
+                if generated_chunk_paths:
+                    job.completed_chunk_index = len(generated_chunk_paths)
             db.commit()
+
+
+
+
+
 
         t_tts_total_finish = datetime.now(UTC)
         record_stage_metric(
@@ -334,7 +300,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             started_at=t_tts_total_start,
             finished_at=t_tts_total_finish,
             status="success",
-            metadata_json={"chunks_count": len(chunks)},
+            metadata_json={"chunks_count": len(chunks), "worker_id": worker_id},
         )
 
         transition_job_state(db, job, JobState.ENCODING.value, component="herald-worker")
@@ -347,6 +313,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
 
         audio_info = None
         t_ffmpeg_start = datetime.now(UTC)
+
         for ffmpeg_attempt in range(1, 3):
             try:
                 audio_info = join_and_normalize_audio(
@@ -366,6 +333,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                     output_bytes=audio_info["file_bytes"],
                     audio_duration_ms=audio_info["duration_seconds"] * 1000 if audio_info.get("duration_seconds") else None,
                     attempt=ffmpeg_attempt,
+                    metadata_json={"worker_id": worker_id},
                 )
                 break
             except Exception as fe:
@@ -380,7 +348,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                         finished_at=datetime.now(UTC),
                         status="failed",
                         attempt=ffmpeg_attempt,
-                        metadata_json={"error": str(fe)},
+                        metadata_json={"error": str(fe), "worker_id": worker_id},
                     )
                     raise
 
@@ -394,7 +362,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         job.gemini_model = settings.GEMINI_MODEL
         db.commit()
 
-        # Generate unified companion details artifact
+        # Generate companion details artifact
         try:
             from herald.audio.artifact_generator import ensure_details_artifact
             ensure_details_artifact(job, output_dir)
@@ -402,16 +370,16 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
             logger.warning(f"Artifact creation warning for job '{job.id}': {se}")
 
         transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
-        logger.info(f"Successfully rendered audio and details artifact for job '{job.id}': {output_mp3_path}")
+        logger.info(f"Worker '{worker_id}' successfully rendered audio for job '{job.id}': {output_mp3_path}")
 
-        # Post-commit delivery nudge (Directive 4: ONLY after AUDIO_READY commit)
+        # Post-commit delivery nudge
         if getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
             nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
             nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
             nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
             try:
                 import httpx
-                logger.info(f"Sending authenticated post-commit delivery nudge for job '{job.id}' to {nudge_url}")
+                logger.info(f"Sending post-commit delivery nudge for job '{job.id}' to {nudge_url}")
                 headers = {"Content-Type": "application/json"}
                 if nudge_secret:
                     headers["X-API-Key"] = nudge_secret
@@ -419,7 +387,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
                 with httpx.Client(timeout=nudge_timeout) as client:
                     client.post(nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers)
             except Exception as ne:
-                logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}). Scheduled polling fallback will process job.")
+                logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}).")
 
         try:
             shutil.rmtree(chunks_dir)
@@ -429,14 +397,34 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Error processing job '{job.id}': {e}")
-        job.attempt_count += 1
-        
+        logger.error(f"Error in worker '{worker_id}' processing job '{job.id}': {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+        job = db.query(PodcastJob).filter(PodcastJob.id == job.id).first() or job
+        job.attempt_count = (job.attempt_count or 0) + 1
+
+        try:
+            from herald.db.models import PodcastTTSChunk
+            completed_cnt = (
+                db.query(PodcastTTSChunk)
+                .filter(PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED")
+                .count()
+            )
+            if completed_cnt > 0:
+                job.completed_chunk_index = completed_cnt
+        except Exception:
+            pass
+
         is_timeout = isinstance(e, KokoroTTSTimeoutError) or "timed out" in str(e).lower()
         err_code = "KOKORO_SYNTHESIS_TIMEOUT" if is_timeout else "KOKORO_SYNTHESIS_FAILED"
         job.error_code = err_code
         job.error_detail = str(e)
         db.commit()
+
+
 
         target_failed_state = (
             JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.FAILED_RETRYABLE.value
@@ -452,14 +440,10 @@ def process_next_job(db: Session, kokoro_client: KokoroClient) -> bool:
         return False
 
 
-def run_worker_loop():
-    """Main worker daemon loop."""
-    logger.info("Starting Herald Worker daemon...")
+def run_single_worker_loop(worker_id: str = "herald-worker"):
+    """Single worker thread processing loop."""
+    logger.info(f"Worker loop thread '{worker_id}' started.")
     kokoro_client = KokoroClient()
-
-    h_status = kokoro_client.health_check()
-    logger.info(f"Startup Kokoro/FFmpeg Health Status: {h_status}")
-
     poll_interval = 5
 
     while True:
@@ -467,15 +451,40 @@ def run_worker_loop():
             db = SessionLocal()
             try:
                 recover_stale_claims(db)
-                job_processed = process_next_job(db, kokoro_client)
+                job_processed = process_next_job(db, kokoro_client, worker_id=worker_id)
             finally:
                 db.close()
 
             if not job_processed:
                 time.sleep(poll_interval)
         except Exception as e:
-            logger.error(f"Unexpected error in worker main loop: {e}")
+            logger.error(f"Unexpected error in worker loop '{worker_id}': {e}")
             time.sleep(poll_interval)
+
+
+def run_worker_loop():
+    """Main worker daemon startup & thread pool manager."""
+    logger.info("Starting Herald Worker daemon...")
+    concurrency_config = settings.get_concurrency_config()
+    concurrency_config.log_diagnostics()
+
+    kokoro_client = KokoroClient()
+    h_status = kokoro_client.health_check()
+    logger.info(f"Startup Kokoro/FFmpeg Health Status: {h_status}")
+
+    w_count = concurrency_config.worker_concurrency
+
+    if w_count <= 1:
+        run_single_worker_loop("herald-worker")
+    else:
+        logger.info(f"Launching {w_count} parallel episode worker threads...")
+        with ThreadPoolExecutor(max_workers=w_count, thread_name_prefix="herald-worker") as executor:
+            futures = [
+                executor.submit(run_single_worker_loop, f"herald-worker-{i+1}")
+                for i in range(w_count)
+            ]
+            for fut in futures:
+                fut.result()
 
 
 if __name__ == "__main__":

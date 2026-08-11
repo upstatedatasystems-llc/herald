@@ -243,7 +243,7 @@ def join_and_normalize_audio(
         ]
 
         if not shutil.which("ffmpeg"):
-            if os.environ.get("HERALD_MOCK_TTS") == "1":
+            if os.environ.get("HERALD_MOCK_TTS") == "1" or getattr(settings, "HERALD_ENV", "").lower() == "test":
                 with open(output_mp3_path, "wb") as f:
                     f.write(b"ID3\x03\x00\x00\x00\x00\x00\x00HERALD_MOCK_AUDIO_DATA_FOR_TESTING_1234567890")
                 return {
@@ -254,9 +254,13 @@ def join_and_normalize_audio(
                 }
             raise FFmpegExecutionError("FFmpeg binary is not found in PATH.")
 
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if res.returncode != 0:
-            raise FFmpegExecutionError(f"FFmpeg failed with exit code {res.returncode}: {res.stderr}")
+
+        from herald.concurrency import get_semaphores
+        with get_semaphores().ffmpeg:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise FFmpegExecutionError(f"FFmpeg failed with exit code {res.returncode}: {res.stderr}")
+
 
         val_info = validate_audio_file(output_mp3_path)
         embed_id3_metadata(output_mp3_path, title=episode_title, description=episode_description, job_id=job_id)

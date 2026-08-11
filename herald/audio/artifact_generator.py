@@ -191,7 +191,15 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         f"- **Total Processing Time**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Time**: N/A",
     ])
 
+    try:
+        from herald.config import settings
+        c_cfg = settings.get_concurrency_config()
+        lines.append(f"- **Concurrency Profile**: `{c_cfg.profile}` (CPUs: {c_cfg.detected_cpus}, Workers: {c_cfg.worker_concurrency}, Script: {c_cfg.script_concurrency}, TTS Slots Global: {c_cfg.tts_global_slots}, TTS/Job: {c_cfg.tts_per_job}, FFmpeg: {c_cfg.ffmpeg_concurrency})")
+    except Exception:
+        pass
+
     v_audit = getattr(job, "verify_audit_json", None) or {}
+
     v_rep_count = getattr(job, "verify_repair_count", 0) or 0
     if getattr(job, "verify_final_script", False):
         v_status = "PASS" if not v_audit.get("has_material_issues") else f"REPAIRED ({v_rep_count} pass)"

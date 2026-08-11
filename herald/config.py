@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +16,16 @@ class Settings(BaseSettings):
     HERALD_WORK_DIR: str = "/data/herald"
     HERALD_MIN_DISK_MB: int = 500
     HERALD_METRICS_ENABLED: bool = True
+
+    # Concurrency Profile & Limits
+    HERALD_CONCURRENCY_PROFILE: str = "auto"
+    HERALD_WORKER_CONCURRENCY: Optional[int] = None
+    HERALD_SCRIPT_CONCURRENCY: Optional[int] = None
+    HERALD_TTS_GLOBAL_SLOTS: Optional[int] = None
+    HERALD_TTS_PER_JOB: Optional[int] = None
+    HERALD_FFMPEG_CONCURRENCY: Optional[int] = None
+    HERALD_N8N_CONCURRENCY: Optional[int] = None
+
 
 
     # Database
@@ -100,5 +112,18 @@ class Settings(BaseSettings):
                 return False
         return True
 
+    def get_concurrency_config(self):
+        from herald.concurrency import resolve_concurrency_settings
+        return resolve_concurrency_settings(
+            profile=self.HERALD_CONCURRENCY_PROFILE,
+            worker_concurrency=self.HERALD_WORKER_CONCURRENCY,
+            script_concurrency=self.HERALD_SCRIPT_CONCURRENCY,
+            tts_global_slots=self.HERALD_TTS_GLOBAL_SLOTS,
+            tts_per_job=self.HERALD_TTS_PER_JOB,
+            ffmpeg_concurrency=self.HERALD_FFMPEG_CONCURRENCY,
+            n8n_concurrency=self.HERALD_N8N_CONCURRENCY,
+        )
+
 
 settings = Settings()
+

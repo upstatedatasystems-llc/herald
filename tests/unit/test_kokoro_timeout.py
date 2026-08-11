@@ -127,7 +127,10 @@ def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(db_sess
         source_text="Test source text",
         status=JobState.QUEUED_TTS.value,
         completed_chunk_index=0,
+        tts_chunk_chars=50,
         script_json={
+
+
             "episode_title": "Timeout Resumability Test",
             "segments": [
                 {"order": 1, "heading": "Part 1", "narration": "First segment narration."},
