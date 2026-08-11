@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     HERALD_TTS_GLOBAL_SLOTS: int | None = None
     HERALD_TTS_PER_JOB: int | None = None
     HERALD_FFMPEG_CONCURRENCY: int | None = None
+    HERALD_FFMPEG_TIMEOUT_SECONDS: int = 300
     HERALD_N8N_CONCURRENCY: int | None = None
 
 

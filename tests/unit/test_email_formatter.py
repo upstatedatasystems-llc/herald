@@ -25,14 +25,11 @@ def test_email_formatter_html_escaping_hostile_strings():
 
     ack = format_acknowledgment_email(
         job_id="job-xss-1",
-        episode_title=hostile_title,
         request_mode=hostile_mode,
-        estimated_minutes=5.0,
-        estimated_completion_range="approximately 5–10 minutes",
     )
 
     assert "<script>" not in ack["html"]
-    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in ack["html"]
+    assert "&lt;Script&gt;" in ack["html"]
     assert "job-xss-1" in ack["text"]
 
     comp = format_completion_email(

@@ -149,6 +149,8 @@ class IntakeResponse(BaseModel):
     source_type: str
     is_duplicate: bool
     message: str
+    acknowledgment_email_text: str | None = None
+    acknowledgment_email_html: str | None = None
 
 
 class ExtractUrlRequest(BaseModel):
@@ -590,6 +592,11 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
 
     transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-api")
 
+    ack = format_acknowledgment_email(
+        job_id=job.id,
+        request_mode=job.request_mode,
+    )
+
     return IntakeResponse(
         job_id=job.id,
         status=job.status,
@@ -597,6 +604,8 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         source_type=job.source_type,
         is_duplicate=False,
         message="Intake successful and content normalized.",
+        acknowledgment_email_text=ack["text"],
+        acknowledgment_email_html=ack["html"],
     )
 
 
@@ -872,14 +881,6 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         dur_info = calculate_script_duration(script_obj, job.custom_speed or settings.KOKORO_SPEED)
         eta_info = calculate_job_eta(db, job)
 
-        ack = format_acknowledgment_email(
-            job_id=job.id,
-            episode_title=episode_title,
-            request_mode=job.request_mode,
-            estimated_minutes=dur_info["estimated_minutes"],
-            estimated_completion_range=eta_info["estimated_completion_range"],
-        )
-
         return {
             "job_id": job.id,
             "gmail_message_id": job.gmail_message_id,
@@ -890,8 +891,6 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             "estimated_minutes": dur_info["estimated_minutes"],
             "estimated_completion_range": eta_info["estimated_completion_range"],
             "segments_count": len(segments),
-            "acknowledgment_email_text": ack["text"],
-            "acknowledgment_email_html": ack["html"],
         }
     except GeminiError as e:
         transition_job_state(

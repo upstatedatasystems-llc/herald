@@ -120,14 +120,14 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\"\n}",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id || $('Call Herald API - Intake').item.json.job_id }}\"\n}",
         "options": {}
       },
       "name": "Call Herald API - Generate Script",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 3,
       "position": [
-        1000,
+        1250,
         250
       ]
     },
@@ -146,7 +146,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        1250,
+        1000,
         250
       ],
       "credentials": {
@@ -184,18 +184,18 @@
       "main": [
         [
           {
-            "node": "Call Herald API - Generate Script",
+            "node": "Send Submission Acknowledgment",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Call Herald API - Generate Script": {
+    "Send Submission Acknowledgment": {
       "main": [
         [
           {
-            "node": "Send Submission Acknowledgment",
+            "node": "Call Herald API - Generate Script",
             "type": "main",
             "index": 0
           }

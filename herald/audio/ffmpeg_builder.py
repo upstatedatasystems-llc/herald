@@ -58,7 +58,7 @@ def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sampl
         "-ar", str(sample_rate),
         str(output_path),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
     if res.returncode != 0:
         logger.warning(f"FFmpeg silence generation failed: {res.stderr}")
     return output_path
@@ -110,7 +110,7 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
                 "-of", "json",
                 str(file_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
             probe_data = json.loads(res.stdout)
             streams = probe_data.get("streams", [])
             has_audio_stream = any(s.get("codec_type") == "audio" for s in streams)
@@ -256,13 +256,40 @@ def join_and_normalize_audio(
 
 
         from herald.concurrency import get_semaphores
+
+        job_log_prefix = f"Job '{job_id}': " if job_id else ""
+        timeout_sec = getattr(settings, "HERALD_FFMPEG_TIMEOUT_SECONDS", 300)
+
+        logger.info(f"{job_log_prefix}waiting for FFmpeg slot")
         with get_semaphores().ffmpeg:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            logger.info(f"{job_log_prefix}FFmpeg slot acquired")
+            logger.info(f"{job_log_prefix}FFmpeg process starting")
+            t_ffmpeg_proc_start = datetime.now(UTC)
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout_sec)
+            except subprocess.TimeoutExpired as te:
+                logger.error(f"{job_log_prefix}FFmpeg process timed out after {timeout_sec} seconds")
+                if output_mp3_path.exists():
+                    try:
+                        output_mp3_path.unlink()
+                    except Exception as e:
+                        logger.warning(f"Failed to remove partial output '{output_mp3_path}' after timeout: {e}")
+                raise FFmpegExecutionError(f"FFmpeg process timed out after {timeout_sec} seconds") from te
+
+            ffmpeg_duration = (datetime.now(UTC) - t_ffmpeg_proc_start).total_seconds()
+
             if res.returncode != 0:
+                if output_mp3_path.exists():
+                    try:
+                        output_mp3_path.unlink()
+                    except Exception as e:
+                        logger.warning(f"Failed to remove partial output '{output_mp3_path}' after failure: {e}")
                 raise FFmpegExecutionError(f"FFmpeg failed with exit code {res.returncode}: {res.stderr}")
 
+            logger.info(f"{job_log_prefix}FFmpeg process completed in {ffmpeg_duration:.2f} seconds")
 
         val_info = validate_audio_file(output_mp3_path)
+        logger.info(f"{job_log_prefix}validation completed")
         embed_id3_metadata(output_mp3_path, title=episode_title, description=episode_description, job_id=job_id)
 
         checksum = compute_file_sha256(output_mp3_path)

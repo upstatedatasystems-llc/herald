@@ -26,28 +26,20 @@ def _format_iso_datetime(iso_str: str | None) -> str:
 
 def format_acknowledgment_email(
     job_id: str,
-    episode_title: str,
     request_mode: str,
-    estimated_minutes: float,
-    estimated_completion_range: str,
 ) -> dict[str, str]:
     """
-    Generate HTML acknowledgment reply email with plain-text fallback.
+    Generate HTML lightweight receipt acknowledgment reply email with plain-text fallback.
     """
-    safe_title = html.escape(episode_title or "Herald Episode")
     safe_mode = html.escape((request_mode or "standard").title())
-    safe_eta = html.escape(estimated_completion_range or "10-15 minutes")
     safe_job_id = html.escape(job_id)
 
     text_body = (
-        f"HERALD — SUBMISSION ACKNOWLEDGMENT\n\n"
-        f"Your podcast request has been accepted and queued for audio generation.\n\n"
-        f"Episode Title: {episode_title}\n"
-        f"Requested Format: {request_mode.title()}\n"
-        f"Estimated Duration: {estimated_minutes} minutes\n"
-        f"Estimated Completion: {estimated_completion_range}\n"
+        f"HERALD — REQUEST RECEIVED\n\n"
+        f"Your podcast request has been received and processing has begun.\n\n"
+        f"Requested Format: {(request_mode or 'standard').title()}\n"
         f"Job ID: {job_id}\n\n"
-        f"You will receive another email with your private Google Drive link as soon as audio generation completes."
+        f"You will receive another email with your private Google Drive link when the episode is complete."
     )
 
     html_body = f"""<!DOCTYPE html>
@@ -55,7 +47,7 @@ def format_acknowledgment_email(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Podcast Queued - Herald</title>
+<title>Request Received - Herald</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1e293b; background-color: #f8fafc; margin: 0; padding: 24px 12px;">
   <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
@@ -65,38 +57,28 @@ def format_acknowledgment_email(
           <!-- Header -->
           <tr>
             <td style="background-color: #0f172a; padding: 24px; text-align: left;">
-              <div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">HERALD</div>
-              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Your podcast is in the queue</h1>
+              <div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">HERALD — REQUEST RECEIVED</div>
+              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Your podcast request has been received</h1>
             </td>
           </tr>
           <!-- Body -->
           <tr>
             <td style="padding: 24px;">
-              <h2 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; color: #0f172a;">{safe_title}</h2>
-              <p style="margin: 0 0 20px 0; font-size: 14px; color: #475569;">Your source was processed successfully and your script has been generated. Audio synthesis is now underway.</p>
+              <p style="margin: 0 0 20px 0; font-size: 14px; color: #475569;">Your podcast request has been received and processing has begun.</p>
               
               <!-- Details Table -->
               <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 20px; border-top: 1px solid #f1f5f9;">
                 <tr>
-                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f1f5f9;">Requested Mode</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f1f5f9;">Requested Format</td>
                   <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_mode}</td>
                 </tr>
                 <tr>
-                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Estimated Duration</td>
-                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{estimated_minutes} minutes</td>
-                </tr>
-                <tr>
-                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Estimated Completion</td>
-                  <td style="padding: 10px 0; font-size: 14px; color: #2563eb; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_eta}</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Job ID</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;"><code style="font-family: monospace; color: #64748b;">{safe_job_id}</code></td>
                 </tr>
               </table>
 
-              <p style="margin: 0 0 16px 0; font-size: 14px; color: #475569;">You will receive another email with your private Google Drive link as soon as delivery is complete.</p>
-
-              <!-- De-emphasized Job ID -->
-              <div style="font-size: 12px; color: #94a3b8; background-color: #f8fafc; padding: 8px 12px; border-radius: 4px; display: inline-block;">
-                Job ID: <code style="font-family: monospace; color: #64748b;">{safe_job_id}</code>
-              </div>
+              <p style="margin: 0 0 16px 0; font-size: 14px; color: #475569;">You will receive another email with your private Google Drive link when the episode is complete.</p>
             </td>
           </tr>
           <!-- Footer -->

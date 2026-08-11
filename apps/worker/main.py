@@ -424,47 +424,46 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             t_ffmpeg_start = datetime.now(UTC)
             audio_info = None
 
-            # Execute FFmpeg join with semaphore protection
-            with semaphores.ffmpeg:
-                for ffmpeg_attempt in range(1, 3):
-                    try:
-                        logger.info(f"Worker '{worker_id}' assembling audio with FFmpeg for job '{job.id}' (Attempt {ffmpeg_attempt})...")
-                        audio_info = join_and_normalize_audio(
-                            chunk_paths=generated_chunk_paths,
-                            output_mp3_path=output_mp3_path,
-                            is_section_end_list=is_section_end_list,
-                            episode_title=title,
-                            episode_description=description,
-                            job_id=job.id,
-                        )
+            # Execute FFmpeg join (concurrency protected internally within join_and_normalize_audio)
+            for ffmpeg_attempt in range(1, 3):
+                try:
+                    logger.info(f"Worker '{worker_id}' assembling audio with FFmpeg for job '{job.id}' (Attempt {ffmpeg_attempt})...")
+                    audio_info = join_and_normalize_audio(
+                        chunk_paths=generated_chunk_paths,
+                        output_mp3_path=output_mp3_path,
+                        is_section_end_list=is_section_end_list,
+                        episode_title=title,
+                        episode_description=description,
+                        job_id=job.id,
+                    )
 
+                    record_stage_metric(
+                        job_id=job.id,
+                        stage="FFMPEG_ENCODING",
+                        started_at=t_ffmpeg_start,
+                        finished_at=datetime.now(UTC),
+                        status="success",
+                        output_bytes=audio_info["file_bytes"],
+                        audio_duration_ms=audio_info["duration_seconds"] * 1000 if audio_info.get("duration_seconds") else None,
+                        attempt=ffmpeg_attempt,
+                        metadata_json={"worker_id": worker_id},
+                    )
+                    break
+                except Exception as fe:
+                    logger.warning(f"FFmpeg assembly attempt {ffmpeg_attempt} failed: {fe}")
+                    if output_mp3_path.exists():
+                        output_mp3_path.unlink(missing_ok=True)
+                    if ffmpeg_attempt == 2:
                         record_stage_metric(
                             job_id=job.id,
                             stage="FFMPEG_ENCODING",
                             started_at=t_ffmpeg_start,
                             finished_at=datetime.now(UTC),
-                            status="success",
-                            output_bytes=audio_info["file_bytes"],
-                            audio_duration_ms=audio_info["duration_seconds"] * 1000 if audio_info.get("duration_seconds") else None,
+                            status="failed",
                             attempt=ffmpeg_attempt,
-                            metadata_json={"worker_id": worker_id},
+                            metadata_json={"error": str(fe), "worker_id": worker_id},
                         )
-                        break
-                    except Exception as fe:
-                        logger.warning(f"FFmpeg assembly attempt {ffmpeg_attempt} failed: {fe}")
-                        if output_mp3_path.exists():
-                            output_mp3_path.unlink(missing_ok=True)
-                        if ffmpeg_attempt == 2:
-                            record_stage_metric(
-                                job_id=job.id,
-                                stage="FFMPEG_ENCODING",
-                                started_at=t_ffmpeg_start,
-                                finished_at=datetime.now(UTC),
-                                status="failed",
-                                attempt=ffmpeg_attempt,
-                                metadata_json={"error": str(fe), "worker_id": worker_id},
-                            )
-                            raise
+                        raise
 
             job.completed_chunk_index = len(chunks)
             job.local_audio_path = audio_info["output_path"]
