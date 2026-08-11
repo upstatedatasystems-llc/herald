@@ -1049,6 +1049,10 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     local_audio_path = job.local_audio_path or str(output_dir / names["audio_filename"])
     local_details_path = str(output_dir / names["details_filename"])
 
+    ep_title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
+    audio_drive_filename = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "mp3")
+    details_drive_filename = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "md")
+
     needs_audio_upload = not bool(job.drive_file_id and job.drive_web_link)
     needs_details_upload = not bool(job.details_drive_file_id and job.details_drive_web_link)
 
@@ -1105,8 +1109,10 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "delivery_attempt_count": job.delivery_attempt_count,
             "local_audio_path": local_audio_path,
             "audio_filename": names["audio_filename"],
+            "audio_drive_filename": audio_drive_filename,
             "local_details_path": local_details_path,
             "details_filename": names["details_filename"],
+            "details_drive_filename": details_drive_filename,
             "needs_audio_upload": needs_audio_upload,
             "needs_details_upload": needs_details_upload,
             "needs_email": needs_email,

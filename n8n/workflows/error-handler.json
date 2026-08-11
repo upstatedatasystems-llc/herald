@@ -20,13 +20,13 @@
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.HERALD_API_KEY}}"
+              "value": "={{ $env.HERALD_API_KEY }}"
             }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"job_id\": \"{{$json.execution.error.job_id || null}}\",\n  \"error_code\": \"{{$json.execution.error.message || 'WORKFLOW_EXECUTION_ERROR'}}\",\n  \"error_detail\": \"{{$json.execution.error.description || 'Execution failure in n8n workflow'}}\"\n}",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.execution.error.job_id || null }}\",\n  \"error_code\": \"{{ $json.execution.error.message || 'WORKFLOW_EXECUTION_ERROR' }}\",\n  \"error_detail\": \"{{ $json.execution.error.description || 'Execution failure in n8n workflow' }}\"\n}",
         "options": {}
       },
       "name": "Call Herald Error Handler API",
@@ -36,6 +36,29 @@
         500,
         300
       ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.EMAIL_ALLOWED_SENDERS || 'upstatedatasystems@gmail.com' }}",
+        "subject": "=HERALD SYSTEM ALERT: Workflow Error [{{ $json.error_code || 'WORKFLOW_EXECUTION_ERROR' }}]",
+        "emailType": "html",
+        "message": "=<div style=\"font-family: Arial, sans-serif;\"><h3>Herald System Error Alert</h3><p>An unexpected workflow execution error occurred.</p><ul><li><b>Workflow:</b> {{ $('Error Trigger').item.json.workflow.name || 'Unknown Workflow' }}</li><li><b>Job ID:</b> {{ $json.job_id || 'N/A' }}</li><li><b>Error Code:</b> {{ $json.error_code || 'WORKFLOW_EXECUTION_ERROR' }}</li><li><b>Timestamp:</b> {{ $now }}</li><li><b>Detail:</b> {{ $json.error_detail || 'Execution failure' }}</li></ul></div>"
+      },
+      "name": "Send Admin Error Notification",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        750,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
     }
   ],
   "connections": {
@@ -44,6 +67,17 @@
         [
           {
             "node": "Call Herald Error Handler API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Herald Error Handler API": {
+      "main": [
+        [
+          {
+            "node": "Send Admin Error Notification",
             "type": "main",
             "index": 0
           }

@@ -134,7 +134,7 @@
         "authentication": "oAuth2",
         "operation": "upload",
         "fileContentKey": "data",
-        "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.audio_filename }}",
+        "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.audio_drive_filename }}",
         "parents": [
           "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
         ],
@@ -217,7 +217,7 @@
         "authentication": "oAuth2",
         "operation": "upload",
         "fileContentKey": "data",
-        "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.details_filename }}",
+        "name": "={{ $('Claim Delivery Job (Atomic)').item.json.job.details_drive_filename }}",
         "parents": [
           "={{ $env.GOOGLE_DRIVE_FOLDER_ID }}"
         ],

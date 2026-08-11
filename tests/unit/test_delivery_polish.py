@@ -1,11 +1,14 @@
+import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from apps.api.main import app
+from herald.audio.artifact_generator import get_artifact_filenames
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.extraction.source_cleaner import deduplicate_source_blocks
@@ -17,6 +20,7 @@ from herald.extraction.url_extractor import (
 from herald.n8n.credential_rehydrator import (
     rehydrate_workflow_credentials,
     validate_workflow_credentials,
+    validate_workflow_for_deployment,
 )
 from herald.services.drive_service import (
     build_user_facing_drive_filename,
@@ -171,6 +175,216 @@ def test_drive_filename_sanitization_and_construction():
     assert audio_fn == "Quantum Computing Breakthroughs- 8-11-26 Standard.mp3" or "Quantum Computing Breakthroughs" in audio_fn
     assert audio_fn.endswith("8-11-26 Standard.mp3")
     assert details_fn.endswith("8-11-26 Standard.md")
+
+
+def test_delivery_claim_returns_readable_drive_filenames_and_uuid_local_paths(api_client, db_session: Session):
+    """
+    Verify /api/v1/delivery/claim returns separate readable audio_drive_filename and details_drive_filename,
+    while preserving UUID-based local audio_filename, details_filename, and local paths.
+    """
+    job_id = f"claim-job-{uuid.uuid4().hex[:8]}"
+    job = PodcastJob(
+        id=job_id,
+        gmail_message_id="msg-claim-001",
+        sender_email="user@example.com",
+        request_mode="standard",
+        source_type="email_body",
+        source_hash="hash-claim-123",
+        source_text="Test source text content",
+        status=JobState.AUDIO_READY.value,
+        custom_title="The AI Revolution Begins",
+        created_at=datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc),
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    res = api_client.post("/api/v1/delivery/claim")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["claimed"] is True
+    claimed_job = data["job"]
+    assert claimed_job["id"] == job_id
+
+    # 1. Readable Drive-facing filenames
+    assert claimed_job["audio_drive_filename"].startswith("The AI Revolution Begins")
+    assert claimed_job["audio_drive_filename"].endswith(".mp3")
+    assert "8-11-26 Standard" in claimed_job["audio_drive_filename"]
+
+    assert claimed_job["details_drive_filename"].startswith("The AI Revolution Begins")
+    assert claimed_job["details_drive_filename"].endswith(".md")
+    assert "8-11-26 Standard" in claimed_job["details_drive_filename"]
+
+    # 2. Preserved local filenames and paths
+    names = get_artifact_filenames(job)
+    assert claimed_job["audio_filename"] == names["audio_filename"]
+    assert claimed_job["details_filename"] == names["details_filename"]
+    assert claimed_job["local_audio_path"].endswith(names["audio_filename"])
+    assert claimed_job["local_details_path"].endswith(names["details_filename"])
+
+
+def test_drive_workflow_nodes_consume_drive_facing_names():
+    """
+    Verify completion-dispatcher.json Drive upload nodes reference job.audio_drive_filename
+    and job.details_drive_filename.
+    """
+    wf_path = Path("n8n/workflows/completion-dispatcher.json")
+    assert wf_path.exists()
+
+    with open(wf_path, "r", encoding="utf-8") as f:
+        wf = json.load(f)
+
+    nodes_by_name = {n["name"]: n for n in wf.get("nodes", [])}
+
+    audio_node = nodes_by_name.get("Upload Audio to Google Drive")
+    assert audio_node is not None
+    assert "job.audio_drive_filename" in audio_node["parameters"]["name"]
+
+    details_node = nodes_by_name.get("Upload Details to Google Drive")
+    assert details_node is not None
+    assert "job.details_drive_filename" in details_node["parameters"]["name"]
+
+
+def test_deployment_rehydration_replaces_placeholder_credentials_and_error_workflow_id():
+    """
+    Verify rehydrate_workflow_credentials replaces placeholder credential IDs and resolves
+    settings.errorWorkflow from workflow name to installed workflow ID.
+    """
+    raw_wf = {
+        "name": "Herald - Email Intake & Script Generator",
+        "nodes": [
+            {
+                "name": "Gmail Trigger",
+                "credentials": {
+                    "gmailOAuth2": {"id": "1", "name": "Herald Gmail Account"}
+                },
+            },
+            {
+                "name": "Drive Upload",
+                "credentials": {
+                    "googleDriveOAuth2Api": {"id": "1", "name": "Herald Google Drive Account"}
+                },
+            },
+        ],
+        "settings": {
+            "errorWorkflow": "Herald - System Error Handler"
+        },
+    }
+
+    installed_creds = {
+        "gmailOAuth2": {"id": "real-gmail-cred-999", "name": "Production Gmail"},
+        "googleDriveOAuth2Api": {"id": "real-drive-cred-888", "name": "Production Drive"},
+    }
+
+    wf_map = {
+        "Herald - System Error Handler": "fOw3dnjtBK04avEI"
+    }
+
+    rehydrated = rehydrate_workflow_credentials(raw_wf, installed_creds, wf_map)
+
+    # 1. Credentials rehydrated
+    assert rehydrated["nodes"][0]["credentials"]["gmailOAuth2"]["id"] == "real-gmail-cred-999"
+    assert rehydrated["nodes"][1]["credentials"]["googleDriveOAuth2Api"]["id"] == "real-drive-cred-888"
+
+    # 2. errorWorkflow resolved to ID
+    assert rehydrated["settings"]["errorWorkflow"] == "fOw3dnjtBK04avEI"
+    assert validate_workflow_for_deployment(rehydrated) is True
+
+
+def test_deployment_rejects_unresolved_placeholder_credentials():
+    """
+    Verify validate_workflow_for_deployment fails closed (raises ValueError) if placeholder credential ID '1' remains.
+    """
+    wf_with_placeholder = {
+        "name": "Unresolved Workflow",
+        "nodes": [
+            {
+                "name": "Gmail Node",
+                "credentials": {
+                    "gmailOAuth2": {"id": "1", "name": "Placeholder Gmail"}
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_workflow_for_deployment(wf_with_placeholder)
+
+    assert "contains unresolved placeholder credential ID '1'" in str(exc_info.value)
+
+
+def test_error_workflow_is_workflow_id_not_name():
+    """
+    Verify validate_workflow_for_deployment rejects raw workflow name 'Herald - System Error Handler' in settings.errorWorkflow.
+    """
+    wf_with_raw_error_name = {
+        "name": "Test Intake",
+        "nodes": [],
+        "settings": {
+            "errorWorkflow": "Herald - System Error Handler"
+        },
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_workflow_for_deployment(wf_with_raw_error_name)
+
+    assert "settings.errorWorkflow contains unresolved workflow name 'Herald - System Error Handler' instead of an installed workflow ID" in str(exc_info.value)
+
+
+def test_global_error_handler_sends_admin_notification():
+    """
+    Verify error-handler.json contains Send Admin Error Notification Gmail node connected after Error Handler API call.
+    """
+    wf_path = Path("n8n/workflows/error-handler.json")
+    assert wf_path.exists()
+
+    with open(wf_path, "r", encoding="utf-8") as f:
+        wf = json.load(f)
+
+    nodes_by_name = {n["name"]: n for n in wf.get("nodes", [])}
+
+    admin_node = nodes_by_name.get("Send Admin Error Notification")
+    assert admin_node is not None
+    assert admin_node["type"] == "n8n-nodes-base.gmail"
+
+    # Connection check
+    connections = wf.get("connections", {})
+    api_call_conns = connections.get("Call Herald Error Handler API", {}).get("main", [])
+    assert len(api_call_conns) > 0
+    target_node = api_call_conns[0][0]["node"]
+    assert target_node == "Send Admin Error Notification"
+
+
+def test_source_access_blocked_does_not_route_through_global_error_handler():
+    """
+    Verify email-intake.json routes FAILED_FINAL / SOURCE_ACCESS_BLOCKED to Send Source Failure Notification
+    and terminates normally without invoking global error handler.
+    """
+    wf_path = Path("n8n/workflows/email-intake.json")
+    assert wf_path.exists()
+
+    with open(wf_path, "r", encoding="utf-8") as f:
+        wf = json.load(f)
+
+    nodes_by_name = {n["name"]: n for n in wf.get("nodes", [])}
+
+    check_node = nodes_by_name.get("Check Source Status")
+    assert check_node is not None
+
+    fail_node = nodes_by_name.get("Send Source Failure Notification")
+    assert fail_node is not None
+    assert fail_node.get("onError") == "continueRegularOutput"
+
+    # Verify connection from Check Source Status true branch to Send Source Failure Notification
+    connections = wf.get("connections", {})
+    source_status_conns = connections.get("Check Source Status", {}).get("main", [])
+    assert len(source_status_conns) > 0
+    true_branch_node = source_status_conns[0][0]["node"]
+    assert true_branch_node == "Send Source Failure Notification"
+
+    # Verify Send Source Failure Notification has no outgoing connections to Error Handler
+    fail_node_conns = connections.get("Send Source Failure Notification", {})
+    assert fail_node_conns == {} or fail_node_conns.get("main") is None
 
 
 def test_source_access_blocked_and_requester_failure_email():
