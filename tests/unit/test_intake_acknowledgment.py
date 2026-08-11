@@ -227,3 +227,38 @@ def test_replay_when_queued_tts_does_not_regenerate_script(api_client, db_sessio
         assert "already exists" in r3.json()["message"]
         # Must not re-run Gemini script generation
         assert mock_gen_2.call_count == 0
+
+
+def test_replay_when_scripting_synthesizing_later_states_does_not_regenerate_or_acknowledge(api_client, db_session: Session):
+    """
+    Prove that replaying intake or script generation for jobs in SCRIPTING, SYNTHESIZING,
+    ENCODING, or COMPLETE states does NOT generate a new acknowledgment email and does NOT regenerate script.
+    """
+    req_data = {
+        "gmail_message_id": "msg-replay-later-001",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": "Content for testing downstream replay states.",
+    }
+
+    r1 = api_client.post("/api/v1/intake", json=req_data)
+    job_id = r1.json()["job_id"]
+    job = db_session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+
+    for state in (JobState.SCRIPTING.value, JobState.SYNTHESIZING.value, JobState.ENCODING.value, JobState.COMPLETE.value):
+        job.status = state
+        job.script_json = {"episode_title": "Test", "segments": []}
+        db_session.commit()
+
+        # Replay intake call
+        r_intake = api_client.post("/api/v1/intake", json=req_data)
+        assert r_intake.status_code == 200
+        d_intake = r_intake.json()
+        assert d_intake["is_duplicate"] is True
+        assert d_intake["acknowledgment_email_html"] is None
+
+        # Replay script generation call
+        with patch("apps.api.main.generate_podcast_script") as mock_gen:
+            r_script = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
+            assert r_script.status_code == 200
+            assert mock_gen.call_count == 0

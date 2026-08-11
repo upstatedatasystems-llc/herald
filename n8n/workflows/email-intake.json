@@ -97,7 +97,7 @@
           ]
         }
       },
-      "name": "Check Should Send Acknowledgment",
+      "name": "Check If New Job",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
@@ -137,18 +137,17 @@
           "string": [
             {
               "value1": "={{ $json.status || $('Call Herald API - Intake').item.json.status }}",
-              "operation": "regex",
-              "value2": "^(RECEIVED|VALIDATING|EXTRACTING|SOURCE_READY)$"
+              "value2": "SOURCE_READY"
             }
           ]
         }
       },
-      "name": "Check Needs Script Generation",
+      "name": "Check Is SOURCE_READY Job",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
         1150,
-        300
+        350
       ]
     },
     {
@@ -194,14 +193,14 @@
       "main": [
         [
           {
-            "node": "Check Should Send Acknowledgment",
+            "node": "Check If New Job",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Check Should Send Acknowledgment": {
+    "Check If New Job": {
       "main": [
         [
           {
@@ -212,7 +211,7 @@
         ],
         [
           {
-            "node": "Check Needs Script Generation",
+            "node": "Check Is SOURCE_READY Job",
             "type": "main",
             "index": 0
           }
@@ -223,14 +222,14 @@
       "main": [
         [
           {
-            "node": "Check Needs Script Generation",
+            "node": "Call Herald API - Generate Script",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Check Needs Script Generation": {
+    "Check Is SOURCE_READY Job": {
       "main": [
         [
           {

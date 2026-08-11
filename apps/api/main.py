@@ -643,12 +643,17 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.script_json and job.status in (
+    if job.status in (
+        JobState.SCRIPTING.value,
+        JobState.SCRIPT_READY.value,
         JobState.QUEUED_TTS.value,
         JobState.SYNTHESIZING.value,
+        JobState.ENCODING.value,
         JobState.AUDIO_READY.value,
+        JobState.UPLOADING.value,
+        JobState.DELIVERING.value,
         JobState.COMPLETE.value,
-    ):
+    ) or (job.script_json and job.status != JobState.SOURCE_READY.value):
         return {"job_id": job.id, "status": job.status, "message": "Script already exists for job."}
 
     transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-api")

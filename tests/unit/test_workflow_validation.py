@@ -90,3 +90,8 @@ def test_validate_all_n8n_workflows():
             ack_node = nodes_by_name["Send Submission Acknowledgment"]
             assert ack_node["parameters"].get("emailType") == "html"
             assert "acknowledgment_email_html" in ack_node["parameters"]["message"]
+            assert ack_node.get("onError") in ("continueRegularOutput", "continueErrorOutput")
+
+            assert "Check If New Job" in nodes_by_name
+            assert "Check Is SOURCE_READY Job" in nodes_by_name
+            assert "Call Herald API - Generate Script" in nodes_by_name
