@@ -1,24 +1,20 @@
-import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
 
-from apps.worker.main import claim_next_job, process_next_job, recover_stale_claims
+from apps.worker.main import claim_next_job, recover_stale_claims
 from herald.audio.ffmpeg_builder import generate_silence_wav
 from herald.concurrency import ConcurrencyConfig, get_semaphores
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob, PodcastTTSChunk
 from herald.tts.chunk_manager import (
-    compute_chunk_text_hash,
     process_tts_chunks_parallel,
     sync_and_prepare_chunks,
 )
 from herald.tts.chunker import TTSChunk
-from herald.tts.kokoro_client import KokoroClient
 
 
 @pytest.fixture

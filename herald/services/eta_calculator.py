@@ -1,5 +1,5 @@
 import math
-from datetime import UTC, datetime
+
 from sqlalchemy.orm import Session
 
 from herald.config import settings

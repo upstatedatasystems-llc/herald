@@ -1,14 +1,10 @@
-import pytest
 from herald.concurrency import (
     ConcurrencyConfig,
-    ConcurrencySemaphores,
     detect_cpus,
     get_semaphores,
     resolve_concurrency_settings,
 )
 from herald.tts.chunk_manager import compute_chunk_text_hash
-
-from herald.config import Settings
 
 
 def test_detect_cpus():
@@ -46,7 +42,7 @@ def test_profile_auto_2_cpu():
     assert cfg.tts_global_slots == 2
     assert cfg.tts_per_job == 2
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 2
+    assert cfg.n8n_concurrency == 1
 
 
 def test_profile_auto_4_cpu():
@@ -56,7 +52,7 @@ def test_profile_auto_4_cpu():
     assert cfg.tts_global_slots == 3
     assert cfg.tts_per_job == 2
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 2
+    assert cfg.n8n_concurrency == 1
 
 
 def test_env_var_overrides():

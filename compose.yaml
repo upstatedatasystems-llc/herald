@@ -112,7 +112,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.00"
           memory: 2048M
     networks:
       - herald-backend
@@ -139,7 +138,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.50"
           memory: 512M
     depends_on:
       postgres:
@@ -178,7 +176,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.75"
           memory: 1024M
     depends_on:
       postgres:

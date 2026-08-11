@@ -1,10 +1,9 @@
+import logging
 import math
 import os
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Semaphore
-from typing import Optional
 
 logger = logging.getLogger("herald.concurrency")
 
@@ -12,10 +11,13 @@ logger = logging.getLogger("herald.concurrency")
 def detect_cpus() -> int:
     """
     Detect the number of CPU cores available to the process,
-    accounting for container cgroup quotas (cgroups v1/v2) and environment fallbacks.
-    Never returns less than 1.
+    accounting for container cgroup quotas (cgroups v1/v2), scheduler affinity,
+    and system CPU count fallback. Chooses the most restrictive finite limit.
+    Fractional quotas are floored to full-core capacity, minimum 1.
     """
-    # 1. Try cgroups v2
+    detected_limits = []
+
+    # 1. Check cgroups v2
     cgroup2_max = Path("/sys/fs/cgroup/cpu.max")
     if cgroup2_max.is_file():
         try:
@@ -25,13 +27,15 @@ def detect_cpus() -> int:
                 quota = float(parts[0])
                 period = float(parts[1])
                 if period > 0:
-                    cpus = math.ceil(quota / period)
-                    if cpus >= 1:
-                        return cpus
+                    val = math.floor(quota / period)
+                    if val >= 1:
+                        detected_limits.append(val)
+                    else:
+                        detected_limits.append(1)
         except Exception as e:
             logger.debug(f"Could not read cgroups v2 cpu.max: {e}")
 
-    # 2. Try cgroups v1
+    # 2. Check cgroups v1
     cgroup1_quota = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
     cgroup1_period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
     if cgroup1_quota.is_file() and cgroup1_period.is_file():
@@ -39,28 +43,33 @@ def detect_cpus() -> int:
             quota = float(cgroup1_quota.read_text().strip())
             period = float(cgroup1_period.read_text().strip())
             if quota > 0 and period > 0:
-                cpus = math.ceil(quota / period)
-                if cpus >= 1:
-                    return cpus
+                val = math.floor(quota / period)
+                if val >= 1:
+                    detected_limits.append(val)
+                else:
+                    detected_limits.append(1)
         except Exception as e:
             logger.debug(f"Could not read cgroups v1 quota/period: {e}")
 
-    # 3. Try os.sched_getaffinity if available (Linux)
+    # 3. Check os.sched_getaffinity if available (Linux)
     if hasattr(os, "sched_getaffinity"):
         try:
-            cpus = len(os.sched_getaffinity(0))
-            if cpus >= 1:
-                return cpus
+            affinity_cpus = len(os.sched_getaffinity(0))
+            if affinity_cpus >= 1:
+                detected_limits.append(affinity_cpus)
         except Exception as e:
             logger.debug(f"sched_getaffinity failed: {e}")
 
-    # 4. Fallback to os.cpu_count()
+    # 4. Check os.cpu_count()
     try:
-        cpus = os.cpu_count()
-        if cpus and cpus >= 1:
-            return cpus
+        count = os.cpu_count()
+        if count and count >= 1:
+            detected_limits.append(count)
     except Exception:
         pass
+
+    if detected_limits:
+        return max(1, min(detected_limits))
 
     return 1
 
@@ -91,13 +100,13 @@ class ConcurrencyConfig:
 
 def resolve_concurrency_settings(
     profile: str = "auto",
-    worker_concurrency: Optional[int] = None,
-    script_concurrency: Optional[int] = None,
-    tts_global_slots: Optional[int] = None,
-    tts_per_job: Optional[int] = None,
-    ffmpeg_concurrency: Optional[int] = None,
-    n8n_concurrency: Optional[int] = None,
-    cpus_override: Optional[int] = None,
+    worker_concurrency: int | None = None,
+    script_concurrency: int | None = None,
+    tts_global_slots: int | None = None,
+    tts_per_job: int | None = None,
+    ffmpeg_concurrency: int | None = None,
+    n8n_concurrency: int | None = None,
+    cpus_override: int | None = None,
 ) -> ConcurrencyConfig:
     """
     Resolve effective concurrency settings based on profile name, detected CPUs,
@@ -111,41 +120,33 @@ def resolve_concurrency_settings(
     detected_cpus = cpus_override if cpus_override is not None else detect_cpus()
     detected_cpus = max(1, detected_cpus)
 
-    if profile_clean == "single":
+    if profile_clean == "single" or detected_cpus <= 1:
         w = 1
         s = 1
         gt = 1
         tpj = 1
         ff = 1
-        n8n = 1
-    elif detected_cpus <= 1:
-        w = 1
-        s = 1
-        gt = 1
-        tpj = 1
-        ff = 1
-        n8n = 1
     elif detected_cpus == 2:
         w = 1
         s = 2
         gt = 2
         tpj = 2
         ff = 1
-        n8n = 2
     elif detected_cpus <= 4:
         w = 2
         s = 3
         gt = 3
         tpj = 2
         ff = 1
-        n8n = 2
     else:
         w = min(4, max(2, detected_cpus // 2))
         s = min(6, max(3, detected_cpus))
         gt = min(6, max(3, detected_cpus - 1))
         tpj = min(4, max(2, detected_cpus // 2))
         ff = min(2, max(1, detected_cpus // 4))
-        n8n = min(4, max(2, detected_cpus // 2))
+
+    # n8n production concurrency defaults to 1 unless explicitly overridden
+    n8n = 1
 
     # Apply explicit overrides if provided and > 0
     if worker_concurrency is not None and worker_concurrency > 0:
@@ -187,14 +188,35 @@ class ConcurrencySemaphores:
         return Semaphore(self.config.tts_per_job)
 
 
-_GLOBAL_SEMAPHORES: Optional[ConcurrencySemaphores] = None
+_GLOBAL_SEMAPHORES: ConcurrencySemaphores | None = None
 
 
-def get_semaphores(config: Optional[ConcurrencyConfig] = None) -> ConcurrencySemaphores:
+def initialize_semaphores(config: ConcurrencyConfig | None = None) -> ConcurrencySemaphores:
+    """
+    Initialize the process-global semaphore set once.
+    Subsequent calls return the existing singleton instance without replacing active semaphores.
+    """
     global _GLOBAL_SEMAPHORES
-    if _GLOBAL_SEMAPHORES is None or config is not None:
+    if _GLOBAL_SEMAPHORES is None:
         if config is None:
             from herald.config import settings
+
             config = settings.get_concurrency_config()
         _GLOBAL_SEMAPHORES = ConcurrencySemaphores(config)
     return _GLOBAL_SEMAPHORES
+
+
+def get_semaphores(config: ConcurrencyConfig | None = None) -> ConcurrencySemaphores:
+    """
+    Get the process-global semaphore set.
+    """
+    global _GLOBAL_SEMAPHORES
+    if _GLOBAL_SEMAPHORES is None:
+        return initialize_semaphores(config)
+    return _GLOBAL_SEMAPHORES
+
+
+def reset_semaphores_for_tests():
+    """Reset global semaphores singleton (for unit testing purposes only)."""
+    global _GLOBAL_SEMAPHORES
+    _GLOBAL_SEMAPHORES = None

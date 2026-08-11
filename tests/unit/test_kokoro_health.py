@@ -1,9 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
-import httpx
-import pytest
 
-from herald.config import settings
+import httpx
+
 from herald.tts.kokoro_client import KokoroClient
 
 

@@ -1,4 +1,3 @@
-from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,12 +18,12 @@ class Settings(BaseSettings):
 
     # Concurrency Profile & Limits
     HERALD_CONCURRENCY_PROFILE: str = "auto"
-    HERALD_WORKER_CONCURRENCY: Optional[int] = None
-    HERALD_SCRIPT_CONCURRENCY: Optional[int] = None
-    HERALD_TTS_GLOBAL_SLOTS: Optional[int] = None
-    HERALD_TTS_PER_JOB: Optional[int] = None
-    HERALD_FFMPEG_CONCURRENCY: Optional[int] = None
-    HERALD_N8N_CONCURRENCY: Optional[int] = None
+    HERALD_WORKER_CONCURRENCY: int | None = None
+    HERALD_SCRIPT_CONCURRENCY: int | None = None
+    HERALD_TTS_GLOBAL_SLOTS: int | None = None
+    HERALD_TTS_PER_JOB: int | None = None
+    HERALD_FFMPEG_CONCURRENCY: int | None = None
+    HERALD_N8N_CONCURRENCY: int | None = None
 
 
 

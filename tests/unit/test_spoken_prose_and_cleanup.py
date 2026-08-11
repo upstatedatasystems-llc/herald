@@ -1,8 +1,5 @@
-import pytest
 from herald.db.models import RequestMode
 from herald.extraction.email_parser import (
-    SourceClassification,
-    classify_source_content,
     process_email_message,
 )
 from herald.extraction.source_cleaner import clean_source_text

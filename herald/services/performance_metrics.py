@@ -3,7 +3,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 from herald.config import settings
 from herald.db.connection import SessionLocal
@@ -26,12 +26,12 @@ FORBIDDEN_METADATA_KEYS = {
 }
 
 
-def sanitize_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def sanitize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     """Recursively sanitize metadata dictionary to ensure no sensitive text or credentials leak into DB metrics."""
     if not metadata or not isinstance(metadata, dict):
         return None
 
-    cleaned: Dict[str, Any] = {}
+    cleaned: dict[str, Any] = {}
     for k, v in metadata.items():
         if any(bad in str(k).lower() for bad in FORBIDDEN_METADATA_KEYS):
             cleaned[k] = "[REDACTED]"
@@ -48,18 +48,18 @@ def record_stage_metric(
     job_id: str,
     stage: str,
     started_at: datetime,
-    finished_at: Optional[datetime] = None,
-    duration_ms: Optional[int] = None,
+    finished_at: datetime | None = None,
+    duration_ms: int | None = None,
     status: str = "success",
-    substage: Optional[str] = None,
-    attempt: Optional[int] = None,
-    sequence_index: Optional[int] = None,
-    input_chars: Optional[int] = None,
-    output_bytes: Optional[int] = None,
-    audio_duration_ms: Optional[int] = None,
-    metadata_json: Optional[Dict[str, Any]] = None,
+    substage: str | None = None,
+    attempt: int | None = None,
+    sequence_index: int | None = None,
+    input_chars: int | None = None,
+    output_bytes: int | None = None,
+    audio_duration_ms: int | None = None,
+    metadata_json: dict[str, Any] | None = None,
     is_attempt_metric: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """
     Safely record or update a job processing stage metric in an isolated DB transaction.
     Non-fatal: any failure is caught, logged as a warning, and returns None.
@@ -150,11 +150,11 @@ def record_stage_metric(
 def metric_timer(
     job_id: str,
     stage: str,
-    substage: Optional[str] = None,
-    attempt: Optional[int] = None,
-    sequence_index: Optional[int] = None,
-    input_chars: Optional[int] = None,
-    metadata_json: Optional[Dict[str, Any]] = None,
+    substage: str | None = None,
+    attempt: int | None = None,
+    sequence_index: int | None = None,
+    input_chars: int | None = None,
+    metadata_json: dict[str, Any] | None = None,
     is_attempt_metric: bool = False,
 ):
     """
@@ -162,7 +162,7 @@ def metric_timer(
     """
     started_utc = datetime.now(UTC)
     t0 = time.monotonic()
-    context: Dict[str, Any] = {
+    context: dict[str, Any] = {
         "status": "success",
         "output_bytes": None,
         "audio_duration_ms": None,

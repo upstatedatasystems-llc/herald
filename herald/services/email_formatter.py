@@ -1,5 +1,5 @@
 import html
-from datetime import UTC, datetime
+from datetime import datetime
 
 
 def get_canonical_drive_url(file_id: str | None, web_link: str | None) -> str | None:

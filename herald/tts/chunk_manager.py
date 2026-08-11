@@ -1,11 +1,11 @@
 import hashlib
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Semaphore
-from typing import Callable, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -31,11 +31,11 @@ def compute_chunk_text_hash(chunk_text: str, voice: str, speed: float) -> str:
 def sync_and_prepare_chunks(
     db: Session,
     job_id: str,
-    script_chunks: List[TTSChunk],
+    script_chunks: list[TTSChunk],
     voice: str,
     speed: float,
     chunks_dir: Path,
-) -> List[PodcastTTSChunk]:
+) -> list[PodcastTTSChunk]:
     """
     Synchronize DB records in podcast_tts_chunks with the script chunks.
     Validates completed chunk files and invalidates stale chunk records/files.
@@ -48,7 +48,7 @@ def sync_and_prepare_chunks(
     )
     existing_by_index = {c.chunk_index: c for c in existing_chunks}
 
-    prepared: List[PodcastTTSChunk] = []
+    prepared: list[PodcastTTSChunk] = []
 
     for chunk in script_chunks:
         text_hash = compute_chunk_text_hash(chunk.text, voice, speed)
@@ -190,7 +190,7 @@ def synthesize_single_chunk(
                 chunk_attempt = db_chunk.attempt_count
                 max_attempts = 2
                 chunk_success = False
-                last_error: Optional[Exception] = None
+                last_error: Exception | None = None
 
                 for attempt in range(1, max_attempts + 1):
                     t0_utc = datetime.now(UTC)
@@ -207,14 +207,14 @@ def synthesize_single_chunk(
                             speed=speed,
                             timeout=synthesis_timeout,
                         )
-                        validate_audio_file(chunk_file)
+                        val_meta = validate_audio_file(chunk_file)
 
                         t1_mono = time.monotonic()
                         t1_utc = datetime.now(UTC)
                         elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                        output_bytes = chunk_file.stat().st_size if chunk_file.exists() else 0
-                        audio_dur_ms = max(0, int(((output_bytes - 44) / 48000.0) * 1000)) if output_bytes > 44 else None
-                        audio_dur_sec = (audio_dur_ms / 1000.0) if audio_dur_ms else None
+                        output_bytes = val_meta.get("size_bytes", chunk_file.stat().st_size if chunk_file.exists() else 0)
+                        audio_dur_sec = val_meta.get("duration_seconds")
+                        audio_dur_ms = max(0, int(audio_dur_sec * 1000)) if (audio_dur_sec is not None and audio_dur_sec > 0) else None
                         rtf_val = round((elapsed_ms / float(audio_dur_ms)) if audio_dur_ms and audio_dur_ms > 0 else 0.0, 3)
 
                         record_stage_metric(
@@ -320,7 +320,7 @@ def synthesize_single_chunk(
 def process_tts_chunks_parallel(
     session_factory: Callable[[], Session],
     job_id: str,
-    script_chunks: List[TTSChunk],
+    script_chunks: list[TTSChunk],
     voice: str,
     speed: float,
     synthesis_timeout: float,
@@ -330,7 +330,7 @@ def process_tts_chunks_parallel(
     per_job_semaphore: Semaphore,
     max_workers: int = 2,
     worker_id: str = "herald-worker",
-) -> List[Path]:
+) -> list[Path]:
     """
     Process all chunks for an episode in parallel bounded by semaphores.
     Returns list of chunk file Paths strictly ordered by chunk_index.
@@ -397,7 +397,7 @@ def process_tts_chunks_parallel(
             .all()
         )
 
-        ordered_paths: List[Path] = []
+        ordered_paths: list[Path] = []
         for db_c in final_chunks:
             if db_c.status != "COMPLETED" or not db_c.local_path:
                 raise KokoroTTSError(f"TTS Chunk {db_c.chunk_index} is not complete (status: {db_c.status})")

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -6,11 +8,16 @@ from sqlalchemy.pool import StaticPool
 import herald.db.connection as db_conn
 from herald.db.connection import Base
 
-test_engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+db_url = os.getenv("HERALD_TEST_DATABASE_URL")
+
+if db_url:
+    test_engine = create_engine(db_url)
+else:
+    test_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 
 TestingSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
 db_conn.engine = test_engine
@@ -24,7 +31,7 @@ from herald.db.connection import get_db
 
 @pytest.fixture(scope="function", autouse=True)
 def db_session():
-    """Provides a clean transactional in-memory SQLite database session for each test function."""
+    """Provides a clean transactional database session for each test function."""
     Base.metadata.create_all(bind=test_engine)
     session = TestingSessionLocal()
 

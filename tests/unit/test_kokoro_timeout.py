@@ -1,6 +1,4 @@
-import os
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -12,7 +10,6 @@ from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.tts.kokoro_client import (
     KokoroClient,
-    KokoroTTSError,
     KokoroTTSTimeoutError,
 )
 

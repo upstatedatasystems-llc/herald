@@ -1,13 +1,8 @@
 import json
-import pytest
 from datetime import UTC, datetime
 
-from herald.audio.artifact_generator import (
-    ensure_research_artifact,
-    ensure_research_notes_artifact,
-    ensure_script_artifact,
-    get_artifact_filenames,
-)
+import pytest
+
 from herald.config import settings
 from herald.db.models import PodcastJob, RequestMode
 from herald.gemini.client import (
@@ -17,9 +12,6 @@ from herald.gemini.client import (
 )
 from herald.gemini.schema import (
     ResearchDossierResponse,
-    ResearchSource,
-    UsefulContextItem,
-    VerificationItem,
 )
 
 
@@ -224,9 +216,10 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
     without NameError or unhandled runtime exceptions.
     """
     from fastapi.testclient import TestClient
+
     from apps.api.main import app
     from herald.db.models import JobState, PodcastJob
-    from herald.gemini.schema import PodcastScriptResponse, ResearchAuditResponse, ResearchDossierResponse
+    from herald.gemini.schema import PodcastScriptResponse, ResearchAuditResponse
 
     monkeypatch.setattr(settings, "HERALD_ENV", "testing")
 

@@ -1,14 +1,12 @@
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app, normalize_gmail_timestamp
 from herald.audio.artifact_generator import ensure_details_artifact
 from herald.config import settings
-from herald.db.models import JobProcessingMetric, JobState, PodcastJob, SourceType
+from herald.db.models import JobProcessingMetric, JobState, PodcastJob
 from herald.services.performance_metrics import record_stage_metric
 
 client = TestClient(app)

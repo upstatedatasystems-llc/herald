@@ -1,13 +1,11 @@
 import json
-import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from herald.audio.artifact_generator import ensure_details_artifact, get_required_artifact_types
+from herald.audio.artifact_generator import get_required_artifact_types
 from herald.config import settings
 from herald.db.models import JobProcessingMetric, JobState, PodcastJob, RequestMode, SourceType
 from herald.services.performance_metrics import record_stage_metric

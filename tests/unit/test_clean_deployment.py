@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, inspect, text as sa_text
+from sqlalchemy import create_engine, inspect
+from sqlalchemy import text as sa_text
 
 from apps.api.main import app
 from herald.config import settings
@@ -39,8 +40,8 @@ def test_all_alembic_revisions_fit_in_varchar_32():
     are <= 32 characters long, ensuring compatibility with PostgreSQL's
     alembic_version.version_num VARCHAR(32) column length limit.
     """
-    from alembic.script import ScriptDirectory
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     alembic_cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(alembic_cfg)
@@ -58,8 +59,8 @@ def test_alembic_004_to_005_migration_with_existing_completed_jobs(tmp_path, mon
     verifying PostgreSQL VARCHAR(32) compatibility, resulting revision '005_drive_artifacts',
     and schema integrity.
     """
-    from alembic.config import Config
     from alembic import command
+    from alembic.config import Config
     from sqlalchemy.orm import sessionmaker
 
     db_file = tmp_path / "test_migration_004_005.db"

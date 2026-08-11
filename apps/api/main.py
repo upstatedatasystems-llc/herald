@@ -51,7 +51,6 @@ from herald.services.email_formatter import (
 )
 from herald.services.eta_calculator import calculate_job_eta, calculate_script_duration
 from herald.services.performance_metrics import (
-    metric_timer,
     record_stage_metric,
 )
 from herald.tts.kokoro_client import KokoroClient

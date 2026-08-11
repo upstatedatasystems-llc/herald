@@ -130,7 +130,7 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
     return {
         "valid": True,
         "size_bytes": file_path.stat().st_size,
-        "duration_seconds": int(duration_sec),
+        "duration_seconds": float(duration_sec),
         "audio_type": audio_type,
     }
 

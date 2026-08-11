@@ -1,4 +1,3 @@
-import pytest
 from herald.services.email_formatter import (
     format_acknowledgment_email,
     format_completion_email,

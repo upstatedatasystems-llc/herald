@@ -13,7 +13,6 @@ from herald.gemini.schema import (
     PodcastScriptResponse,
     ResearchAuditResponse,
     ResearchDossierResponse,
-    ResearchSource,
 )
 
 logger = logging.getLogger("herald.gemini")

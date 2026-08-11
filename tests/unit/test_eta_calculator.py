@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-import pytest
+
 from herald.db.models import JobState, PodcastJob, RequestMode, SourceType
 from herald.services.eta_calculator import calculate_job_eta
 

@@ -39,7 +39,7 @@ test:
 	python -m pytest -v tests/
 
 test-postgres:
-	python -m pytest -v tests/unit/test_postgres_concurrency.py
+	HERALD_TEST_DATABASE_URL="$${HERALD_TEST_DATABASE_URL:-postgresql://herald:change-this-to-a-secure-db-password@localhost:5432/herald}" python -m pytest -v tests/integration/test_postgres_real.py tests/unit/test_postgres_concurrency.py
 
 readiness:
 	curl -f http://127.0.0.1:8000/readiness

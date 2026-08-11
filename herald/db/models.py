@@ -18,7 +18,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
-
 from herald.db.connection import Base
 
 

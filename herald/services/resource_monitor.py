@@ -133,7 +133,7 @@ class TTSResourceMonitor:
 
                 cur_active, cur_total = _read_cpu_times()
                 cpu_pct = 0.0
-                if cur_total > last_total_jiffies and last_total_jiffies > 0:
+                if cur_total > last_total_jiffies > 0:
                     d_active = cur_active - last_active_jiffies
                     d_total = cur_total - last_total_jiffies
                     cpu_pct = round(max(0.0, min(100.0, (d_active / d_total) * 100.0)), 2)

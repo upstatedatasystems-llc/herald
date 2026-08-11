@@ -1,5 +1,5 @@
 import time
-import pytest
+
 from herald.services.resource_monitor import TTSResourceMonitor
 
 

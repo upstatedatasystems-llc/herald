@@ -3,9 +3,9 @@
 [![CI Workflow](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml/badge.svg)](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Herald is a cloud-hosted email-to-podcast automation system designed to run continuously on a resource-conscious ARM64 cloud server (such as Oracle Cloud Infrastructure Ampere A1 with 1 OCPU and 6 GB RAM).
+Herald is a cloud-hosted email-to-podcast automation system designed to run continuously on ARM64 cloud infrastructure (such as Oracle Cloud Infrastructure Ampere A1 or multi-core cloud instances).
 
-When an authorized user sends or forwards an email or article link to a dedicated inbox, Herald automatically normalizes the text, generates a schema-constrained podcast narration script using Gemini AI (`gemini-3.5-flash`), sends an immediate submission acknowledgment reply with an estimated completion time, synthesizes single-host speech locally using Kokoro TTS (`ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`), normalizes audio using FFmpeg, uploads 3 canonical artifacts (`.mp3`, `_source.txt`, `_diagnostics.json`) to Google Drive, and emails the user back with a formatted private Drive link.
+When an authorized user sends or forwards an email or article link to a dedicated inbox, Herald automatically normalizes the text, generates a schema-constrained podcast narration script using Gemini AI (`gemini-3.5-flash`), sends an immediate submission acknowledgment reply with an estimated completion time, synthesizes speech locally using Kokoro TTS (`ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`), normalizes audio using FFmpeg, uploads 2 canonical artifacts (`.mp3` and `_details.md`) to Google Drive, and emails the user back with a formatted private Drive link.
 
 ---
 
@@ -13,14 +13,36 @@ When an authorized user sends or forwards an email or article link to a dedicate
 
 - **Email Intake & Parser**: Accepts plain text, HTML emails, forwarded newsletters, or a single article URL.
 - **Submission Acknowledgment Email**: Replies immediately upon intake and script generation with episode title, requested format, estimated duration, and ETA range.
-- **3 Canonical Drive Artifacts**: Uploads `<basename>.mp3`, `<basename>_source.txt`, and `<basename>_diagnostics.json` independently and idempotently to the configured Google Drive folder.
+- **2 Canonical Drive Artifacts**: Uploads `<basename>.mp3` and `<basename>_details.md` independently and idempotently to the configured Google Drive folder.
 - **Link-Only Delivery**: Permanently link-only audio delivery with rich HTML + plain-text fallback formatting.
+- **Multicore Concurrency Engine**: Supports automatic CPU detection (`HERALD_CONCURRENCY_PROFILE=auto`) to scale parallel chunk synthesis across available CPU cores, or single-core compatibility mode (`HERALD_CONCURRENCY_PROFILE=single`).
 - **SSRF Protection**: Resolves DNS before connection and strictly blocks loopback, private, link-local, and cloud metadata IPs.
-- **Durable Job Queue**: Uses PostgreSQL with strict state machine transitions (`RECEIVED` -> `VALIDATING` -> `EXTRACTING` -> `SOURCE_READY` -> `SCRIPTING` -> `SCRIPT_READY` -> `QUEUED` -> `SYNTHESIZING` -> `ENCODING` -> `AUDIO_READY` -> `UPLOADING` -> `DELIVERING` -> `COMPLETE`).
-- **Resumable Worker**: Worker claims jobs exclusively (`FOR UPDATE SKIP LOCKED`), chunks scripts on sentence boundaries, tracks chunk progress, and resumes from crash state without re-generating completed audio.
+- **Durable Job Queue**: Uses PostgreSQL with strict state machine transitions (`RECEIVED` -> `VALIDATING` -> `EXTRACTING` -> `SOURCE_READY` -> `SCRIPTING` -> `SCRIPT_READY` -> `QUEUED_TTS` -> `SYNTHESIZING` -> `ENCODING` -> `AUDIO_READY` -> `UPLOADING` -> `DELIVERING` -> `COMPLETE`).
+- **Resumable Worker & Renewable Leases**: Worker claims jobs atomically (`FOR UPDATE SKIP LOCKED`), runs lightweight background lease heartbeats, chunks scripts on sentence boundaries, tracks chunk progress, and resumes synthesis on retry without duplicating completed audio.
 - **Local ARM64 CPU TTS**: Speech synthesis powered by Kokoro-82M via ONNX Runtime without requiring GPU hardware, with bounded readiness grace period during CPU inference saturation.
-- **Broadcast Audio Assembly**: Concatenates WAV chunks, applies integrated spoken-word loudness normalization (`loudnorm`), encodes 64k mono MP3, and embeds ID3 metadata.
+- **Broadcast Audio Assembly**: Concatenates WAV chunks with global FFmpeg concurrency semaphores, applies integrated spoken-word loudness normalization (`loudnorm`), encodes 64k mono MP3, and embeds ID3 metadata.
 - **Google Drive & Gmail Integration**: Managed via version-controlled n8n 1.123.69 workflows.
+
+---
+
+## Concurrency Configuration & Profiles
+
+Herald features a container-aware concurrency profile system controlled via `HERALD_CONCURRENCY_PROFILE` in `.env`:
+
+| Profile | Description |
+| :--- | :--- |
+| `auto` (Default) | Automatically detects host/cgroup CPU capacity and configures optimal parallel worker threads, Gemini script semaphores, Kokoro global/per-job slots, and FFmpeg semaphores. |
+| `single` | Compatibility / resource-constrained mode. Strictly limits worker threads, script generation, TTS synthesis, and FFmpeg encoding to 1 slot (equivalent to classic serialized Herald). |
+| `balanced` | Preserves a conservative, balanced allocation for shared host environments. |
+
+### Fine-Grained Overrides
+Individual concurrency boundaries can be overridden in `.env`:
+- `HERALD_WORKER_CONCURRENCY`: Parallel episode worker threads inside the worker container.
+- `HERALD_SCRIPT_CONCURRENCY`: Simultaneous Gemini script generation calls.
+- `HERALD_TTS_GLOBAL_SLOTS`: Maximum simultaneous Kokoro synthesis calls process-wide across all jobs.
+- `HERALD_TTS_PER_JOB`: Parallel synthesis workers allocated per episode.
+- `HERALD_FFMPEG_CONCURRENCY`: Simultaneous FFmpeg assembly operations.
+- `HERALD_N8N_CONCURRENCY`: n8n production concurrency limit.
 
 ---
 
@@ -33,9 +55,9 @@ When an authorized user sends or forwards an email or article link to a dedicate
 4. Gemini API returns structured JSON podcast script
 5. Herald sends submission acknowledgment reply with completion ETA range
 6. Job queued in PostgreSQL
-7. Herald Worker claims job & generates audio via Kokoro TTS
+7. Herald Worker claims job & generates audio via Kokoro TTS (parallel chunks)
 8. FFmpeg normalizes loudness & encodes mono MP3
-9. n8n uploads MP3, source text, and diagnostics JSON to Google Drive
+9. n8n uploads MP3 and details Markdown to Google Drive
 10. n8n emails sender completion reply with private Drive link & episode stats
 ```
 
@@ -43,8 +65,8 @@ When an authorized user sends or forwards an email or article link to a dedicate
 
 ## System Requirements
 
-- **Server**: Ubuntu 24.04 LTS ARM64 (e.g., OCI `VM.Standard.A1.Flex`)
-- **Capacity**: 1 OCPU, 6 GB RAM, 20+ GB storage
+- **Server**: Ubuntu 24.04 LTS ARM64 or x86_64
+- **Capacity**: 1+ CPU cores, 4+ GB RAM, 20+ GB storage
 - **Runtime**: Docker Engine & Docker Compose
 - **External APIs**: Gemini API Key, Google OAuth2 (Gmail & Google Drive)
 
@@ -69,39 +91,31 @@ make up
 make migrate
 
 # 5. Run Kokoro TTS & audio pipeline smoke test
-make smoke-test
+make smoke
 ```
 
 ---
 
-## Developer Commands
+## Operational Commands
 
-Herald includes a standard `Makefile` for developer operations:
+Herald includes a standard `Makefile` for developer and production operations:
 
 | Command | Description |
 | :--- | :--- |
-| `make setup` | Install Python development dependencies |
 | `make build` | Build Docker Compose images |
 | `make up` | Start all Herald containers in background |
 | `make down` | Stop all Herald containers |
+| `make restart` | Restart services |
 | `make logs` | Tail service container logs |
+| `make ps` | Display container process status |
 | `make migrate` | Run Alembic database migrations |
-| `make test` | Run pytest suite (unit & integration tests) |
-| `make lint` | Run code linters (`ruff`) |
-| `make format` | Format code (`ruff format`) |
-| `make smoke-test` | Run Kokoro TTS and FFmpeg pipeline smoke test |
+| `make test` | Run full pytest suite (unit & integration tests) |
+| `make test-postgres` | Run real PostgreSQL concurrency integration tests |
+| `make readiness` | Check API readiness endpoint |
+| `make smoke` | Run Kokoro TTS and FFmpeg pipeline smoke test |
 | `make status` | Display queue depth and system status |
 | `make backup` | Create database backup in `/opt/herald/backups` |
-
----
-
-## System Status & Monitoring
-
-Check queue status, database metrics, disk space, and service health at any time:
-
-```bash
-make status
-```
+| `make restore-test` | Execute disposable backup restore test |
 
 ---
 
@@ -112,14 +126,6 @@ make status
 - **Prompt Injection Boundary**: Source text is strictly sandboxed inside `<SOURCE_DATA>` tags within Gemini system prompts.
 
 For complete security documentation, see [docs/security.md](docs/security.md).
-
----
-
-## MVP Limitations
-
-- **Serial Processing**: Processes 1 audio job at a time to keep n8n and PostgreSQL responsive on 1 OCPU.
-- **Voice Selection**: Default voice `af_heart` (configurable via environment setting).
-- **Single-Host Script**: Single narration speaker.
 
 ---
 

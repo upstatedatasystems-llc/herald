@@ -1,4 +1,3 @@
-import pytest
 from herald.extraction.source_cleaner import clean_source_text, sanitize_unicode
 
 
