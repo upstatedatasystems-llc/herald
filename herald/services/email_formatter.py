@@ -1,5 +1,6 @@
 import html
-from datetime import datetime
+from datetime import datetime, timezone
+import zoneinfo
 
 
 def get_canonical_drive_url(file_id: str | None, web_link: str | None) -> str | None:
@@ -14,30 +15,64 @@ def get_canonical_drive_url(file_id: str | None, web_link: str | None) -> str | 
     return None
 
 
-def _format_iso_datetime(iso_str: str | None) -> str:
+def _format_local_datetime(iso_str: str | None, tz_name: str = "America/New_York") -> str:
+    """
+    Format ISO timestamp into user-facing local timezone string (e.g. Aug 11, 2026, 10:20 AM EDT).
+    """
     if not iso_str:
         return "N/A"
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        return dt.strftime("%b %d, %Y %H:%M UTC")
+        try:
+            local_tz = zoneinfo.ZoneInfo(tz_name)
+            dt_local = dt.astimezone(local_tz)
+            return dt_local.strftime("%b %d, %Y, %I:%M %p %Z")
+        except Exception:
+            return dt.strftime("%b %d, %Y %H:%M UTC")
     except Exception:
-        return iso_str
+        return str(iso_str)
 
 
 def format_acknowledgment_email(
     job_id: str,
     request_mode: str,
+    source_type: str = "email_body",
+    verify_enabled: bool = False,
+    created_at_iso: str | None = None,
+    research_depth: str | None = None,
 ) -> dict[str, str]:
     """
     Generate HTML lightweight receipt acknowledgment reply email with plain-text fallback.
+    Includes Mode, Source Type, Verification status, Job Started timestamp, Job ID, and Research Depth (if Research mode).
+    Does not require script or episode title data.
     """
     safe_mode = html.escape((request_mode or "standard").title())
+    safe_src_type = html.escape((source_type or "email_body").replace("_", " ").title())
+    safe_verify = "Enabled" if verify_enabled else "Disabled"
+    safe_started = html.escape(_format_local_datetime(created_at_iso))
     safe_job_id = html.escape(job_id)
+
+    research_depth_row_html = ""
+    research_depth_text = ""
+    if (request_mode or "").lower() == "research":
+        depth_val = (research_depth or "standard").title()
+        safe_depth = html.escape(depth_val)
+        research_depth_text = f"Research Depth: {depth_val}\n"
+        research_depth_row_html = (
+            f'<tr>\n'
+            f'  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Research Depth</td>\n'
+            f'  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_depth}</td>\n'
+            f'</tr>\n'
+        )
 
     text_body = (
         f"HERALD — REQUEST RECEIVED\n\n"
         f"Your podcast request has been received and processing has begun.\n\n"
         f"Requested Format: {(request_mode or 'standard').title()}\n"
+        f"Source Type: {(source_type or 'email_body').replace('_', ' ').title()}\n"
+        f"Verification: {safe_verify}\n"
+        f"Job Started: {_format_local_datetime(created_at_iso)}\n"
+        f"{research_depth_text}"
         f"Job ID: {job_id}\n\n"
         f"You will receive another email with your private Google Drive link when the episode is complete."
     )
@@ -72,6 +107,19 @@ def format_acknowledgment_email(
                   <td style="padding: 10px 0; font-size: 14px; color: #64748b; width: 160px; border-bottom: 1px solid #f1f5f9;">Requested Format</td>
                   <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_mode}</td>
                 </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Source Type</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_src_type}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Verification</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_verify}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Job Started</td>
+                  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_started}</td>
+                </tr>
+                {research_depth_row_html}
                 <tr>
                   <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Job ID</td>
                   <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;"><code style="font-family: monospace; color: #64748b;">{safe_job_id}</code></td>
@@ -127,6 +175,8 @@ def format_completion_email(
     research_notes_drive_id: str | None = None,
     details_drive_link: str | None = None,
     details_drive_id: str | None = None,
+    verify_enabled: bool = False,
+    verification_result: str | None = None,
 ) -> dict[str, str]:
     """
     Generate HTML completion reply email with polished product card design and plain-text fallback.
@@ -153,21 +203,41 @@ def format_completion_email(
     dur_str = f"{dur_mins}m {dur_secs:02d}s" if dur_mins > 0 else f"{dur_secs}s"
     size_mb = f"{(file_bytes / (1024 * 1024)):.2f} MB"
 
-    created_fmt = _format_iso_datetime(created_at_iso)
-    completed_fmt = _format_iso_datetime(completed_at_iso)
+    created_fmt = _format_local_datetime(created_at_iso)
 
+    # Verification status formatting
+    verify_status_text = ""
+    verify_row_html = ""
+    if verify_enabled:
+        ver_text = verification_result or "Passed (No material issues detected)"
+        safe_ver = html.escape(ver_text)
+        verify_status_text = f"Verification: {ver_text}\n"
+        verify_row_html = (
+            f'<tr>'
+            f'<td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Verification</td>'
+            f'<td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{safe_ver}</td>'
+            f'</tr>'
+        )
+
+    # Completed timestamp formatting (omit if N/A or missing)
+    completed_fmt = ""
+    completed_html = ""
     proc_time_str = ""
-    if created_at_iso and completed_at_iso:
-        try:
-            t0 = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00"))
-            t1 = datetime.fromisoformat(completed_at_iso.replace("Z", "+00:00"))
-            elapsed = int((t1 - t0).total_seconds())
-            if elapsed > 0:
-                e_min = elapsed // 60
-                e_sec = elapsed % 60
-                proc_time_str = f" ({e_min}m {e_sec:02d}s processing time)"
-        except Exception:
-            pass
+    if completed_at_iso and completed_at_iso != "N/A":
+        completed_fmt_str = _format_local_datetime(completed_at_iso)
+        completed_fmt = f"Completed: {completed_fmt_str}\n"
+        if created_at_iso:
+            try:
+                t0 = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(completed_at_iso.replace("Z", "+00:00"))
+                elapsed = int((t1 - t0).total_seconds())
+                if elapsed > 0:
+                    e_min = elapsed // 60
+                    e_sec = elapsed % 60
+                    proc_time_str = f" ({e_min}m {e_sec:02d}s processing time)"
+            except Exception:
+                pass
+        completed_html = f'<tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Completed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{html.escape(completed_fmt_str)}{proc_time_str}</td></tr>'
 
     # Details Companion Link HTML
     if details_url:
@@ -177,7 +247,7 @@ def format_completion_email(
         details_link_html = ""
         details_text_val = None
 
-    # Source link HTML (fallback for legacy)
+    # Source link HTML
     if source_url:
         source_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Original Source</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(source_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View source</a></td></tr>'
         source_text_val = source_url
@@ -185,7 +255,7 @@ def format_completion_email(
         source_link_html = ""
         source_text_val = None
 
-    # Diagnostics link HTML (fallback for legacy)
+    # Diagnostics link HTML
     if diag_url:
         diag_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Diagnostics</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(diag_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View stats</a></td></tr>'
         diag_text_val = diag_url
@@ -193,14 +263,13 @@ def format_completion_email(
         diag_link_html = ""
         diag_text_val = None
 
-    # Research Notes link HTML (fallback for legacy)
+    # Research Notes link HTML
     if notes_url:
         notes_link_html = f'<tr><td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Research Notes</td><td style="padding: 6px 0; font-size: 14px; border-bottom: 1px solid #f8fafc;"><a href="{html.escape(notes_url)}" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: none;">View Research Notes</a></td></tr>'
         notes_text_val = notes_url
     else:
         notes_link_html = ""
         notes_text_val = None
-
 
     warnings_html = ""
     if script_warnings:
@@ -225,8 +294,8 @@ def format_completion_email(
         f"EPISODE DETAILS:\n"
         f"Duration: {dur_str}\n"
         f"Requested Mode: {request_mode.title()}\n"
-        f"Source Type: {source_type}\n"
-        f"Script Estimate: {script_estimated_minutes} min\n"
+        f"Source: {source_type}\n"
+        f"{verify_status_text}"
         f"Segments: {segments_count}\n\n"
         f"FILES:\n"
         f"{text_files_str}\n"
@@ -237,8 +306,8 @@ def format_completion_email(
         f"- Retry Attempts: {retry_attempts}\n"
         f"- Gemini Model: {gemini_model}\n"
         f"- Voice / Speed: {kokoro_voice} @ {kokoro_speed}x\n"
-        f"- Created: {created_fmt}\n"
-        f"- Completed: {completed_fmt}{proc_time_str}\n"
+        f"- Started: {created_fmt}\n"
+        f"{completed_fmt}"
     )
 
     html_body = f"""<!DOCTYPE html>
@@ -291,10 +360,7 @@ def format_completion_email(
                   <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Source</td>
                   <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{safe_src_type}</td>
                 </tr>
-                <tr>
-                  <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Script Estimate</td>
-                  <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{script_estimated_minutes} min</td>
-                </tr>
+                {verify_row_html}
                 <tr>
                   <td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Segments</td>
                   <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{segments_count}</td>
@@ -314,7 +380,6 @@ def format_completion_email(
                 {diag_link_html}
               </table>
 
-
               <!-- Stats for Nerds Section -->
               <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; font-size: 13px;">
                 <div style="font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">Stats for Nerds</div>
@@ -325,8 +390,8 @@ def format_completion_email(
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Retry Attempts</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{retry_attempts}</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Gemini Model</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_model}</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Voice / Speed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_voice} @ {kokoro_speed}x</td></tr>
-                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Created</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{created_fmt}</td></tr>
-                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Completed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{completed_fmt}{proc_time_str}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Started</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{created_fmt}</td></tr>
+                  {completed_html}
                   {warnings_html}
                 </table>
               </div>
@@ -348,3 +413,72 @@ def format_completion_email(
     return {"text": text_body, "html": html_body}
 
 
+def format_failure_email(
+    job_id: str,
+    source_url: str | None,
+    error_code: str = "SOURCE_ACCESS_BLOCKED",
+    error_message: str | None = None,
+) -> dict[str, str]:
+    """
+    Generate actionable requester failure email for expected user-correctable source failures
+    (e.g., bot/paywall/interstitial blocked extraction).
+    """
+    safe_job_id = html.escape(job_id)
+    safe_url = html.escape(source_url or "Requested URL")
+    safe_code = html.escape(error_code)
+
+    text_body = (
+        f"HERALD — PROCESSING COULD NOT BE COMPLETED\n\n"
+        f"We were unable to retrieve the article from the requested URL:\n{source_url or 'N/A'}\n\n"
+        f"REASON:\n"
+        f"The publisher's website blocked automated retrieval (Paywall / Bot Detection / Interstitial).\n\n"
+        f"ACTION REQUIRED:\n"
+        f"Please copy and paste the full article text directly into your email body and resend your podcast request.\n\n"
+        f"DIAGNOSTIC DETAILS:\n"
+        f"- Error Code: {error_code}\n"
+        f"- Job ID: {job_id}\n"
+    )
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Action Required - Herald</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1e293b; background-color: #f8fafc; margin: 0; padding: 24px 12px;">
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+          <tr>
+            <td style="background-color: #991b1b; padding: 24px; text-align: left;">
+              <div style="font-size: 11px; font-weight: 700; color: #fca5a5; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">HERALD — ACTION REQUIRED</div>
+              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Article Retrieval Blocked by Publisher</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 24px;">
+              <p style="margin: 0 0 16px 0; font-size: 14px; color: #475569;">Herald could not automatically retrieve content from the requested URL because the publisher's site blocked automated access (Paywall / Bot Protection / Interstitial Challenge).</p>
+              
+              <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+                <div style="font-size: 13px; font-weight: 700; color: #991b1b; margin-bottom: 4px;">Target URL</div>
+                <div style="font-size: 13px; color: #7f1d1d; word-break: break-all; font-family: monospace;">{safe_url}</div>
+              </div>
+
+              <h3 style="margin: 0 0 8px 0; font-size: 15px; color: #0f172a;">How to Resolve</h3>
+              <p style="margin: 0 0 20px 0; font-size: 14px; color: #475569;">Copy and paste the article text directly into your email body and resend the request to Herald.</p>
+
+              <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; font-size: 12px; color: #64748b;">
+                <strong>Error Code:</strong> <code>{safe_code}</code> &bull; <strong>Job ID:</strong> <code>{safe_job_id}</code>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return {"text": text_body, "html": html_body}

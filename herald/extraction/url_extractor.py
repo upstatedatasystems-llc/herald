@@ -15,6 +15,26 @@ class ArticleExtractionError(Exception):
     """Raised when an article URL cannot be fetched or contains insufficient content."""
 
 
+class SourceAccessBlockedError(ArticleExtractionError):
+    """Raised when access to an article URL is blocked by paywall, bot protection, interstitial, or publisher restrictions."""
+
+
+BOT_PAYWALL_MARKERS = (
+    "cloudflare",
+    "just a moment...",
+    "attention required!",
+    "enable javascript",
+    "access denied",
+    "security check",
+    "captcha",
+    "bot detection",
+    "paywall",
+    "subscribe to read",
+    "pardon our interruption",
+    "blocker",
+)
+
+
 def unmap_ipv6(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     """Unmap IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1 -> 127.0.0.1)."""
     if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
@@ -111,10 +131,11 @@ def extract_article_from_url(
     max_bytes: int = 5_000_000,
     max_redirects: int = 3,
     transport: httpx.BaseTransport | None = None,
+    max_429_retries: int = 2,
 ) -> tuple[str, str, str]:
     """
     Safely extract article title, canonical text, and canonical URL from a public web page.
-    Enforces SSRF validation on initial and redirect URLs, total elapsed deadline, and byte limits.
+    Enforces SSRF validation, handles transient 429 retries, and detects bot/paywall blocks.
     """
     start_time = time.monotonic()
     current_url = url
@@ -128,6 +149,7 @@ def extract_article_from_url(
     validate_url_host(current_url)
 
     redirect_count = 0
+    retries_429 = 0
 
     while redirect_count <= max_redirects:
         elapsed = time.monotonic() - start_time
@@ -135,7 +157,7 @@ def extract_article_from_url(
         if remaining_timeout <= 0:
             raise ArticleExtractionError(f"Total extraction elapsed deadline ({timeout_seconds}s) exceeded.")
 
-        if current_url in seen_urls:
+        if current_url in seen_urls and retries_429 == 0:
             raise ArticleExtractionError("Redirect loop detected")
         seen_urls.add(current_url)
 
@@ -166,6 +188,16 @@ def extract_article_from_url(
                         current_url = next_url
                         continue
 
+                    if response.status_code == 429:
+                        if retries_429 < max_429_retries:
+                            retries_429 += 1
+                            time.sleep(1.0 * retries_429)
+                            continue
+                        raise SourceAccessBlockedError(f"Publisher returned HTTP 429 Too Many Requests after retries: {current_url}")
+
+                    if response.status_code in (401, 403):
+                        raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (HTTP {response.status_code}): {current_url}")
+
                     if response.status_code != 200:
                         raise ArticleExtractionError(f"Server returned non-200 status code: {response.status_code}")
 
@@ -195,6 +227,13 @@ def extract_article_from_url(
     title_tag = soup.find("title")
     title = title_tag.get_text().strip() if title_tag else "Extracted Article"
 
+    # Check for bot / paywall / interstitial markers
+    html_lower = html_text.lower()
+    title_lower = title.lower()
+    for marker in BOT_PAYWALL_MARKERS:
+        if marker in title_lower or (marker in html_lower and len(html_text) < 5000):
+            raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (bot/paywall/interstitial marker detected): {current_url}")
+
     for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]):
         tag.extract()
 
@@ -210,6 +249,10 @@ def extract_article_from_url(
     full_text = "\n\n".join(extracted_lines)
 
     if len(full_text.strip()) < 100:
+        # Check if the page had paywall/interstitial clues before raising general error
+        for marker in BOT_PAYWALL_MARKERS:
+            if marker in html_lower:
+                raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (short text with paywall marker): {current_url}")
         raise ArticleExtractionError("Insufficient article text extracted from page (less than 100 characters).")
 
     canonical_url = current_url

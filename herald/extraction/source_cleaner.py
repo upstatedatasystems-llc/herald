@@ -21,7 +21,6 @@ def sanitize_unicode(text: str) -> str:
     if not text:
         return ""
     normalized = unicodedata.normalize("NFC", text)
-    # Filter out control characters except tab, newline, and carriage return
     clean_chars = []
     for ch in normalized:
         cat = unicodedata.category(ch)
@@ -29,6 +28,58 @@ def sanitize_unicode(text: str) -> str:
             continue
         clean_chars.append(ch)
     return "".join(clean_chars)
+
+
+def deduplicate_source_blocks(text: str) -> tuple[str, dict]:
+    """
+    Detect and deduplicate contiguous repeated paragraph blocks (e.g., identical 1,500+ word article pasted twice back-to-back).
+    Preserves legitimate short headings and repeated phrases.
+    Returns (normalized_text, stats_dict).
+    """
+    if not text or not text.strip():
+        return text or "", {
+            "original_word_count": 0,
+            "normalized_word_count": 0,
+            "original_char_count": 0,
+            "normalized_char_count": 0,
+            "blocks_removed": 0,
+        }
+
+    orig_char_count = len(text)
+    orig_words = len(text.split())
+
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+
+    # If the block sequence has exact contiguous repetition (e.g. A B C D A B C D)
+    n = len(blocks)
+    if n >= 2 and n % 2 == 0:
+        half = n // 2
+        first_half = blocks[:half]
+        second_half = blocks[half:]
+        if first_half == second_half and sum(len(b) for b in first_half) > 50:
+            blocks = first_half
+
+    # Deduplicate contiguous identical large blocks (> 100 chars)
+    deduped_blocks = []
+    blocks_removed = 0
+    for b in blocks:
+        if deduped_blocks and b == deduped_blocks[-1] and len(b) > 100:
+            blocks_removed += 1
+            continue
+        deduped_blocks.append(b)
+
+    normalized_text = "\n\n".join(deduped_blocks)
+    norm_char_count = len(normalized_text)
+    norm_words = len(normalized_text.split())
+
+    stats = {
+        "original_word_count": orig_words,
+        "normalized_word_count": norm_words,
+        "original_char_count": orig_char_count,
+        "normalized_char_count": norm_char_count,
+        "blocks_removed": blocks_removed,
+    }
+    return normalized_text, stats
 
 
 def clean_source_text(text: str) -> str:
@@ -63,7 +114,6 @@ def clean_source_text(text: str) -> str:
         filtered_lines.append(line)
 
     result = "\n".join(filtered_lines)
-    # Collapse 3+ consecutive newlines to 2
     result = re.sub(r"\n{3,}", "\n\n", result).strip()
 
     return result

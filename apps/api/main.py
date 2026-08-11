@@ -29,9 +29,10 @@ from herald.extraction.email_parser import (
     compute_source_hash,
     process_email_message,
 )
-from herald.extraction.source_cleaner import clean_source_text
+from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
+    SourceAccessBlockedError,
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
@@ -45,9 +46,11 @@ from herald.gemini.client import (
     repair_research_script,
     repair_script_fidelity,
 )
+from herald.services.drive_service import build_user_facing_drive_filename, sanitize_filename_title
 from herald.services.email_formatter import (
     format_acknowledgment_email,
     format_completion_email,
+    format_failure_email,
 )
 from herald.services.eta_calculator import calculate_job_eta, calculate_script_duration
 from herald.services.performance_metrics import (
@@ -151,6 +154,9 @@ class IntakeResponse(BaseModel):
     message: str
     acknowledgment_email_text: str | None = None
     acknowledgment_email_html: str | None = None
+    failure_email_text: str | None = None
+    failure_email_html: str | None = None
+    error_category: str | None = None
 
 
 class ExtractUrlRequest(BaseModel):
@@ -554,15 +560,34 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
 
     transition_job_state(db, job, JobState.VALIDATING.value, component="herald-api")
 
+    # Perform Source Normalization & Deduplication for Email Body text if present
+    if job.source_text and source_type == SourceType.EMAIL_BODY.value:
+        t_norm0 = datetime.now(UTC)
+        deduped_text, norm_stats = deduplicate_source_blocks(job.source_text)
+        job.source_text = deduped_text
+        job.source_hash = compute_source_hash(deduped_text, None)
+        db.commit()
+        record_stage_metric(
+            job_id=job.id,
+            stage="SOURCE_NORMALIZATION",
+            started_at=t_norm0,
+            finished_at=datetime.now(UTC),
+            status="success",
+            input_chars=norm_stats["original_char_count"],
+            output_bytes=norm_stats["normalized_char_count"],
+            metadata_json=norm_stats,
+        )
+
     if source_type == SourceType.URL.value and source_url:
         transition_job_state(db, job, JobState.EXTRACTING.value, component="herald-api")
         t_url0 = datetime.now(UTC)
         try:
             title, extracted_text, canonical_url = extract_article_from_url(source_url)
             cleaned_extracted = clean_source_text(extracted_text)
-            job.source_text = f"Title: {title}\n\n{cleaned_extracted}"
+            deduped_extracted, norm_stats = deduplicate_source_blocks(cleaned_extracted)
+            job.source_text = f"Title: {title}\n\n{deduped_extracted}"
             job.source_url = canonical_url
-            job.source_hash = compute_source_hash(cleaned_extracted, canonical_url)
+            job.source_hash = compute_source_hash(deduped_extracted, canonical_url)
             db.commit()
             record_stage_metric(
                 job_id=job.id,
@@ -572,6 +597,40 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
                 status="success",
                 input_chars=len(source_url),
                 output_bytes=len(job.source_text.encode("utf-8")),
+            )
+            record_stage_metric(
+                job_id=job.id,
+                stage="SOURCE_NORMALIZATION",
+                started_at=t_url0,
+                finished_at=datetime.now(UTC),
+                status="success",
+                input_chars=norm_stats["original_char_count"],
+                output_bytes=norm_stats["normalized_char_count"],
+                metadata_json=norm_stats,
+            )
+        except SourceAccessBlockedError as sbe:
+            record_stage_metric(
+                job_id=job.id,
+                stage="URL_EXTRACTION",
+                started_at=t_url0,
+                finished_at=datetime.now(UTC),
+                status="failed",
+                metadata_json={"error": str(sbe), "category": "SOURCE_ACCESS_BLOCKED"},
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(sbe), error_category="SOURCE_ACCESS_BLOCKED"
+            )
+            fail_email = format_failure_email(job.id, source_url, "SOURCE_ACCESS_BLOCKED", str(sbe))
+            return IntakeResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=False,
+                message="Publisher blocked automated retrieval.",
+                failure_email_text=fail_email["text"],
+                failure_email_html=fail_email["html"],
+                error_category="SOURCE_ACCESS_BLOCKED",
             )
         except (SSRFVulnerabilityError, ArticleExtractionError) as e:
             record_stage_metric(
@@ -585,9 +644,17 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             transition_job_state(
                 db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(e), error_category="ARTICLE_EXTRACTION_FAILURE"
             )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"URL extraction failed: {e}",
+            fail_email = format_failure_email(job.id, source_url, "ARTICLE_EXTRACTION_FAILURE", str(e))
+            return IntakeResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=False,
+                message=f"URL extraction failed: {e}",
+                failure_email_text=fail_email["text"],
+                failure_email_html=fail_email["html"],
+                error_category="ARTICLE_EXTRACTION_FAILURE",
             )
 
     transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-api")
@@ -595,6 +662,10 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     ack = format_acknowledgment_email(
         job_id=job.id,
         request_mode=job.request_mode,
+        source_type=job.source_type,
+        verify_enabled=bool(job.verify_final_script),
+        created_at_iso=job.created_at.isoformat() if job.created_at else None,
+        research_depth=job.research_depth if job.request_mode == "research" else None,
     )
 
     return IntakeResponse(
@@ -1120,13 +1191,20 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
         script_warnings=warnings,
         research_notes_drive_link=job.research_notes_drive_web_link,
         research_notes_drive_id=job.research_notes_drive_file_id,
+        verify_enabled=bool(job.verify_final_script),
     )
+
+    ep_title = job.custom_title or script.get("episode_title") or "Herald Episode"
+    audio_fn = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "mp3")
+    details_fn = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "md")
 
     return {
         "job_id": job.id,
         "status": job.status,
         "text": formatted_email["text"],
         "html": formatted_email["html"],
+        "audio_drive_filename": audio_fn,
+        "details_drive_filename": details_fn,
     }
 
 

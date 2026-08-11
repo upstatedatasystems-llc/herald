@@ -89,6 +89,51 @@
     {
       "parameters": {
         "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "value2": "FAILED_FINAL"
+            }
+          ]
+        }
+      },
+      "name": "Check Source Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $json.gmail_message_id || $('Gmail Trigger - Herald Intake').item.json.id }}",
+        "emailType": "html",
+        "message": "={{ $json.failure_email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Send Source Failure Notification",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        900,
+        450
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Herald Gmail Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
           "boolean": [
             {
               "value1": "={{ $json.is_duplicate }}",
@@ -101,7 +146,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        750,
+        900,
         200
       ]
     },
@@ -120,7 +165,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        950,
+        1100,
         150
       ],
       "onError": "continueRegularOutput",
@@ -146,7 +191,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
       "position": [
-        1150,
+        1100,
         350
       ]
     },
@@ -191,6 +236,24 @@
     },
     "Call Herald API - Intake": {
       "main": [
+        [
+          {
+            "node": "Check Source Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Source Status": {
+      "main": [
+        [
+          {
+            "node": "Send Source Failure Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "Check If New Job",

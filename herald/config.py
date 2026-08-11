@@ -110,6 +110,8 @@ class Settings(BaseSettings):
                 return False
             if not self.EMAIL_ALLOWED_SENDERS.strip():
                 return False
+            if not self.GOOGLE_DRIVE_FOLDER_ID or not self.GOOGLE_DRIVE_FOLDER_ID.strip():
+                return False
         return True
 
     def get_concurrency_config(self):
