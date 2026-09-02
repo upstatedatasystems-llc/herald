@@ -1,7 +1,8 @@
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from herald.config import settings
@@ -15,25 +16,58 @@ logger = logging.getLogger("herald.telegram.delivery")
 
 def deliver_pending_telegram_jobs(db: Session, client: TelegramClient) -> int:
     """
-    Find AUDIO_READY jobs originating from Telegram and deliver completed MP3 directly back to chat.
+    Find AUDIO_READY or retryable FAILED_RETRYABLE jobs originating from Telegram and deliver completed MP3.
+    Uses atomic row locking (FOR UPDATE SKIP LOCKED) to prevent concurrent send duplication.
     Returns number of jobs processed.
     """
     if not client.is_configured:
         return 0
 
+    now = datetime.now(UTC)
+    stale_cutoff = now - timedelta(minutes=15)
+
+    eligible_filter = and_(
+        PodcastJob.transport == "telegram",
+        PodcastJob.telegram_chat_id.isnot(None),
+        or_(
+            PodcastJob.status == JobState.AUDIO_READY.value,
+            and_(
+                PodcastJob.status == JobState.FAILED_RETRYABLE.value,
+                PodcastJob.failed_stage == "TELEGRAM_DELIVERY",
+                or_(
+                    PodcastJob.next_retry_at.is_(None),
+                    PodcastJob.next_retry_at <= now,
+                ),
+            ),
+            and_(
+                PodcastJob.status == JobState.DELIVERING.value,
+                PodcastJob.last_heartbeat_at <= stale_cutoff,
+            ),
+        ),
+    )
+
+    # Claim jobs atomically with row lock
     jobs = (
         db.query(PodcastJob)
-        .filter(
-            PodcastJob.status == JobState.AUDIO_READY.value,
-            PodcastJob.transport == "telegram",
-            PodcastJob.telegram_chat_id.isnot(None),
-        )
+        .filter(eligible_filter)
         .order_by(PodcastJob.created_at.asc())
+        .with_for_update(skip_locked=True)
+        .limit(10)
         .all()
     )
 
+    if not jobs:
+        return 0
+
     delivered_count = 0
     for job in jobs:
+        # Move immediately to DELIVERING with fresh heartbeat
+        if job.status != JobState.DELIVERING.value:
+            transition_job_state(db, job, JobState.DELIVERING.value, component="telegram-delivery")
+        job.last_heartbeat_at = now
+        job.claimed_at = now
+        db.commit()
+
         try:
             delivered = deliver_single_job(db, job, client)
             if delivered:
@@ -45,7 +79,7 @@ def deliver_pending_telegram_jobs(db: Session, client: TelegramClient) -> int:
 
 
 def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> bool:
-    """Deliver a single AUDIO_READY job to its Telegram chat."""
+    """Deliver a claimed job to its Telegram chat with retry support and size safety."""
     t0 = datetime.now(UTC)
     chat_id = job.telegram_chat_id
     if not chat_id:
@@ -82,28 +116,29 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     source_line = f"\nSource: {job.source_url}" if job.source_url else ""
     caption = f"🎙 {ep_title}\n⏱ {dur_str} | Mode: {mode_str}{source_line}"
 
+    # Handle oversized audio
     if file_size_bytes > max_bytes:
         size_mb = file_size_bytes / (1024 * 1024)
+        max_mb = max_bytes / (1024 * 1024)
         warn_msg = (
             f"⚠️ <b>Podcast Rendered</b>: {ep_title}\n\n"
-            f"The audio file ({size_mb:.1f} MB) exceeds Telegram's 50MB bot upload limit.\n\n"
-            f"The completed MP3 is preserved on the server at:\n<code>{audio_path}</code>"
+            f"Your episode was generated successfully ({size_mb:.1f} MB), but exceeds this Herald "
+            f"instance's Telegram delivery limit ({max_mb:.0f} MB).\n\n"
+            f"The file has been retained locally for administrator recovery.\nJob ID: <code>{job.id[:8]}</code>"
         )
         client.send_message(chat_id=chat_id, text=warn_msg, parse_mode="HTML")
-        job.delivered_at = datetime.now(UTC)
+        job.error_code = "TELEGRAM_AUDIO_OVERSIZED"
+        job.error_detail = f"Audio size {size_mb:.1f} MB exceeds limit {max_mb:.0f} MB"
         transition_job_state(
             db,
             job,
-            JobState.COMPLETE.value,
+            JobState.FAILED_FINAL.value,
             component="telegram-delivery",
-            message="Audio preserved locally (file exceeded Telegram 50MB limit)",
+            message=f"Audio file ({size_mb:.1f} MB) exceeded Telegram limit ({max_mb:.0f} MB)",
         )
-        return True
+        return False
 
-    # Transition to DELIVERING
-    transition_job_state(db, job, JobState.DELIVERING.value, component="telegram-delivery")
-
-    reply_id = int(job.telegram_message_id) if (job.telegram_message_id and job.telegram_message_id.isdigit()) else None
+    reply_id = int(job.telegram_message_id) if job.telegram_message_id else None
 
     # Upload MP3 to Telegram
     try:
@@ -127,24 +162,37 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                 reply_to_message_id=reply_id,
             )
         except Exception as de:
+            now = datetime.now(UTC)
             job.delivery_attempt_count = (job.delivery_attempt_count or 0) + 1
+            job.failed_stage = "TELEGRAM_DELIVERY"
+            job.error_code = "TELEGRAM_DELIVERY_FAILED"
+            job.error_detail = str(de)[:500]
+
             if job.delivery_attempt_count >= 3:
                 transition_job_state(
                     db,
                     job,
                     JobState.FAILED_FINAL.value,
                     component="telegram-delivery",
-                    message=f"Telegram delivery failed: {de}",
+                    message=f"Telegram delivery failed after {job.delivery_attempt_count} attempts: {de}",
+                )
+                client.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Podcast delivery failed permanently after multiple attempts.\nJob ID: {job.id[:8]}",
                 )
             else:
+                backoff_secs = 15 * (2 ** (job.delivery_attempt_count - 1))
+                job.next_retry_at = now + timedelta(seconds=backoff_secs)
                 transition_job_state(
                     db,
                     job,
                     JobState.FAILED_RETRYABLE.value,
                     component="telegram-delivery",
-                    message=f"Telegram delivery failed (retryable): {de}",
+                    message=f"Telegram delivery failed (attempt {job.delivery_attempt_count}, retrying in {backoff_secs}s): {de}",
                 )
-            raise
+                job.failed_stage = "TELEGRAM_DELIVERY"
+            db.commit()
+            return False
 
     job.delivered_at = datetime.now(UTC)
     transition_job_state(

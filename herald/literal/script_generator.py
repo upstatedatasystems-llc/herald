@@ -73,12 +73,6 @@ def extract_title_and_body(source_text: str, custom_title: str | None = None) ->
         body = "\n".join(lines[1:]).strip()
         return title or "Herald Episode", body
 
-    # If first line is short (< 80 chars) and doesn't end with a period, use as title
-    if len(first_line) <= 80 and not first_line.endswith((".", "!", "?")):
-        title = first_line
-        body = "\n".join(lines[1:]).strip()
-        return title, body
-
     return "Herald Episode", source_text
 
 

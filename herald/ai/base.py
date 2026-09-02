@@ -1,26 +1,27 @@
 from abc import ABC, abstractmethod
 from typing import Any
+
 from herald.gemini.schema import PodcastScriptResponse
 
 
 class AIProvider(ABC):
-    """Abstract base class for external AI script generation and health monitoring."""
+    """Abstract base class for AI script generation and health monitoring."""
 
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """Name of the AI provider, e.g. 'Gemini'."""
+        """Human-readable provider name (e.g. 'Gemini', 'None (Literal)')."""
         pass
 
     @property
     @abstractmethod
     def configured_model(self) -> str:
-        """Configured primary model identifier."""
+        """The configured model identifier."""
         pass
 
     @abstractmethod
     def is_configured(self) -> bool:
-        """Returns True if the provider has all required credentials configured."""
+        """Return True if credentials and configuration are present."""
         pass
 
     @abstractmethod
@@ -31,21 +32,13 @@ class AIProvider(ABC):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
     ) -> PodcastScriptResponse:
-        """Generate podcast script JSON matching schema."""
+        """Generate structured podcast script from source text."""
         pass
 
     @abstractmethod
-    def check_connection(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         """
-        Perform a non-generative or lightweight connection check.
-        Returns a sanitized dictionary:
-        {
-            "provider": str,
-            "configured": bool,
-            "connected": bool,
-            "model": str,
-            "error": str | None
-        }
-        Secrets must NEVER be included in output or error strings.
+        Check connectivity with the AI provider.
+        Returns a dict: {"provider": str, "configured": bool, "connected": bool, "model": str, "error": str | None}
         """
         pass

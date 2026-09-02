@@ -9,14 +9,14 @@ class HeraldRequest(BaseModel):
     request_mode: str = "literal"
     research_depth: str | None = None
     requester_identity: str = ""
-    delivery_target: str = ""
+    delivery_target: str | int = ""
     custom_voice: str | None = None
     custom_speed: float | None = None
     custom_title: str | None = None
     tts_chunk_chars: int | None = 500
     verify_final_script: bool = False
     transport: str = "telegram"  # "telegram", "email", "api"
-    transport_message_id: str | None = None
+    transport_message_id: str | int | None = None
     transport_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

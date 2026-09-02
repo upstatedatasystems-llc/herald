@@ -124,16 +124,22 @@ class Settings(BaseSettings):
             return ["af_heart"]
         return [v.strip().lower() for v in self.ALLOWED_VOICES.split(",") if v.strip()]
 
+    # Explicit Feature / Transport flags
+    ENABLE_TELEGRAM_TRANSPORT: bool = True
+    ENABLE_EMAIL_TRANSPORT: bool = False
+
     def is_production_valid(self) -> bool:
         if self.HERALD_ENV.lower() == "production":
-            if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
-                return False
-            # When running telegram-only, email and drive are not required
-            if not self.TELEGRAM_BOT_TOKEN:
+            is_email_active = bool(self.ENABLE_EMAIL_TRANSPORT or self.EMAIL_ALLOWED_SENDERS.strip() or self.GOOGLE_DRIVE_FOLDER_ID.strip())
+            if is_email_active:
+                if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
+                    return False
                 if not self.EMAIL_ALLOWED_SENDERS.strip():
                     return False
                 if not self.GOOGLE_DRIVE_FOLDER_ID or not self.GOOGLE_DRIVE_FOLDER_ID.strip():
                     return False
+            elif not self.TELEGRAM_BOT_TOKEN:
+                return False
         return True
 
     def get_concurrency_config(self):

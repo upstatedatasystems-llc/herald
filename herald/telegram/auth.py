@@ -43,10 +43,14 @@ def generate_pairing_code(db: Session, expires_in_minutes: int = 15) -> str:
     return code
 
 
-def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15) -> str:
+def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15) -> str | None:
     """
     Return an existing valid, unexpired, unused pairing code or generate a fresh one.
+    If an owner already exists, returns None.
     """
+    if has_owner(db):
+        return None
+
     now = datetime.now(UTC)
     active = (
         db.query(TelegramPairingCode)
@@ -66,17 +70,20 @@ def verify_and_claim_pairing_code(
     db: Session,
     code: str,
     user_id: int,
-    chat_id: str | int,
+    chat_id: int,
     username: str | None = None,
     first_name: str | None = None,
 ) -> tuple[bool, str]:
     """
-    Validate a user's submitted pairing code.
+    Validate a user's submitted pairing code in a private chat.
     If valid:
     - Mark code as used
     - Persist user as owner
-    - Invalidate other active pairing codes
+    - Invalidate all other pending pairing codes
     """
+    if has_owner(db):
+        return False, "An owner is already paired for this Herald instance."
+
     clean_code = (code or "").strip()
     if not clean_code:
         return False, "Pairing code cannot be empty."
@@ -100,7 +107,7 @@ def verify_and_claim_pairing_code(
     pairing_entry.used_by_user_id = user_id
     pairing_entry.used_at = now
 
-    # Invalidate all other pending codes
+    # Invalidate all pending codes
     db.query(TelegramPairingCode).filter(
         TelegramPairingCode.is_used == False
     ).update({"is_used": True})
@@ -112,7 +119,7 @@ def verify_and_claim_pairing_code(
         .first()
     )
     if existing_user:
-        existing_user.telegram_chat_id = str(chat_id)
+        existing_user.telegram_chat_id = chat_id
         existing_user.username = username
         existing_user.first_name = first_name
         existing_user.role = "owner"
@@ -121,7 +128,7 @@ def verify_and_claim_pairing_code(
     else:
         new_user = TelegramUser(
             telegram_user_id=user_id,
-            telegram_chat_id=str(chat_id),
+            telegram_chat_id=chat_id,
             username=username,
             first_name=first_name,
             role="owner",
@@ -136,9 +143,9 @@ def verify_and_claim_pairing_code(
     return True, "Pairing successful! You are now the authorized owner of this Herald instance."
 
 
-def is_user_authorized(db: Session, user_id: int | str) -> bool:
+def is_user_authorized(db: Session, user_id: int | str, chat_id: int | str | None = None) -> bool:
     """
-    Check if a Telegram user ID is authorized to use Herald.
+    Check if a Telegram user ID and chat ID are authorized to use Herald.
     Checks DB telegram_users table as well as optional TELEGRAM_ALLOWED_USER_IDS setting.
     """
     if not user_id:
@@ -148,6 +155,13 @@ def is_user_authorized(db: Session, user_id: int | str) -> bool:
         uid_int = int(user_id)
     except (ValueError, TypeError):
         return False
+
+    cid_int = None
+    if chat_id is not None:
+        try:
+            cid_int = int(chat_id)
+        except (ValueError, TypeError):
+            pass
 
     # Check database authorization
     db_user = (
@@ -159,6 +173,9 @@ def is_user_authorized(db: Session, user_id: int | str) -> bool:
         .first()
     )
     if db_user:
+        # If chat_id is provided, enforce paired private chat context
+        if cid_int is not None and db_user.telegram_chat_id != cid_int:
+            return False
         return True
 
     # Check static setting allowlist if present

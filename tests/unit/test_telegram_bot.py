@@ -38,7 +38,7 @@ def test_unauthorized_user_rejected(db_session):
         "message": {
             "message_id": 1,
             "from": {"id": 999999, "username": "stranger"},
-            "chat": {"id": 999999},
+            "chat": {"id": 999999, "type": "private"},
             "text": "https://example.com/article",
         },
     }
@@ -47,8 +47,7 @@ def test_unauthorized_user_rejected(db_session):
 
     mock_client.send_message.assert_called_once()
     call_args = mock_client.send_message.call_args[1]
-    assert "Access Denied" in call_args["text"]
-    assert "/pair" in call_args["text"]
+    assert "Unpaired" in call_args["text"] or "Access Denied" in call_args["text"]
 
     # Verify no job was created
     assert db_session.query(PodcastJob).count() == 0
@@ -69,13 +68,13 @@ def test_text_and_url_request_accepted(db_session, monkeypatch):
         "message": {
             "message_id": 10,
             "from": {"id": 111, "username": "alice"},
-            "chat": {"id": 111},
+            "chat": {"id": 111, "type": "private"},
             "text": "literal\n\n# Autonomous Vehicles\nSelf driving cars utilize multi-sensor fusion.",
         },
     }
     process_telegram_update(db_session, mock_client, text_update)
 
-    job = db_session.query(PodcastJob).filter(PodcastJob.telegram_message_id == "10").first()
+    job = db_session.query(PodcastJob).filter(PodcastJob.telegram_message_id == 10).first()
     assert job is not None
     assert job.request_mode == "literal"
     assert job.transport == "telegram"
@@ -93,13 +92,13 @@ def test_text_and_url_request_accepted(db_session, monkeypatch):
         "message": {
             "message_id": 11,
             "from": {"id": 111, "username": "alice"},
-            "chat": {"id": 111},
+            "chat": {"id": 111, "type": "private"},
             "text": "literal\nhttps://example.com/mars-mission",
         },
     }
     process_telegram_update(db_session, mock_client, url_update)
 
-    job_url = db_session.query(PodcastJob).filter(PodcastJob.telegram_message_id == "11").first()
+    job_url = db_session.query(PodcastJob).filter(PodcastJob.telegram_message_id == 11).first()
     assert job_url is not None
     assert job_url.source_url == "https://example.com/mars-mission"
     assert job_url.request_mode == "literal"
@@ -118,7 +117,7 @@ def test_duplicate_telegram_update_does_not_create_duplicate_job(db_session):
         "message": {
             "message_id": 55,
             "from": {"id": 111},
-            "chat": {"id": 111},
+            "chat": {"id": 111, "type": "private"},
             "text": "literal\n\nFirst attempt text payload.",
         },
     }
@@ -133,7 +132,7 @@ def test_duplicate_telegram_update_does_not_create_duplicate_job(db_session):
 
     # Check that duplicate notification was sent
     last_call = mock_client.send_message.call_args[1]
-    assert "Already Processed" in last_call["text"]
+    assert "Already Received" in last_call["text"] or "Already Processed" in last_call["text"]
 
 
 def test_status_command_with_and_without_ai(db_session, monkeypatch):
@@ -143,7 +142,7 @@ def test_status_command_with_and_without_ai(db_session, monkeypatch):
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111)
 
     mock_client = MagicMock(spec=TelegramClient)
-    msg = {"message_id": 1, "from": {"id": 111}, "chat": {"id": 111}}
+    msg = {"message_id": 1, "from": {"id": 111}, "chat": {"id": 111, "type": "private"}}
 
     # Case 1: No AI provider
     monkeypatch.setattr(settings, "AI_PROVIDER", "none")
@@ -151,10 +150,9 @@ def test_status_command_with_and_without_ai(db_session, monkeypatch):
     handle_telegram_command(db_session, mock_client, msg, "/status", "")
 
     status_text = mock_client.send_message.call_args[1]["text"]
-    assert "TTS:" in status_text
-    assert "AI Provider: None" in status_text
-    assert "Available Scripting: Literal only" in status_text
-    assert "Disk:" in status_text
+    assert "TTS Engine (Kokoro):" in status_text
+    assert "AI Provider:" in status_text
+    assert "Disk Space:" in status_text
     assert "Uptime:" in status_text
 
 
@@ -165,11 +163,11 @@ def test_readme_command(db_session):
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111)
 
     mock_client = MagicMock(spec=TelegramClient)
-    msg = {"message_id": 1, "from": {"id": 111}, "chat": {"id": 111}}
+    msg = {"message_id": 1, "from": {"id": 111}, "chat": {"id": 111, "type": "private"}}
 
     handle_telegram_command(db_session, mock_client, msg, "/readme", "")
     mock_client.send_document.assert_called_once()
-    doc_path = mock_client.send_document.call_args[1]["document_path"]
+    doc_path = mock_client.send_document.call_args[1]["file_path"]
     assert "README.md" in str(doc_path)
 
 

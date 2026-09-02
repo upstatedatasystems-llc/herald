@@ -15,8 +15,8 @@ def test_completed_mp3_delivered_to_telegram(db_session, tmp_path):
     job = PodcastJob(
         id="tg-job-001",
         transport="telegram",
-        telegram_chat_id="778899",
-        telegram_message_id="101",
+        telegram_chat_id=778899,
+        telegram_message_id=101,
         status=JobState.AUDIO_READY.value,
         request_mode="literal",
         source_hash="hash001",
@@ -36,7 +36,7 @@ def test_completed_mp3_delivered_to_telegram(db_session, tmp_path):
 
     mock_client.send_audio.assert_called_once()
     call_args = mock_client.send_audio.call_args[1]
-    assert call_args["chat_id"] == "778899"
+    assert call_args["chat_id"] == 778899
     assert call_args["title"] == "AI in Healthcare"
     assert call_args["duration"] == 125
     assert "2m 5s" in call_args["caption"]
@@ -54,8 +54,8 @@ def test_delivery_retry_reuses_existing_mp3(db_session, tmp_path):
     job = PodcastJob(
         id="tg-job-retry-002",
         transport="telegram",
-        telegram_chat_id="778899",
-        telegram_message_id="102",
+        telegram_chat_id=778899,
+        telegram_message_id=102,
         status=JobState.AUDIO_READY.value,
         request_mode="literal",
         source_hash="hash002",

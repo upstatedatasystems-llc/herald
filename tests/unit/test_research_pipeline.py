@@ -53,7 +53,7 @@ def test_canonical_source_id_registry_creation(monkeypatch):
             return self
         def __exit__(self, *args):
             pass
-        def post(self, url, json):
+        def post(self, url, json=None, **kwargs):
             return MockResponse()
 
     monkeypatch.setattr("httpx.Client", MockClient)
@@ -127,7 +127,7 @@ def test_dossier_normalization_rejects_invented_source_ids(monkeypatch):
             return self
         def __exit__(self, *args):
             pass
-        def post(self, url, json):
+        def post(self, url, json=None, **kwargs):
             return MockResponse()
 
     monkeypatch.setattr("httpx.Client", MockClient)

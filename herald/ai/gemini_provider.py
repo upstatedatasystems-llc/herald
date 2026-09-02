@@ -1,4 +1,6 @@
 import logging
+import time
+from datetime import datetime, UTC
 from typing import Any
 import httpx
 
@@ -15,7 +17,12 @@ logger = logging.getLogger("herald.ai.gemini")
 
 
 class GeminiProvider(AIProvider):
-    """Gemini AI Provider implementation."""
+    """Gemini AI Provider implementation with response caching and secure header auth."""
+
+    def __init__(self, cache_ttl_seconds: float = 300.0) -> None:
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cached_health: dict[str, Any] | None = None
+        self._cache_timestamp: float = 0.0
 
     @property
     def provider_name(self) -> str:
@@ -44,30 +51,38 @@ class GeminiProvider(AIProvider):
             source_title=source_title,
         )
 
-    def check_connection(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         """
-        Check Gemini API connectivity using a low-cost model info endpoint.
-        Guarantees secrets are never leaked in error messages.
+        Check Gemini API connectivity using a lightweight model info endpoint.
+        Uses x-goog-api-key header and caches results for 5 minutes unless force_refresh is True.
         """
+        now = time.time()
+        if not force_refresh and self._cached_health and (now - self._cache_timestamp) < self.cache_ttl_seconds:
+            return dict(self._cached_health)
+
         if not self.is_configured():
-            return {
+            res = {
                 "provider": self.provider_name,
                 "configured": False,
                 "connected": False,
                 "model": self.configured_model,
                 "error": "API key not configured",
             }
+            self._cached_health = res
+            self._cache_timestamp = now
+            return res
 
         key = settings.GEMINI_API_KEY.strip()
         model = self.configured_model.strip()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}?key={key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        headers = {"x-goog-api-key": key}
 
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
-                resp = client.get(url)
+                resp = client.get(url, headers=headers)
 
             if resp.status_code == 200:
-                return {
+                res = {
                     "provider": self.provider_name,
                     "configured": True,
                     "connected": True,
@@ -75,7 +90,7 @@ class GeminiProvider(AIProvider):
                     "error": None,
                 }
             elif resp.status_code in (401, 403):
-                return {
+                res = {
                     "provider": self.provider_name,
                     "configured": True,
                     "connected": False,
@@ -83,7 +98,7 @@ class GeminiProvider(AIProvider):
                     "error": "authentication failed",
                 }
             elif resp.status_code == 429:
-                return {
+                res = {
                     "provider": self.provider_name,
                     "configured": True,
                     "connected": False,
@@ -91,7 +106,7 @@ class GeminiProvider(AIProvider):
                     "error": "rate limit exceeded",
                 }
             else:
-                return {
+                res = {
                     "provider": self.provider_name,
                     "configured": True,
                     "connected": False,
@@ -99,7 +114,7 @@ class GeminiProvider(AIProvider):
                     "error": f"API returned status {resp.status_code}",
                 }
         except httpx.TimeoutException:
-            return {
+            res = {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
@@ -107,14 +122,17 @@ class GeminiProvider(AIProvider):
                 "error": "connection timed out",
             }
         except Exception as e:
-            # Sanitize exception message to ensure key is not present
             err_str = str(e)
             if key and key in err_str:
                 err_str = err_str.replace(key, "[REDACTED]")
-            return {
+            res = {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": model,
                 "error": f"network error: {err_str}",
             }
+
+        self._cached_health = res
+        self._cache_timestamp = now
+        return res

@@ -1,17 +1,16 @@
 import logging
 import sys
+
 from herald.ai.factory import get_ai_provider
 from herald.config import settings
 from herald.db.connection import SessionLocal
+from herald.logging import setup_secure_logging
 from herald.telegram.auth import get_or_create_active_pairing_code, has_owner
-from herald.telegram.bot import run_telegram_bot_loop
+from herald.telegram.bot import run_telegram_bot
 from herald.telegram.client import TelegramClient
 from herald.tts.kokoro_client import KokoroClient
 
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-)
+setup_secure_logging()
 logger = logging.getLogger("herald.telegram.daemon")
 
 
@@ -53,8 +52,7 @@ def print_startup_banner():
     print(f"TTS:        {'Ready (Kokoro)' if tts_ok else 'Unavailable / Offline'}")
     print(f"AI:         {ai_status}")
 
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         if not has_owner(db):
             code = get_or_create_active_pairing_code(db, expires_in_minutes=30)
             print("\n" + "-" * 60)
@@ -66,8 +64,6 @@ def print_startup_banner():
         else:
             print("\nOwner:      Paired")
             print("Status:     Ready to accept jobs\n")
-    finally:
-        db.close()
     print("=" * 60 + "\n")
 
 
@@ -77,7 +73,7 @@ def main():
         sys.exit(1)
 
     print_startup_banner()
-    run_telegram_bot_loop()
+    run_telegram_bot()
 
 
 if __name__ == "__main__":

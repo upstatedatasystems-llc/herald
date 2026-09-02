@@ -14,7 +14,9 @@ def test_gemini_health_check_success(monkeypatch):
     monkeypatch.setattr(settings, "AI_PROVIDER", "gemini")
 
     def mock_get(self, url, **kwargs):
-        assert "key=valid-secret-key-12345" in url
+        assert "key=" not in url
+        headers = kwargs.get("headers", {})
+        assert headers.get("x-goog-api-key") == "valid-secret-key-12345"
         return httpx.Response(200, json={"name": "models/gemini-3.5-flash", "displayName": "Gemini 3.5 Flash"})
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)

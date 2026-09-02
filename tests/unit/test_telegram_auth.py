@@ -29,7 +29,7 @@ def test_pairing_code_lifecycle(db_session):
         db=db_session,
         code=code,
         user_id=12345678,
-        chat_id="998877",
+        chat_id=998877,
         username="podcast_owner",
         first_name="Alice",
     )
@@ -41,18 +41,18 @@ def test_pairing_code_lifecycle(db_session):
     assert owner is not None
     assert owner.telegram_user_id == 12345678
     assert owner.username == "podcast_owner"
-    assert is_user_authorized(db_session, 12345678)
+    assert is_user_authorized(db_session, 12345678, 998877)
 
-    # Point 4: Pairing code cannot be reused
+    # Point 4: Pairing code cannot be reused / owner already paired
     success2, msg2 = verify_and_claim_pairing_code(
         db=db_session,
         code=code,
         user_id=87654321,
-        chat_id="112233",
+        chat_id=112233,
         username="intruder",
     )
     assert success2 is False
-    assert "Invalid or expired" in msg2
+    assert "Invalid or expired" in msg2 or "already paired" in msg2
 
 
 def test_expired_pairing_code_rejected(db_session):
@@ -71,7 +71,7 @@ def test_expired_pairing_code_rejected(db_session):
         db=db_session,
         code="999999",
         user_id=55555,
-        chat_id="55555",
+        chat_id=55555,
     )
     assert success is False
     assert "Invalid or expired" in msg

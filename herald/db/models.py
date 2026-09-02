@@ -63,9 +63,9 @@ class PodcastJob(Base):
     gmail_message_id = Column(String(255), nullable=True, unique=True, index=True)
     gmail_thread_id = Column(String(255), nullable=True)
     sender_email = Column(String(255), nullable=True, index=True)
-    telegram_chat_id = Column(String(100), nullable=True, index=True)
-    telegram_message_id = Column(String(100), nullable=True, index=True)
-    telegram_user_id = Column(String(100), nullable=True, index=True)
+    telegram_chat_id = Column(BigInteger, nullable=True, index=True)
+    telegram_message_id = Column(BigInteger, nullable=True, index=True)
+    telegram_user_id = Column(BigInteger, nullable=True, index=True)
 
     request_mode = Column(String(20), nullable=False, default=RequestMode.STANDARD.value)
     research_depth = Column(String(20), nullable=True)
@@ -240,7 +240,7 @@ class TelegramUser(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     telegram_user_id = Column(BigInteger, nullable=False, unique=True, index=True)
-    telegram_chat_id = Column(String(100), nullable=False, index=True)
+    telegram_chat_id = Column(BigInteger, nullable=False, index=True)
     username = Column(String(255), nullable=True)
     first_name = Column(String(255), nullable=True)
     role = Column(String(50), nullable=False, default="owner")
@@ -266,11 +266,41 @@ class TelegramPairingCode(Base):
     used_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class TelegramPollState(Base):
+    __tablename__ = "telegram_poll_state"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    last_processed_update_id = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class TelegramUpdateFailure(Base):
+    __tablename__ = "telegram_update_failures"
+
+    update_id = Column(BigInteger, primary_key=True)
+    attempt_count = Column(Integer, nullable=False, default=1)
+    last_error = Column(Text, nullable=True)
+    is_dead_lettered = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
 Index("idx_podcast_jobs_claim", PodcastJob.status, PodcastJob.claimed_at)
-Index("idx_podcast_jobs_telegram", PodcastJob.transport, PodcastJob.telegram_chat_id, PodcastJob.telegram_message_id)
+Index("uq_podcast_jobs_telegram", PodcastJob.transport, PodcastJob.telegram_chat_id, PodcastJob.telegram_message_id, unique=True)
 Index("idx_job_processing_metrics_job_stage", JobProcessingMetric.job_id, JobProcessingMetric.stage)
 Index("idx_job_processing_metrics_stage_created", JobProcessingMetric.stage, JobProcessingMetric.created_at)
 Index("idx_job_processing_metrics_job_seq", JobProcessingMetric.job_id, JobProcessingMetric.sequence_index)
+
 
 

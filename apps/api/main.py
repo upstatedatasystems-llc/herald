@@ -212,9 +212,13 @@ class DeliveryFailedRequest(BaseModel):
 
 class JobStatusResponse(BaseModel):
     id: str
-    gmail_message_id: str
-    gmail_thread_id: str | None
-    sender_email: str
+    transport: str = "email"
+    gmail_message_id: str | None = None
+    gmail_thread_id: str | None = None
+    sender_email: str | None = None
+    telegram_chat_id: int | None = None
+    telegram_message_id: int | None = None
+    telegram_user_id: int | None = None
     request_mode: str
     research_depth: str | None = None
     source_type: str
@@ -312,10 +316,16 @@ def readiness_check(db: Session = Depends(get_db)):
 
     # 3. Production security check
     if settings.HERALD_ENV.lower() == "production":
-        if not settings.HERALD_API_KEY or settings.HERALD_API_KEY == "default-insecure-api-key":
-            reasons.append("Production HERALD_API_KEY is not configured securely")
-        if not settings.EMAIL_ALLOWED_SENDERS.strip():
-            reasons.append("Production EMAIL_ALLOWED_SENDERS is empty (fail-closed rule)")
+        is_email_active = bool(settings.ENABLE_EMAIL_TRANSPORT or settings.EMAIL_ALLOWED_SENDERS.strip() or settings.GOOGLE_DRIVE_FOLDER_ID.strip())
+        if is_email_active:
+            if not settings.HERALD_API_KEY or settings.HERALD_API_KEY == "default-insecure-api-key":
+                reasons.append("Production HERALD_API_KEY is not configured securely for active Email/API transport")
+            if not settings.EMAIL_ALLOWED_SENDERS.strip():
+                reasons.append("Production EMAIL_ALLOWED_SENDERS is empty for active Email transport (fail-closed rule)")
+            if not settings.GOOGLE_DRIVE_FOLDER_ID.strip():
+                reasons.append("Production GOOGLE_DRIVE_FOLDER_ID is empty for active Drive transport")
+        elif not settings.TELEGRAM_BOT_TOKEN:
+            reasons.append("No active transport configured (neither Telegram nor Email/Drive configured)")
 
     # 4. Work directory writability check
     work_dir = Path(settings.HERALD_WORK_DIR)

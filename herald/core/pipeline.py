@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from sqlalchemy import and_, or_
@@ -82,26 +83,29 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
 
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
     if req.transport == "telegram" and req.transport_message_id and req.delivery_target:
-        existing_msg_job = (
-            db.query(PodcastJob)
-            .filter(
-                PodcastJob.transport == "telegram",
-                PodcastJob.telegram_chat_id == str(req.delivery_target),
-                PodcastJob.telegram_message_id == str(req.transport_message_id),
+        tg_chat = int(req.delivery_target) if str(req.delivery_target).lstrip("-").isdigit() else None
+        tg_msg = int(req.transport_message_id) if str(req.transport_message_id).isdigit() else None
+        if tg_chat is not None and tg_msg is not None:
+            existing_msg_job = (
+                db.query(PodcastJob)
+                .filter(
+                    PodcastJob.transport == "telegram",
+                    PodcastJob.telegram_chat_id == tg_chat,
+                    PodcastJob.telegram_message_id == tg_msg,
+                )
+                .first()
             )
-            .first()
-        )
-        if existing_msg_job:
-            ep_title = (existing_msg_job.script_json or {}).get("episode_title") or existing_msg_job.custom_title
-            return HeraldResponse(
-                job_id=existing_msg_job.id,
-                status=existing_msg_job.status,
-                request_mode=existing_msg_job.request_mode,
-                source_type=existing_msg_job.source_type,
-                is_duplicate=True,
-                message="Telegram message has already been received.",
-                episode_title=ep_title,
-            )
+            if existing_msg_job:
+                ep_title = (existing_msg_job.script_json or {}).get("episode_title") or existing_msg_job.custom_title
+                return HeraldResponse(
+                    job_id=existing_msg_job.id,
+                    status=existing_msg_job.status,
+                    request_mode=existing_msg_job.request_mode,
+                    source_type=existing_msg_job.source_type,
+                    is_duplicate=True,
+                    message="Telegram message has already been received.",
+                    episode_title=ep_title,
+                )
 
     # 2. Extract URL or normalize text
     source_type = SourceType.URL.value if req.source_url else SourceType.TEXT.value
@@ -205,8 +209,17 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             and c_chunk == req_chunk
             and c_verify == req_verify
         ):
-            duplicate_job = c_job
-            break
+            # If the candidate is complete, only treat as duplicate if local MP3 is present
+            if c_job.status == JobState.COMPLETE.value:
+                if c_job.local_audio_path and os.path.exists(c_job.local_audio_path):
+                    duplicate_job = c_job
+                    break
+                else:
+                    # Audio cleaned up - do not treat as duplicate; allow creating a new job
+                    continue
+            else:
+                duplicate_job = c_job
+                break
 
     if duplicate_job:
         ep_title = (duplicate_job.script_json or {}).get("episode_title") or duplicate_job.custom_title
@@ -222,9 +235,21 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
 
     # 4. Create PodcastJob
     job_id = str(uuid.uuid4())
-    telegram_chat = str(req.delivery_target) if req.transport == "telegram" else None
-    telegram_msg = str(req.transport_message_id) if req.transport == "telegram" else None
-    telegram_user = str(req.requester_identity).replace("telegram:", "") if req.transport == "telegram" else None
+    telegram_chat = (
+        int(req.delivery_target)
+        if req.transport == "telegram" and req.delivery_target and str(req.delivery_target).lstrip("-").isdigit()
+        else None
+    )
+    telegram_msg = (
+        int(req.transport_message_id)
+        if req.transport == "telegram" and req.transport_message_id and str(req.transport_message_id).isdigit()
+        else None
+    )
+    telegram_user = (
+        int(str(req.requester_identity).replace("telegram:", ""))
+        if req.transport == "telegram" and str(req.requester_identity).replace("telegram:", "").isdigit()
+        else None
+    )
 
     job = PodcastJob(
         id=job_id,
@@ -232,7 +257,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         telegram_chat_id=telegram_chat,
         telegram_message_id=telegram_msg,
         telegram_user_id=telegram_user,
-        sender_email=req.requester_identity,
+        sender_email=req.requester_identity if req.transport != "telegram" else None,
         request_mode=mode_val,
         research_depth=req.research_depth,
         source_type=source_type,
@@ -247,9 +272,35 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         status=JobState.RECEIVED.value,
     )
 
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+    try:
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+    except Exception as e:
+        db.rollback()
+        # Handle concurrent race if another process created this Telegram job
+        if req.transport == "telegram" and telegram_chat and telegram_msg:
+            existing = (
+                db.query(PodcastJob)
+                .filter(
+                    PodcastJob.transport == "telegram",
+                    PodcastJob.telegram_chat_id == telegram_chat,
+                    PodcastJob.telegram_message_id == telegram_msg,
+                )
+                .first()
+            )
+            if existing:
+                ep_title = (existing.script_json or {}).get("episode_title") or existing.custom_title
+                return HeraldResponse(
+                    job_id=existing.id,
+                    status=existing.status,
+                    request_mode=existing.request_mode,
+                    source_type=existing.source_type,
+                    is_duplicate=True,
+                    message="Telegram message already accepted.",
+                    episode_title=ep_title,
+                )
+        raise e
 
     transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
     transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")

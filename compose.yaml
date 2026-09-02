@@ -16,15 +16,15 @@ services:
           cpus: "0.50"
           memory: 1024M
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:?Required POSTGRES_DB environment variable}
-      POSTGRES_USER: ${POSTGRES_USER:?Required POSTGRES_USER environment variable}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required POSTGRES_PASSWORD environment variable}
+      POSTGRES_DB: ${POSTGRES_DB:-herald}
+      POSTGRES_USER: ${POSTGRES_USER:-herald}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - herald-backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-herald} -d ${POSTGRES_DB:-herald}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -51,53 +51,6 @@ services:
     networks:
       - herald-backend
 
-  n8n:
-    image: docker.n8n.io/n8nio/n8n:1.123.69
-    container_name: herald-n8n
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 1024M
-    depends_on:
-      postgres:
-        condition: service_healthy
-      herald-migration:
-        condition: service_completed_successfully
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
-      DB_POSTGRESDB_USER: ${POSTGRES_USER}
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Required N8N_ENCRYPTION_KEY environment variable}
-      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${HERALD_N8N_CONCURRENCY:-1}
-
-      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
-      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      N8N_GIT_NODE_DISABLE_BARE_REPOS: "true"
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      TZ: ${TZ:-America/New_York}
-      HERALD_API_KEY: ${HERALD_API_KEY:?Required HERALD_API_KEY environment variable}
-      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
-      EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS:-}
-    ports:
-      - "127.0.0.1:5678:5678"
-    volumes:
-      - n8n_data:/home/node/.n8n
-      - work_data:/data/herald
-    networks:
-      - herald-backend
-
   kokoro:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1
     container_name: herald-kokoro
@@ -121,44 +74,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-
-  herald-api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.api
-    container_name: herald-api
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-    depends_on:
-      postgres:
-        condition: service_healthy
-      herald-migration:
-        condition: service_completed_successfully
-    env_file:
-      - .env
-    environment:
-      HERALD_WORK_DIR: /data/herald
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - work_data:/data/herald
-    networks:
-      - herald-backend
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
 
   herald-worker:
     build:
@@ -221,6 +136,95 @@ services:
     environment:
       HERALD_WORK_DIR: /data/herald
     volumes:
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+
+  # Optional HTTP API service (used for HTTP clients / webhooks)
+  herald-api:
+    profiles: ["api", "legacy"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: herald-api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      HERALD_WORK_DIR: /data/herald
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # Optional n8n service (used for legacy Gmail & Google Drive integration)
+  n8n:
+    profiles: ["legacy", "n8n"]
+    image: docker.n8n.io/n8nio/n8n:1.123.69
+    container_name: herald-n8n
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 1024M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-herald}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-herald}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-herald_secure_password}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-default_n8n_encryption_key_32c}
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${HERALD_N8N_CONCURRENCY:-1}
+
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      N8N_GIT_NODE_DISABLE_BARE_REPOS: "true"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      TZ: ${TZ:-America/New_York}
+      HERALD_API_KEY: ${HERALD_API_KEY:-}
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+      EMAIL_ALLOWED_SENDERS: ${EMAIL_ALLOWED_SENDERS:-}
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
       - work_data:/data/herald
     networks:
       - herald-backend

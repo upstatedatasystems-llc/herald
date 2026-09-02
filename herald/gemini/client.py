@@ -79,7 +79,8 @@ Your goal:
 Report your comprehensive grounded findings in detail.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "tools": [{"googleSearch": {}}],
@@ -94,7 +95,7 @@ Report your comprehensive grounded findings in detail.
             from herald.concurrency import get_semaphores
             with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-                resp = client.post(url, json=payload)
+                resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code in (401, 403):
                 raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
@@ -231,7 +232,8 @@ Requirements:
 4. Pass the exact CANONICAL_SOURCE_REGISTRY back into research_sources field.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -301,7 +303,7 @@ Requirements:
             from herald.concurrency import get_semaphores
             with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-                resp = client.post(url, json=payload)
+                resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code != 200:
                 if attempt < max_attempts:
@@ -389,7 +391,8 @@ SOURCE TITLE: {source_title or 'N/A'}
 Generate the podcast script JSON response adhering to spoken prose rules and output schema now.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -447,7 +450,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             from herald.concurrency import get_semaphores
             with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-                resp = client.post(url, json=payload)
+                resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code in (401, 403):
                 raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
@@ -542,7 +545,8 @@ Set has_material_issues to true ONLY if material factual errors or severe misrep
 If has_material_issues is true, provide concrete repair_instructions.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -581,7 +585,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         }
 
         with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-            resp = client.post(url, json=payload)
+            resp = client.post(url, json=payload, headers=headers)
 
         if resp.status_code == 200:
             raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -629,7 +633,8 @@ Repair the podcast script to resolve the audit findings described below.
 Return the corrected PodcastScriptResponse JSON now.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -665,7 +670,7 @@ Return the corrected PodcastScriptResponse JSON now.
     }
 
     with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload)
+        resp = client.post(url, json=payload, headers=headers)
 
     if resp.status_code == 200:
         raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -713,7 +718,8 @@ Set has_material_issues to true ONLY if material factual errors or severe misrep
 If has_material_issues is true, provide concrete repair_instructions.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -752,7 +758,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         }
 
         with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-            resp = client.post(url, json=payload)
+            resp = client.post(url, json=payload, headers=headers)
 
         if resp.status_code == 200:
             raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -794,7 +800,8 @@ Repair the podcast script to resolve the fidelity audit findings described below
 Return the corrected PodcastScriptResponse JSON now.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
 
     schema_dict = {
         "type": "OBJECT",
@@ -830,7 +837,7 @@ Return the corrected PodcastScriptResponse JSON now.
     }
 
     with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload)
+        resp = client.post(url, json=payload, headers=headers)
 
     if resp.status_code == 200:
         raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
