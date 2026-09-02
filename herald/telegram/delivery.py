@@ -17,51 +17,51 @@ logger = logging.getLogger("herald.telegram.delivery")
 def deliver_pending_telegram_jobs(db: Session, client: TelegramClient) -> int:
     """
     Find AUDIO_READY or retryable FAILED_RETRYABLE jobs originating from Telegram and deliver completed MP3.
-    Uses atomic row locking (FOR UPDATE SKIP LOCKED) to prevent concurrent send duplication.
+    Uses atomic row locking (FOR UPDATE SKIP LOCKED) claiming exactly one job per transaction
+    to prevent concurrent send duplication across delivery workers.
     Returns number of jobs processed.
     """
     if not client.is_configured:
         return 0
 
-    now = datetime.now(UTC)
-    stale_cutoff = now - timedelta(minutes=15)
+    delivered_count = 0
+    while True:
+        now = datetime.now(UTC)
+        stale_cutoff = now - timedelta(minutes=15)
 
-    eligible_filter = and_(
-        PodcastJob.transport == "telegram",
-        PodcastJob.telegram_chat_id.isnot(None),
-        or_(
-            PodcastJob.status == JobState.AUDIO_READY.value,
-            and_(
-                PodcastJob.status == JobState.FAILED_RETRYABLE.value,
-                PodcastJob.failed_stage == "TELEGRAM_DELIVERY",
-                or_(
-                    PodcastJob.next_retry_at.is_(None),
-                    PodcastJob.next_retry_at <= now,
+        eligible_filter = and_(
+            PodcastJob.transport == "telegram",
+            PodcastJob.telegram_chat_id.isnot(None),
+            or_(
+                PodcastJob.status == JobState.AUDIO_READY.value,
+                and_(
+                    PodcastJob.status == JobState.FAILED_RETRYABLE.value,
+                    PodcastJob.failed_stage == "TELEGRAM_DELIVERY",
+                    or_(
+                        PodcastJob.next_retry_at.is_(None),
+                        PodcastJob.next_retry_at <= now,
+                    ),
+                ),
+                and_(
+                    PodcastJob.status == JobState.DELIVERING.value,
+                    PodcastJob.last_heartbeat_at <= stale_cutoff,
                 ),
             ),
-            and_(
-                PodcastJob.status == JobState.DELIVERING.value,
-                PodcastJob.last_heartbeat_at <= stale_cutoff,
-            ),
-        ),
-    )
+        )
 
-    # Claim jobs atomically with row lock
-    jobs = (
-        db.query(PodcastJob)
-        .filter(eligible_filter)
-        .order_by(PodcastJob.created_at.asc())
-        .with_for_update(skip_locked=True)
-        .limit(10)
-        .all()
-    )
+        # Claim exactly ONE eligible job atomically with row lock
+        job = (
+            db.query(PodcastJob)
+            .filter(eligible_filter)
+            .order_by(PodcastJob.created_at.asc())
+            .with_for_update(skip_locked=True)
+            .first()
+        )
 
-    if not jobs:
-        return 0
+        if not job:
+            break
 
-    delivered_count = 0
-    for job in jobs:
-        # Move immediately to DELIVERING with fresh heartbeat
+        # Move immediately to DELIVERING with fresh heartbeat and commit claim
         if job.status != JobState.DELIVERING.value:
             transition_job_state(db, job, JobState.DELIVERING.value, component="telegram-delivery")
         job.last_heartbeat_at = now

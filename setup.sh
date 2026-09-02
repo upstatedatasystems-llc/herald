@@ -15,11 +15,61 @@ if [ -f "$ENV_FILE" ]; then
     echo "ℹ️  Existing configuration found in ${ENV_FILE}."
 fi
 
+# Python helper to read a variable from .env safely
+get_env_val() {
+    local key="$1"
+    if [ -f "$ENV_FILE" ]; then
+        python3 -c "
+import os
+val = ''
+if os.path.exists('$ENV_FILE'):
+    with open('$ENV_FILE', 'r', encoding='utf-8') as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#') and '=' in stripped:
+                k, v = stripped.split('=', 1)
+                if k.strip() == '$key':
+                    val = v.strip().strip('\"').strip('\'')
+print(val)
+" 2>/dev/null || true
+    fi
+}
+
+# Python helper to update or append keys in .env preserving all other lines and comments
+set_env_val() {
+    local key="$1"
+    local val="$2"
+    python3 -c "
+import os
+filepath = '$ENV_FILE'
+lines = []
+if os.path.exists(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+found = False
+new_lines = []
+for line in lines:
+    stripped = line.strip()
+    if stripped and not stripped.startswith('#') and '=' in stripped:
+        k = stripped.split('=', 1)[0].strip()
+        if k == '$key':
+            new_lines.append(f'''$key=\"$val\"\n''')
+            found = True
+            continue
+    new_lines.append(line)
+
+if not found:
+    new_lines.append(f'''$key=\"$val\"\n''')
+
+with open(filepath, 'w', encoding='utf-8') as f:
+    f.writelines(new_lines)
+os.chmod(filepath, 0o600)
+"
+}
+
 # 1. Telegram Bot Token
-TG_TOKEN=""
-if [ "$EXISTING_ENV" = true ]; then
-    TG_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" | cut -d '=' -f2- | tr -d '"' || true)
-fi
+TG_TOKEN=$(get_env_val "TELEGRAM_BOT_TOKEN")
 
 if [ -z "$TG_TOKEN" ]; then
     echo "To create a bot, message @BotFather on Telegram and send /newbot."
@@ -32,118 +82,64 @@ if [ -z "$TG_TOKEN" ]; then
         fi
     done
 else
-    echo "✅ Telegram Bot Token is already configured."
+    echo "✅ Telegram Bot Token is configured."
 fi
 
-# 2. AI Provider Selection
-AI_PROVIDER="none"
-GEMINI_KEY=""
-
-if [ "$EXISTING_ENV" = true ]; then
-    AI_PROVIDER=$(grep -E '^AI_PROVIDER=' "$ENV_FILE" | cut -d '=' -f2- | tr -d '"' || echo "none")
-    GEMINI_KEY=$(grep -E '^GEMINI_API_KEY=' "$ENV_FILE" | cut -d '=' -f2- | tr -d '"' || true)
-fi
-
-if [ "$EXISTING_ENV" = false ]; then
-    echo ""
-    echo "Select an AI Scripting Provider:"
-    echo "  1) None (Deterministic Literal reading only — zero external AI calls)"
-    echo "  2) Google Gemini (Enables Brief, Standard, and Deep-Dive Research modes)"
-    read -rp "Enter choice [1 or 2, default: 1]: " AI_CHOICE
-    AI_CHOICE=${AI_CHOICE:-1}
-
-    if [ "$AI_CHOICE" = "2" ]; then
-        AI_PROVIDER="gemini"
-        while [ -z "$GEMINI_KEY" ]; do
-            read -s -rp "Enter your Gemini API Key: " GEMINI_KEY
-            echo ""
-            GEMINI_KEY=$(echo "$GEMINI_KEY" | xargs)
-            if [ -z "$GEMINI_KEY" ]; then
-                echo "⚠️  Gemini API Key cannot be empty when Gemini provider is selected."
-            fi
-        done
-    else
-        AI_PROVIDER="none"
-        GEMINI_KEY=""
-    fi
-fi
-
-# 3. Generate internal random secrets if not present
-POSTGRES_PW=""
-HERALD_API_KEY=""
-
-if [ "$EXISTING_ENV" = true ]; then
-    POSTGRES_PW=$(grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" | cut -d '=' -f2- | tr -d '"' || true)
-    HERALD_API_KEY=$(grep -E '^HERALD_API_KEY=' "$ENV_FILE" | cut -d '=' -f2- | tr -d '"' || true)
-fi
-
-if [ -z "$POSTGRES_PW" ]; then
-    POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || echo "herald_secure_db_pass_$(date +%s)")
-fi
-
-if [ -z "$HERALD_API_KEY" ]; then
-    HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || echo "herald_internal_key_$(date +%s)")
-fi
-
-# 4. Write/Update .env file
-if [ "$EXISTING_ENV" = false ]; then
-    cat <<EOF > "$ENV_FILE"
-# ==============================================================================
-# Herald Configuration (.env)
-# ==============================================================================
-
-# Core Telegram Interface
-TELEGRAM_BOT_TOKEN="${TG_TOKEN}"
-AI_PROVIDER="${AI_PROVIDER}"
-GEMINI_API_KEY="${GEMINI_KEY}"
-GEMINI_MODEL="gemini-3.5-flash"
-TELEGRAM_MAX_AUDIO_BYTES=52428800
-
-# Defaults
-DEFAULT_MODE="literal"
-DEFAULT_VOICE="af_heart"
-DEFAULT_SPEED=1.0
-ALLOWED_VOICES="af_heart,af_bella,af_sarah,am_adam,am_michael"
-
-# Database & Internal
-POSTGRES_DB="herald"
-POSTGRES_USER="herald"
-POSTGRES_PASSWORD="${POSTGRES_PW}"
-POSTGRES_HOST="postgres"
-POSTGRES_PORT=5432
-HERALD_API_KEY="${HERALD_API_KEY}"
-
-# Runtime
-HERALD_ENV="production"
-HERALD_WORK_DIR="/data/herald"
-HERALD_MIN_DISK_MB=500
-HERALD_CONCURRENCY_PROFILE="auto"
-
-# Kokoro TTS (local CPU container)
-KOKORO_BASE_URL="http://kokoro:8880"
-
-# Optional Legacy Gmail & n8n settings
-ENABLE_EMAIL_TRANSPORT=false
-N8N_ENCRYPTION_KEY=""
-GOOGLE_DRIVE_FOLDER_ID=""
-EMAIL_ALLOWED_SENDERS=""
-EOF
-    chmod 600 "$ENV_FILE"
-    echo "✅ Created ${ENV_FILE} with secure permissions (0600)."
-fi
-
-# 5. Validate Telegram Bot Token with Bot API
+# Validate Telegram Bot Token with Bot API (fail hard on invalid token)
 echo ""
-echo "🔍 Validating Telegram Bot Token..."
+echo "🔍 Validating Telegram Bot Token with api.telegram.org..."
 TG_ME_RESP=$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getMe" || true)
 if echo "$TG_ME_RESP" | grep -q '"ok":true'; then
-    BOT_NAME=$(echo "$TG_ME_RESP" | grep -o '"username":"[^"]*' | cut -d'"' -f4 || echo "Bot")
-    echo "✅ Telegram Bot validated: @${BOT_NAME}"
+    BOT_NAME=$(echo "$TG_ME_RESP" | grep -o '"username":"[^"]*' | cut -d'"' -f4 || echo "HeraldBot")
+    echo "✅ Telegram Bot verified: @${BOT_NAME}"
+    set_env_val "TELEGRAM_BOT_TOKEN" "$TG_TOKEN"
 else
-    echo "⚠️  Could not verify Telegram bot token with api.telegram.org. Please check your token."
+    echo "❌ Telegram Bot Token validation failed. Response: ${TG_ME_RESP}"
+    echo "Please check your bot token from @BotFather and rerun setup.sh."
+    exit 1
 fi
 
-# 6. Test Gemini if configured
+# 2. AI Provider Selection & Existing Configuration Inference
+AI_PROVIDER=$(get_env_val "AI_PROVIDER")
+GEMINI_KEY=$(get_env_val "GEMINI_API_KEY")
+
+if [ -z "$AI_PROVIDER" ]; then
+    if [ -n "$GEMINI_KEY" ]; then
+        # Preserve existing Gemini configuration on upgrade
+        AI_PROVIDER="gemini"
+        echo "ℹ️  Existing GEMINI_API_KEY detected. Inferred AI_PROVIDER=gemini."
+        set_env_val "AI_PROVIDER" "gemini"
+    else
+        echo ""
+        echo "Select an AI Scripting Provider:"
+        echo "  1) None (Deterministic Literal reading only — zero external AI calls)"
+        echo "  2) Google Gemini (Enables Brief, Standard, and Deep-Dive Research modes)"
+        read -rp "Enter choice [1 or 2, default: 1]: " AI_CHOICE
+        AI_CHOICE=${AI_CHOICE:-1}
+
+        if [ "$AI_CHOICE" = "2" ]; then
+            AI_PROVIDER="gemini"
+            while [ -z "$GEMINI_KEY" ]; do
+                read -s -rp "Enter your Gemini API Key: " GEMINI_KEY
+                echo ""
+                GEMINI_KEY=$(echo "$GEMINI_KEY" | xargs)
+                if [ -z "$GEMINI_KEY" ]; then
+                    echo "⚠️  Gemini API Key cannot be empty when Gemini provider is selected."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "gemini"
+            set_env_val "GEMINI_API_KEY" "$GEMINI_KEY"
+            set_env_val "GEMINI_MODEL" "gemini-3.5-flash"
+        else
+            AI_PROVIDER="none"
+            set_env_val "AI_PROVIDER" "none"
+        fi
+    fi
+else
+    echo "✅ AI Provider is configured: ${AI_PROVIDER}"
+fi
+
+# 3. Test Gemini if configured
 if [ "$AI_PROVIDER" = "gemini" ] && [ -n "$GEMINI_KEY" ]; then
     echo "🔍 Validating Gemini API Key..."
     GEM_RESP=$(curl -s -H "x-goog-api-key: ${GEMINI_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash" || true)
@@ -154,18 +150,89 @@ if [ "$AI_PROVIDER" = "gemini" ] && [ -n "$GEMINI_KEY" ]; then
     fi
 fi
 
-# 7. Start Herald services and run migrations
+# 4. Ensure internal defaults & secrets are present without overwriting existing
+POSTGRES_PW=$(get_env_val "POSTGRES_PASSWORD")
+if [ -z "$POSTGRES_PW" ]; then
+    POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || echo "herald_secure_db_pass_$(date +%s)")
+    set_env_val "POSTGRES_PASSWORD" "$POSTGRES_PW"
+fi
+
+HERALD_API_KEY=$(get_env_val "HERALD_API_KEY")
+if [ -z "$HERALD_API_KEY" ]; then
+    HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || echo "herald_internal_key_$(date +%s)")
+    set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
+fi
+
+KOKORO_URL=$(get_env_val "KOKORO_BASE_URL")
+if [ -z "$KOKORO_URL" ] || [ "$KOKORO_URL" = "http://kokoro:8880" ]; then
+    set_env_val "KOKORO_BASE_URL" "http://kokoro:8880/v1"
+fi
+
+if [ -z "$(get_env_val "POSTGRES_DB")" ]; then set_env_val "POSTGRES_DB" "herald"; fi
+if [ -z "$(get_env_val "POSTGRES_USER")" ]; then set_env_val "POSTGRES_USER" "herald"; fi
+if [ -z "$(get_env_val "POSTGRES_HOST")" ]; then set_env_val "POSTGRES_HOST" "postgres"; fi
+if [ -z "$(get_env_val "POSTGRES_PORT")" ]; then set_env_val "POSTGRES_PORT" "5432"; fi
+if [ -z "$(get_env_val "HERALD_ENV")" ]; then set_env_val "HERALD_ENV" "production"; fi
+if [ -z "$(get_env_val "HERALD_WORK_DIR")" ]; then set_env_val "HERALD_WORK_DIR" "/data/herald"; fi
+if [ -z "$(get_env_val "HERALD_MIN_DISK_MB")" ]; then set_env_val "HERALD_MIN_DISK_MB" "500"; fi
+if [ -z "$(get_env_val "HERALD_CONCURRENCY_PROFILE")" ]; then set_env_val "HERALD_CONCURRENCY_PROFILE" "auto"; fi
+if [ -z "$(get_env_val "TELEGRAM_MAX_AUDIO_BYTES")" ]; then set_env_val "TELEGRAM_MAX_AUDIO_BYTES" "52428800"; fi
+if [ -z "$(get_env_val "ALLOWED_VOICES")" ]; then set_env_val "ALLOWED_VOICES" "af_heart,af_bella,af_sarah,am_adam,am_michael"; fi
+if [ -z "$(get_env_val "KOKORO_VOICE")" ]; then set_env_val "KOKORO_VOICE" "af_heart"; fi
+if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"; fi
+
+echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
+
+# 5. Start Herald core services and truthfully verify startup
 echo ""
 echo "🚀 Starting Herald core services via Docker Compose..."
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     docker compose up -d postgres kokoro herald-migration herald-worker telegram-bot
-    echo "⏳ Waiting for database and services initialization..."
-    sleep 5
+
+    echo "⏳ Waiting for PostgreSQL and schema migrations to complete..."
+    MIG_OK=false
+    for i in {1..30}; do
+        MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
+        if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
+            MIG_OK=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$MIG_OK" = true ]; then
+        echo "✅ Database migrations completed successfully."
+    else
+        echo "⚠️  Migration container status: ${MIG_STATUS:-unknown}. Check 'docker compose logs herald-migration'."
+    fi
+
+    echo "⏳ Waiting for Kokoro TTS engine initialization..."
+    KOKORO_OK=false
+    for i in {1..45}; do
+        if docker compose exec -T kokoro curl -s -f http://localhost:8880/v1/models &>/dev/null; then
+            KOKORO_OK=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$KOKORO_OK" = true ]; then
+        echo "✅ Kokoro TTS engine is healthy and ready (/v1/models)."
+    else
+        echo "⚠️  Kokoro TTS health check timed out. Model weights may still be downloading. Check 'docker compose logs kokoro'."
+    fi
+
+    # Check telegram-bot container
+    if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "telegram-bot"; then
+        echo "✅ Telegram Bot daemon is running."
+    else
+        echo "⚠️  Telegram Bot container is not running yet. Check 'docker compose logs telegram-bot'."
+    fi
 else
-    echo "ℹ️  Docker Compose not detected. Please run 'docker compose up -d' to start services."
+    echo "ℹ️  Docker Compose not detected. Please run 'docker compose up -d' when Docker is available."
 fi
 
-# 8. Obtain or generate owner pairing code
+# 6. Pairing instructions
 echo ""
 echo "========================================================"
 echo "               🎉 Herald Setup Complete!               "
@@ -173,11 +240,10 @@ echo "========================================================"
 echo ""
 echo "Next step: Pair your Telegram account as instance owner."
 echo ""
-echo "1. Open Telegram and start a private chat with your bot."
-echo "2. Run the pairing command displayed in your logs or run:"
-echo "   docker compose logs telegram-bot"
-echo "   Look for: Active owner pairing code: XXXXXX"
-echo "3. Send in Telegram:"
-echo "   /pair <code_from_logs>"
+echo "1. Open Telegram and start a private chat with your bot (@${BOT_NAME:-HeraldBot})."
+echo "2. Find the active 6-digit pairing code in your server logs:"
+echo "   docker compose logs telegram-bot | grep \"/pair\""
+echo "3. Send the command in your private Telegram chat:"
+echo "   /pair <6_digit_code>"
 echo ""
 echo "========================================================"

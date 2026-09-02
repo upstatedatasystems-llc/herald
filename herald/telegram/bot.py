@@ -426,8 +426,8 @@ def handle_telegram_command(
         settings_msg = (
             "⚙️ <b>Instance Settings:</b>\n\n"
             f"• <b>Default Mode:</b> <code>{html.escape(settings.get_default_mode())}</code>\n"
-            f"• <b>Default Voice:</b> <code>{html.escape(settings.DEFAULT_VOICE)}</code>\n"
-            f"• <b>Default Speed:</b> <code>{settings.DEFAULT_SPEED}x</code>\n"
+            f"• <b>Default Voice:</b> <code>{html.escape(settings.KOKORO_VOICE)}</code>\n"
+            f"• <b>Default Speed:</b> <code>{settings.KOKORO_SPEED}x</code>\n"
             f"• <b>Max Audio Upload:</b> <code>{settings.TELEGRAM_MAX_AUDIO_BYTES / (1024*1024):.0f} MB</code>\n"
             f"• <b>AI Provider:</b> <code>{html.escape(settings.AI_PROVIDER or 'None')}</code>\n"
         )

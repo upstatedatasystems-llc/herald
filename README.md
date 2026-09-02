@@ -14,7 +14,7 @@ Herald operates behind NATs and firewalls using outbound Telegram long polling w
 - **Telegram-First Interface**: Send an article URL, pasted text, or forwarded message directly to your private Telegram bot and receive the completed MP3 podcast in response.
 - **Literal Mode (AI is Optional)**: Functions 100% locally on your host with **zero** LLM API calls, performing deterministic text cleaning, heading preservation, sentence-aware chunking, and Kokoro TTS narration.
 - **AI-Powered Modes (Gemini)**: When configured with a Gemini API key, access `brief`, `standard`, and `research` modes with grounded web verification and fidelity audits.
-- **Secure Owner Pairing**: Prevents unauthorized access using a single-owner one-time pairing code displayed on startup console (`/pair <code>`).
+- **Secure Owner Pairing**: Prevents unauthorized access using a single-owner one-time pairing code displayed strictly in server console output / container logs (`/pair <code>`).
 - **Outbound Long Polling**: No inbound ports, webhooks, or public IP addresses required.
 - **Local Neural Speech Synthesis**: Powered by Kokoro-82M TTS and FFmpeg spoken-word loudness normalization (`loudnorm`).
 - **Durable Job Engine**: PostgreSQL-backed state machine with automatic crash recovery, lease renewals, and transport-level idempotency.
@@ -48,12 +48,12 @@ docker compose up -d
 ```
 
 ### 4. Pair Your Account
-Look at the startup output or send `/start` to your bot in Telegram. To pair your Telegram account as the instance owner, send:
+Look at your server startup logs (e.g. `docker compose logs telegram-bot`). The pairing code is displayed only in trusted server console logs:
 
 ```text
 /pair 123456
 ```
-*(Replace `123456` with the pairing code shown in your console).*
+*(Replace `123456` with the active pairing code shown in your console).*
 
 ---
 
@@ -100,7 +100,7 @@ research high
 | `/status` | Live runtime, TTS readiness, AI provider health, queue, disk, and uptime |
 | `/ai-check` | Dedicated AI API configuration and connection test |
 | `/queue` | View pending and in-progress podcast jobs |
-| `/settings` | View current user-facing configuration and defaults |
+| `/settings` | View current user-facing configuration and defaults (`KOKORO_VOICE`, `KOKORO_SPEED`) |
 | `/readme` | Send the project `README.md` document |
 | `/pair <code>` | Pair Telegram account as instance owner |
 
@@ -122,7 +122,7 @@ research high
           [ PodcastJob Queue ]
                      ↓
         [ Kokoro TTS Synthesis ]
-        (Parallel Chunk Processing)
+       (Sequential Chunk Synthesis)
                      ↓
         [ FFmpeg Audio Assembly ]
                      ↓
@@ -141,7 +141,7 @@ Herald includes a standard `Makefile` for operations and testing:
 | `make up` | Start all Herald services |
 | `make down` | Stop all services |
 | `make logs` | Tail service container logs |
-| `make test` | Run full pytest suite (185+ unit & integration tests) |
+| `make test` | Run full pytest suite |
 | `make status` | Display queue depth and system status |
 
 ---
