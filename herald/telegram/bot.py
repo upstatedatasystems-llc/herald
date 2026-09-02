@@ -1,11 +1,11 @@
 import html
 import logging
 import os
-import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
 from sqlalchemy.orm import Session
 
 from herald.ai.factory import get_ai_provider
@@ -14,13 +14,16 @@ from herald.config import settings
 from herald.core.models import HeraldRequest, HeraldResponse
 from herald.core.pipeline import process_herald_request
 from herald.db.connection import SessionLocal
-from herald.db.models import JobState, PodcastJob, RequestMode, TelegramPollState, TelegramUpdateFailure
+from herald.db.models import (
+    JobState,
+    PodcastJob,
+    TelegramPollState,
+    TelegramUpdateFailure,
+)
 from herald.extraction.email_parser import (
-    BASE_SUBJECT_PATTERNS,
     URL_REGEX,
 )
 from herald.telegram.auth import (
-    get_or_create_active_pairing_code,
     get_paired_owner,
     has_owner,
     is_user_authorized,
@@ -79,7 +82,7 @@ def parse_telegram_message_directives(text: str) -> dict[str, Any]:
             lower_line = stripped.lower()
 
             # Standalone URL in header zone
-            if stripped.startswith(("http://", "https://")) and not " " in stripped:
+            if stripped.startswith(("http://", "https://")) and " " not in stripped:
                 url_in_header = stripped
                 continue
 
@@ -438,7 +441,7 @@ def handle_telegram_command(
         if readme_path.exists():
             client.send_document(
                 chat_id=chat_id,
-                file_path=str(readme_path),
+                document_path=str(readme_path),
                 caption="📄 Herald Project README",
                 reply_to_message_id=msg_id,
             )
@@ -523,7 +526,7 @@ def handle_telegram_content_message(
         transport_message_id=msg_id,
         requester_identity=f"telegram:{user_id}",
         delivery_target=str(chat_id),
-        mode=parsed["mode"],
+        request_mode=parsed["mode"],
         research_depth=parsed["research_depth"],
         source_url=parsed["url"],
         source_text=parsed["text"] if not parsed["url"] else None,

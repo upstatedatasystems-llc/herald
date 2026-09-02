@@ -1,8 +1,9 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -13,7 +14,6 @@ from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.extraction.source_cleaner import deduplicate_source_blocks
 from herald.extraction.url_extractor import (
-    ArticleExtractionError,
     SourceAccessBlockedError,
     extract_article_from_url,
 )
@@ -168,7 +168,7 @@ def test_drive_filename_sanitization_and_construction():
     assert "*" not in sanitized
     assert "AI & Future- What's Next- -Test- -Special-" in sanitized or "AI & Future" in sanitized
 
-    dt = datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 11, 14, 0, 0, tzinfo=UTC)
     audio_fn = build_user_facing_drive_filename("Quantum Computing Breakthroughs!", dt, "Standard", "mp3")
     details_fn = build_user_facing_drive_filename("Quantum Computing Breakthroughs!", dt, "Standard", "md")
 
@@ -193,7 +193,7 @@ def test_delivery_claim_returns_readable_drive_filenames_and_uuid_local_paths(ap
         source_text="Test source text content",
         status=JobState.AUDIO_READY.value,
         custom_title="The AI Revolution Begins",
-        created_at=datetime(2026, 8, 11, 14, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 11, 14, 0, 0, tzinfo=UTC),
     )
     db_session.add(job)
     db_session.commit()
@@ -519,8 +519,8 @@ def test_in_place_details_file_update_preserves_drive_id(api_client, db_session:
         status=JobState.COMPLETE.value,
         details_drive_file_id="existing-drive-id-777",
         details_drive_web_link="https://drive.google.com/file/d/existing-drive-id-777/view",
-        created_at=datetime.now(timezone.utc),
-        completed_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
     )
     db_session.add(job)
     db_session.commit()

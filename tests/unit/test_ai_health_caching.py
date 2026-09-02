@@ -1,6 +1,6 @@
 import time
+
 import httpx
-from unittest.mock import MagicMock
 
 from herald.ai.factory import get_ai_provider, reset_ai_provider
 from herald.config import settings

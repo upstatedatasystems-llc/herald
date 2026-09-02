@@ -1,6 +1,5 @@
 import httpx
-import pytest
-from herald.ai.factory import get_ai_provider
+
 from herald.ai.gemini_provider import GeminiProvider
 from herald.config import settings
 from herald.core.models import HeraldRequest

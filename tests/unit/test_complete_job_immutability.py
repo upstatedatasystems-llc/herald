@@ -1,4 +1,5 @@
 import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -43,7 +44,7 @@ def test_complete_job_immutability_and_cleaned_up_audio(tmp_path):
             transport="telegram",
             requester_identity="telegram:999",
             delivery_target="999",
-            mode="literal",
+            request_mode="literal",
             source_text=source,
             custom_title="Episode Title",
         )
@@ -65,7 +66,7 @@ def test_complete_job_immutability_and_cleaned_up_audio(tmp_path):
             transport_message_id="777",
             requester_identity="telegram:999",
             delivery_target="999",
-            mode="literal",
+            request_mode="literal",
             source_text=source,
             custom_title="Episode Title",
         )

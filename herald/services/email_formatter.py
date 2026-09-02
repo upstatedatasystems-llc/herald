@@ -1,6 +1,6 @@
 import html
-from datetime import datetime, timezone
 import zoneinfo
+from datetime import datetime
 
 
 def get_canonical_drive_url(file_id: str | None, web_link: str | None) -> str | None:

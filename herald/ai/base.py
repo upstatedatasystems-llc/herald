@@ -11,18 +11,15 @@ class AIProvider(ABC):
     @abstractmethod
     def provider_name(self) -> str:
         """Human-readable provider name (e.g. 'Gemini', 'None (Literal)')."""
-        pass
 
     @property
     @abstractmethod
     def configured_model(self) -> str:
         """The configured model identifier."""
-        pass
 
     @abstractmethod
     def is_configured(self) -> bool:
         """Return True if credentials and configuration are present."""
-        pass
 
     @abstractmethod
     def generate_script(
@@ -33,7 +30,6 @@ class AIProvider(ABC):
         source_title: str | None = None,
     ) -> PodcastScriptResponse:
         """Generate structured podcast script from source text."""
-        pass
 
     @abstractmethod
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
@@ -41,4 +37,3 @@ class AIProvider(ABC):
         Check connectivity with the AI provider.
         Returns a dict: {"provider": str, "configured": bool, "connected": bool, "model": str, "error": str | None}
         """
-        pass

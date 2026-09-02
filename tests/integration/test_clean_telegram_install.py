@@ -1,4 +1,3 @@
-from unittest.mock import MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -37,7 +36,7 @@ def test_clean_telegram_install_environment(tmp_path, monkeypatch):
         transport_message_id="101",
         requester_identity="telegram:55555",
         delivery_target="55555",
-        mode="literal",
+        request_mode="literal",
         source_text="Clean install validation text for Herald podcast generation.",
         custom_title="Clean Install Episode",
     )

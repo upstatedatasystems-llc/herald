@@ -1,5 +1,6 @@
 import io
 import logging
+
 from herald.logging import SecretRedactingFormatter, register_secret_for_redaction
 
 

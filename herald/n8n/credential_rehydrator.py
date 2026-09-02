@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("herald.n8n")
@@ -40,9 +39,9 @@ def rehydrate_workflow_credentials(
                     target_cred = installed_credentials["googleDriveOAuth2Api"]
 
             if target_cred and isinstance(target_cred, dict):
-                if "id" in target_cred and target_cred["id"]:
+                if target_cred.get("id"):
                     cred_info["id"] = target_cred["id"]
-                if "name" in target_cred and target_cred["name"]:
+                if target_cred.get("name"):
                     cred_info["name"] = target_cred["name"]
 
     # Rehydrate errorWorkflow setting from workflow name to installed workflow ID

@@ -1,11 +1,10 @@
 from unittest.mock import MagicMock
-import pytest
+
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.telegram.auth import verify_and_claim_pairing_code
 from herald.telegram.bot import (
     handle_telegram_command,
-    handle_telegram_message,
     parse_telegram_message_directives,
     process_telegram_update,
 )
@@ -167,7 +166,7 @@ def test_readme_command(db_session):
 
     handle_telegram_command(db_session, mock_client, msg, "/readme", "")
     mock_client.send_document.assert_called_once()
-    doc_path = mock_client.send_document.call_args[1]["file_path"]
+    doc_path = mock_client.send_document.call_args[1]["document_path"]
     assert "README.md" in str(doc_path)
 
 

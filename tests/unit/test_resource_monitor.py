@@ -8,7 +8,7 @@ def test_resource_monitor_sampling():
     monitor.start()
 
     # Perform dummy work
-    total = sum(i * i for i in range(10000))
+    _ = sum(i * i for i in range(10000))
     time.sleep(0.35)
 
     aggregates = monitor.stop()

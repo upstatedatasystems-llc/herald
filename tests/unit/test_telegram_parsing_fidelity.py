@@ -1,4 +1,5 @@
 import pytest
+
 from herald.literal.script_generator import generate_literal_script
 from herald.telegram.bot import parse_telegram_message_directives
 

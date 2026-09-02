@@ -3,6 +3,7 @@ import logging
 import os
 import uuid
 from datetime import UTC, datetime
+
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
@@ -21,12 +22,10 @@ from herald.extraction.url_extractor import (
 from herald.gemini.client import (
     GeminiError,
     audit_research_script,
-    audit_script_fidelity,
     generate_grounded_research,
     generate_podcast_script,
     normalize_research_dossier,
     repair_research_script,
-    repair_script_fidelity,
 )
 from herald.literal.script_generator import generate_literal_script
 from herald.services.eta_calculator import calculate_script_duration
@@ -51,7 +50,6 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     Transport-neutral pipeline entry point.
     Handles extraction, normalization, deduplication, script generation, and queuing.
     """
-    t_start = datetime.now(UTC)
     raw_mode = (req.request_mode or "").lower().strip()
     if not raw_mode:
         raw_mode = settings.get_default_mode()

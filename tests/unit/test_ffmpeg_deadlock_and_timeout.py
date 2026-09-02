@@ -1,8 +1,8 @@
+import subprocess
 import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import subprocess
 
 import pytest
 
@@ -95,7 +95,7 @@ def test_join_and_normalize_audio_reaches_subprocess(tmp_path):
          patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val), \
          patch("herald.audio.ffmpeg_builder.embed_id3_metadata"):
 
-        res = join_and_normalize_audio(
+        join_and_normalize_audio(
             chunk_paths=[chunk],
             output_mp3_path=out_mp3,
             episode_title="Test Subprocess",
@@ -135,8 +135,7 @@ def test_simultaneous_encodes_obey_concurrency_limit(tmp_path):
         out_path.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00HERALD_TEST_AUDIO_DATA_1234567890")
         with count_lock:
             active_count += 1
-            if active_count > max_active:
-                max_active = active_count
+            max_active = max(max_active, active_count)
         time.sleep(0.05)
         with count_lock:
             active_count -= 1

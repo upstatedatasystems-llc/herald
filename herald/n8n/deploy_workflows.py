@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 from herald.n8n.credential_rehydrator import (
     rehydrate_workflow_credentials,

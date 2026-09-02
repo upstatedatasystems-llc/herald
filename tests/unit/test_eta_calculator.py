@@ -29,7 +29,6 @@ def test_eta_single_episode(db_session):
 
 def test_eta_excludes_jobs_behind(db_session):
     t0 = datetime.now(UTC) - timedelta(minutes=10)
-    t1 = datetime.now(UTC) - timedelta(minutes=5)
     t2 = datetime.now(UTC)  # Target job
     t3 = datetime.now(UTC) + timedelta(minutes=5)  # Job created after target job
 

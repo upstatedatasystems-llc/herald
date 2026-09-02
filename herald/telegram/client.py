@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+
 import httpx
 
 from herald.config import settings
@@ -10,7 +11,6 @@ logger = logging.getLogger("herald.telegram.client")
 
 class TelegramAPIError(Exception):
     """Exception raised when Telegram Bot API returns an error."""
-    pass
 
 
 class TelegramClient:

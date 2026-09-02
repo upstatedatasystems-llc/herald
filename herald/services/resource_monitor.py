@@ -119,7 +119,6 @@ class TTSResourceMonitor:
 
     def _sample_loop(self):
         last_active_jiffies, last_total_jiffies = _read_cpu_times()
-        last_time = time.monotonic()
 
         while self._running:
             time.sleep(self.interval_seconds)
@@ -128,9 +127,6 @@ class TTSResourceMonitor:
 
             try:
                 now = time.monotonic()
-                dt = max(0.001, now - last_time)
-                last_time = now
-
                 cur_active, cur_total = _read_cpu_times()
                 cpu_pct = 0.0
                 if cur_total > last_total_jiffies > 0:

@@ -1,7 +1,5 @@
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import IntegrityError
 
 from herald.core.models import HeraldRequest
 from herald.core.pipeline import process_herald_request
@@ -22,7 +20,7 @@ def test_telegram_unique_constraint_and_race_handling(monkeypatch):
         transport_message_id="1001",
         requester_identity="telegram:888",
         delivery_target="999",
-        mode="literal",
+        request_mode="literal",
         source_text="Test source message for idempotency validation.",
     )
 
@@ -36,7 +34,7 @@ def test_telegram_unique_constraint_and_race_handling(monkeypatch):
             transport_message_id="1001",
             requester_identity="telegram:888",
             delivery_target="999",
-            mode="literal",
+            request_mode="literal",
             source_text="Test source message for idempotency validation.",
         )
         res2 = process_herald_request(db, req2)

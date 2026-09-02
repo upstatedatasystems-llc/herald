@@ -163,3 +163,85 @@ def test_postgres_stale_recovery_does_not_steal_active_lease(pg_session_factory)
         assert active_job.claimed_by == "worker-active"
     finally:
         Session1.close()
+
+
+def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp_path):
+    """
+    Prove that two simultaneous PostgreSQL sessions using deliver_pending_telegram_jobs
+    with SELECT ... FOR UPDATE SKIP LOCKED cannot claim or send the same job, and jobs
+    are distributed cleanly without duplicate delivery.
+    """
+    import threading
+    from unittest.mock import MagicMock
+
+    from herald.telegram.client import TelegramClient
+    from herald.telegram.delivery import deliver_pending_telegram_jobs
+
+    Session1 = pg_session_factory()
+    Session2 = pg_session_factory()
+
+    audio_file1 = tmp_path / "pg_ep1.mp3"
+    audio_file2 = tmp_path / "pg_ep2.mp3"
+    audio_file1.write_bytes(b"dummy mp3 1")
+    audio_file2.write_bytes(b"dummy mp3 2")
+
+    try:
+        j1 = PodcastJob(
+            transport="telegram",
+            telegram_chat_id=8881,
+            telegram_message_id=1,
+            request_mode="literal",
+            source_hash="pg-tg-hash-1",
+            source_text="TG delivery test 1",
+            local_audio_path=str(audio_file1),
+            audio_duration_seconds=30,
+            status=JobState.AUDIO_READY.value,
+        )
+        j2 = PodcastJob(
+            transport="telegram",
+            telegram_chat_id=8882,
+            telegram_message_id=2,
+            request_mode="literal",
+            source_hash="pg-tg-hash-2",
+            source_text="TG delivery test 2",
+            local_audio_path=str(audio_file2),
+            audio_duration_seconds=40,
+            status=JobState.AUDIO_READY.value,
+        )
+        Session1.add_all([j1, j2])
+        Session1.commit()
+
+        sent_chats = []
+        lock = threading.Lock()
+
+        mock_client = MagicMock(spec=TelegramClient)
+        mock_client.is_configured = True
+
+        def mock_send(chat_id, audio_path, **kwargs):
+            with lock:
+                sent_chats.append(chat_id)
+            return {"message_id": 999}
+
+        mock_client.send_audio.side_effect = mock_send
+
+        # Concurrently execute deliver_pending_telegram_jobs across two threads with separate sessions
+        t1 = threading.Thread(target=deliver_pending_telegram_jobs, args=(Session1, mock_client))
+        t2 = threading.Thread(target=deliver_pending_telegram_jobs, args=(Session2, mock_client))
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Verify exactly 2 deliveries occurred and no duplicate calls
+        assert len(sent_chats) == 2
+        assert sorted(sent_chats) == [8881, 8882]
+
+        # Verify DB state
+        Session1.expire_all()
+        jobs = Session1.query(PodcastJob).filter(PodcastJob.status == JobState.COMPLETE.value).all()
+        assert len(jobs) == 2
+    finally:
+        Session1.close()
+        Session2.close()
+

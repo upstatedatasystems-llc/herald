@@ -187,7 +187,6 @@ def synthesize_single_chunk(
                 db_chunk.attempt_count += 1
                 db.commit()
 
-                chunk_attempt = db_chunk.attempt_count
                 max_attempts = 2
                 chunk_success = False
                 last_error: Exception | None = None

@@ -1,7 +1,8 @@
 import importlib.util
 import pathlib
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 
 def test_migration_downgrade_fails_safely_when_telegram_rows_exist(monkeypatch):

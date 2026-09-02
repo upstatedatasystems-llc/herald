@@ -1,9 +1,8 @@
 from datetime import UTC, datetime, timedelta
-import pytest
-from herald.db.models import TelegramPairingCode, TelegramUser
+
+from herald.db.models import TelegramPairingCode
 from herald.telegram.auth import (
     generate_pairing_code,
-    get_or_create_active_pairing_code,
     get_paired_owner,
     has_owner,
     is_user_authorized,

@@ -6,13 +6,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
-logger = logging.getLogger("herald.api")
 
 from herald.audio.artifact_generator import (
     ensure_details_artifact,
@@ -47,7 +46,7 @@ from herald.gemini.client import (
     repair_script_fidelity,
 )
 from herald.literal.script_generator import generate_literal_script
-from herald.services.drive_service import build_user_facing_drive_filename, sanitize_filename_title
+from herald.services.drive_service import build_user_facing_drive_filename
 from herald.services.email_formatter import (
     format_acknowledgment_email,
     format_completion_email,
@@ -58,6 +57,8 @@ from herald.services.performance_metrics import (
     record_stage_metric,
 )
 from herald.tts.kokoro_client import KokoroClient
+
+logger = logging.getLogger("herald.api")
 
 app = FastAPI(
     title="Herald Email-to-Podcast Automation API",
@@ -1158,7 +1159,6 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             "needs_research_upload": False,
             "needs_research_notes_upload": False,
             "needs_upload": needs_upload,
-            "needs_email": needs_email,
             "action": action,
         },
     }

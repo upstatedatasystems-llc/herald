@@ -1,20 +1,21 @@
 import threading
-from datetime import UTC, datetime
 from unittest.mock import MagicMock
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.db.models import Base, JobState, PodcastJob
+from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs
 
 
-def test_concurrent_delivery_workers_cannot_double_deliver(tmp_path):
+def test_telegram_delivery_claiming_and_loop_processing(tmp_path):
     """
-    Test Requirement 5:
-    Ensure multiple delivery workers concurrently processing ready jobs
-    claim distinct jobs atomically without double-delivering the same job.
+    Test delivery claiming semantics:
+    Ensure deliver_pending_telegram_jobs claims eligible jobs one-by-one,
+    transitions them to DELIVERING, and delivers all ready jobs without duplication.
     """
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine)
 
@@ -68,7 +69,7 @@ def test_concurrent_delivery_workers_cannot_double_deliver(tmp_path):
     sent_job_ids = []
     lock = threading.Lock()
 
-    mock_client = MagicMock()
+    mock_client = MagicMock(spec=TelegramClient)
     mock_client.is_configured = True
 
     def mock_send_audio(chat_id, audio_path, **kwargs):
@@ -78,7 +79,6 @@ def test_concurrent_delivery_workers_cannot_double_deliver(tmp_path):
 
     mock_client.send_audio.side_effect = mock_send_audio
 
-    # Run delivery
     with TestingSession() as db:
         delivered = deliver_pending_telegram_jobs(db, mock_client)
         assert delivered == 3
@@ -88,3 +88,4 @@ def test_concurrent_delivery_workers_cannot_double_deliver(tmp_path):
         assert len(completed) == 3
         # Each distinct chat received exactly one audio file
         assert sorted(sent_job_ids) == [101, 102, 103]
+        assert len(sent_job_ids) == 3

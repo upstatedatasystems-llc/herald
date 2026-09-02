@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
 from unittest.mock import MagicMock
-import pytest
+
 from herald.db.models import JobState, PodcastJob
 from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs, deliver_single_job

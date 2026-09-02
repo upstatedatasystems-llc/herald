@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -45,12 +46,10 @@ def test_telegram_offset_persistence_and_poison_update_quarantine(monkeypatch):
     monkeypatch.setattr(bot_mod, "TelegramClient", lambda: mock_client)
 
     # Mock handle_telegram_command to fail specifically on /broken
-    original_handle_command = bot_mod.handle_telegram_command
     def mock_handle_command(db, client, message, cmd, args):
         if cmd == "broken":
             raise RuntimeError("Poison pill command failure!")
         # For other commands, do nothing
-        pass
 
     monkeypatch.setattr(bot_mod, "handle_telegram_command", mock_handle_command)
     monkeypatch.setattr(bot_mod, "deliver_pending_telegram_jobs", lambda db, client: 0)

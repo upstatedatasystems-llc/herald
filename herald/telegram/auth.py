@@ -1,6 +1,7 @@
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+
 from sqlalchemy.orm import Session
 
 from herald.config import settings
@@ -13,7 +14,7 @@ def get_paired_owner(db: Session) -> TelegramUser | None:
     """Return the active owner of this Herald instance, or None if unowned."""
     return (
         db.query(TelegramUser)
-        .filter(TelegramUser.role == "owner", TelegramUser.is_active == True)
+        .filter(TelegramUser.role == "owner", TelegramUser.is_active.is_(True))
         .first()
     )
 
@@ -55,7 +56,7 @@ def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15)
     active = (
         db.query(TelegramPairingCode)
         .filter(
-            TelegramPairingCode.is_used == False,
+            TelegramPairingCode.is_used.is_(False),
             TelegramPairingCode.expires_at > now,
         )
         .order_by(TelegramPairingCode.created_at.desc())
@@ -93,7 +94,7 @@ def verify_and_claim_pairing_code(
         db.query(TelegramPairingCode)
         .filter(
             TelegramPairingCode.code == clean_code,
-            TelegramPairingCode.is_used == False,
+            TelegramPairingCode.is_used.is_(False),
             TelegramPairingCode.expires_at > now,
         )
         .first()
@@ -109,7 +110,7 @@ def verify_and_claim_pairing_code(
 
     # Invalidate all pending codes
     db.query(TelegramPairingCode).filter(
-        TelegramPairingCode.is_used == False
+        TelegramPairingCode.is_used.is_(False)
     ).update({"is_used": True})
 
     # Save or update owner
@@ -168,7 +169,7 @@ def is_user_authorized(db: Session, user_id: int | str, chat_id: int | str | Non
         db.query(TelegramUser)
         .filter(
             TelegramUser.telegram_user_id == uid_int,
-            TelegramUser.is_active == True,
+            TelegramUser.is_active.is_(True),
         )
         .first()
     )

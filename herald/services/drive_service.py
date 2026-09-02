@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def sanitize_filename_title(title: str) -> str:
@@ -25,7 +25,7 @@ def build_user_facing_drive_filename(
     Example: The Future of AI 8-11-26 Standard.mp3
     """
     sanitized_title = sanitize_filename_title(title)
-    dt = created_at or datetime.now(timezone.utc)
+    dt = created_at or datetime.now(UTC)
     date_str = f"{dt.month}-{dt.day}-{dt.strftime('%y')}"
     safe_mode = (mode or "Standard").strip().title()
     ext = extension.lstrip(".")

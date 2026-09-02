@@ -1,5 +1,10 @@
 import re
-from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks, sanitize_unicode
+
+from herald.extraction.source_cleaner import (
+    clean_source_text,
+    deduplicate_source_blocks,
+    sanitize_unicode,
+)
 from herald.gemini.schema import PodcastScriptResponse, PodcastSegment
 
 

@@ -25,8 +25,8 @@ db_conn.SessionLocal = TestingSessionLocal
 
 Base.metadata.create_all(bind=test_engine)
 
-from apps.api.main import app
-from herald.db.connection import get_db
+from apps.api.main import app  # noqa: E402
+from herald.db.connection import get_db  # noqa: E402
 
 
 @pytest.fixture(scope="function", autouse=True)

@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 
 
 def test_setup_existing_env_migration_preserves_unrelated_and_infers_gemini(tmp_path):

@@ -1,9 +1,13 @@
 from unittest.mock import MagicMock
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.db.models import Base
-from herald.telegram.auth import get_or_create_active_pairing_code, verify_and_claim_pairing_code, is_user_authorized
+from herald.telegram.auth import (
+    get_or_create_active_pairing_code,
+    is_user_authorized,
+)
 from herald.telegram.bot import handle_telegram_command
 
 

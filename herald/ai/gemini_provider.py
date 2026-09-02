@@ -1,14 +1,13 @@
 import logging
 import time
-from datetime import datetime, UTC
 from typing import Any
+
 import httpx
 
 from herald.ai.base import AIProvider
 from herald.config import settings
 from herald.gemini.client import (
     GeminiAuthError,
-    GeminiError,
     generate_podcast_script,
 )
 from herald.gemini.schema import PodcastScriptResponse

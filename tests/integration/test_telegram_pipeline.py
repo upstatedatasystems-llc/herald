@@ -1,10 +1,13 @@
-from pathlib import Path
 from unittest.mock import MagicMock
-import pytest
+
 from apps.worker import main as worker_main
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob, TelegramUser
-from herald.telegram.auth import generate_pairing_code, get_paired_owner, verify_and_claim_pairing_code
+from herald.telegram.auth import (
+    generate_pairing_code,
+    get_paired_owner,
+    verify_and_claim_pairing_code,
+)
 from herald.telegram.bot import process_telegram_update
 from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs

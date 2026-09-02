@@ -1,4 +1,3 @@
-import pytest
 from herald.config import Settings
 from herald.gemini.schema import PodcastScriptResponse
 from herald.literal.script_generator import (
