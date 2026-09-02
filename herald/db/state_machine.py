@@ -62,6 +62,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     JobState.AUDIO_READY.value: {
         JobState.UPLOADING.value,
+        JobState.DELIVERING.value,
+        JobState.COMPLETE.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,

@@ -193,6 +193,38 @@ services:
     networks:
       - herald-backend
 
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: herald-telegram-bot
+    restart: unless-stopped
+    command: ["python", "-m", "apps.telegram_bot.main"]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      herald-migration:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      HERALD_WORK_DIR: /data/herald
+    volumes:
+      - work_data:/data/herald
+    networks:
+      - herald-backend
+
 networks:
   herald-backend:
     driver: bridge

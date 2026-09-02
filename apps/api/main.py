@@ -46,6 +46,7 @@ from herald.gemini.client import (
     repair_research_script,
     repair_script_fidelity,
 )
+from herald.literal.script_generator import generate_literal_script
 from herald.services.drive_service import build_user_facing_drive_filename, sanitize_filename_title
 from herald.services.email_formatter import (
     format_acknowledgment_email,
@@ -732,7 +733,26 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
     try:
         req_mode = (job.request_mode or "standard").lower()
 
-        if req_mode == "research":
+        if req_mode == "literal":
+            if not job.script_json:
+                t0 = datetime.now(UTC)
+                script = generate_literal_script(
+                    source_text=job.source_text,
+                    source_title=job.custom_title,
+                    max_segment_chars=job.tts_chunk_chars or 1000,
+                )
+                t1 = datetime.now(UTC)
+                job.script_json = script.model_dump()
+                db.commit()
+                record_stage_metric(
+                    job_id=job.id,
+                    stage="LITERAL_SCRIPT",
+                    started_at=t0,
+                    finished_at=t1,
+                    status="success",
+                    input_chars=len(job.source_text or ""),
+                )
+        elif req_mode == "research":
             # Stage 1a: Grounded Research Call using GEMINI_RESEARCH_MODEL
             if not job.research_grounding_json:
                 logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")

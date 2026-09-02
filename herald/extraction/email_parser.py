@@ -47,6 +47,7 @@ class EmailParseResult:
 
 
 BASE_SUBJECT_PATTERNS = [
+    ("podcast: literal", RequestMode.LITERAL, None),
     ("podcast: research low", RequestMode.RESEARCH, "low"),
     ("podcast: research medium", RequestMode.RESEARCH, "medium"),
     ("podcast: research high", RequestMode.RESEARCH, "high"),
@@ -57,6 +58,7 @@ BASE_SUBJECT_PATTERNS = [
 ]
 
 EXACT_SUBJECT_MAP = {
+    "podcast: literal": (RequestMode.LITERAL, None),
     "podcast: brief": (RequestMode.BRIEF, None),
     "podcast: standard": (RequestMode.STANDARD, None),
     "podcast: detailed": (RequestMode.RESEARCH, "medium"),

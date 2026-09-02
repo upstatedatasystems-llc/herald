@@ -89,6 +89,26 @@ class Settings(BaseSettings):
     EMAIL_ALLOWED_SENDERS: str = ""
     LOCAL_COMPLETE_RETENTION_HOURS: int = 48
 
+    # Telegram Bot
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_POLL_TIMEOUT_SECONDS: int = 30
+    TELEGRAM_ALLOWED_USER_IDS: str = ""
+    TELEGRAM_MAX_AUDIO_BYTES: int = 50 * 1024 * 1024  # 50MB Bot API upload limit
+    AI_PROVIDER: str = "gemini"  # "gemini" or "none"
+
+    def is_ai_configured(self) -> bool:
+        prov = (self.AI_PROVIDER or "").lower().strip()
+        if prov in ("none", "literal", ""):
+            return False
+        if prov == "gemini":
+            return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
+        return False
+
+    def get_default_mode(self) -> str:
+        if self.is_ai_configured():
+            return "standard"
+        return "literal"
+
     def get_database_url(self) -> str:
         if self.DATABASE_URL:
             return self.DATABASE_URL
@@ -108,10 +128,12 @@ class Settings(BaseSettings):
         if self.HERALD_ENV.lower() == "production":
             if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
                 return False
-            if not self.EMAIL_ALLOWED_SENDERS.strip():
-                return False
-            if not self.GOOGLE_DRIVE_FOLDER_ID or not self.GOOGLE_DRIVE_FOLDER_ID.strip():
-                return False
+            # When running telegram-only, email and drive are not required
+            if not self.TELEGRAM_BOT_TOKEN:
+                if not self.EMAIL_ALLOWED_SENDERS.strip():
+                    return False
+                if not self.GOOGLE_DRIVE_FOLDER_ID or not self.GOOGLE_DRIVE_FOLDER_ID.strip():
+                    return False
         return True
 
     def get_concurrency_config(self):
