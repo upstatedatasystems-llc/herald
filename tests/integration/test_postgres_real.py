@@ -168,8 +168,8 @@ def test_postgres_stale_recovery_does_not_steal_active_lease(pg_session_factory)
 def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp_path):
     """
     Prove that two simultaneous PostgreSQL sessions using deliver_pending_telegram_jobs
-    with SELECT ... FOR UPDATE SKIP LOCKED cannot claim or send the same job, and jobs
-    are distributed cleanly without duplicate delivery.
+    with SELECT ... FOR UPDATE SKIP LOCKED and barrier synchronization cannot claim or send
+    the same job, and jobs are distributed cleanly without duplicate delivery.
     """
     import threading
     from unittest.mock import MagicMock
@@ -186,6 +186,7 @@ def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp
     audio_file2.write_bytes(b"dummy mp3 2")
 
     try:
+        # Case A: 1 single ready job, 2 competing workers with barrier sync
         j1 = PodcastJob(
             transport="telegram",
             telegram_chat_id=8881,
@@ -197,18 +198,7 @@ def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp
             audio_duration_seconds=30,
             status=JobState.AUDIO_READY.value,
         )
-        j2 = PodcastJob(
-            transport="telegram",
-            telegram_chat_id=8882,
-            telegram_message_id=2,
-            request_mode="literal",
-            source_hash="pg-tg-hash-2",
-            source_text="TG delivery test 2",
-            local_audio_path=str(audio_file2),
-            audio_duration_seconds=40,
-            status=JobState.AUDIO_READY.value,
-        )
-        Session1.add_all([j1, j2])
+        Session1.add(j1)
         Session1.commit()
 
         sent_chats = []
@@ -224,18 +214,62 @@ def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp
 
         mock_client.send_audio.side_effect = mock_send
 
-        # Concurrently execute deliver_pending_telegram_jobs across two threads with separate sessions
-        t1 = threading.Thread(target=deliver_pending_telegram_jobs, args=(Session1, mock_client))
-        t2 = threading.Thread(target=deliver_pending_telegram_jobs, args=(Session2, mock_client))
+        barrier = threading.Barrier(2)
+        results = {}
+
+        def worker_task(session, name):
+            barrier.wait()
+            cnt = deliver_pending_telegram_jobs(session, mock_client)
+            results[name] = cnt
+
+        t1 = threading.Thread(target=worker_task, args=(Session1, "w1"))
+        t2 = threading.Thread(target=worker_task, args=(Session2, "w2"))
 
         t1.start()
         t2.start()
         t1.join()
         t2.join()
 
-        # Verify exactly 2 deliveries occurred and no duplicate calls
-        assert len(sent_chats) == 2
-        assert sorted(sent_chats) == [8881, 8882]
+        # Exactly one worker claimed the single job
+        assert len(sent_chats) == 1
+        assert sent_chats == [8881]
+        assert results["w1"] + results["w2"] == 1
+
+        # Case B: Multi-job distribution
+        sent_chats.clear()
+        results.clear()
+
+        j2 = PodcastJob(
+            transport="telegram",
+            telegram_chat_id=8882,
+            telegram_message_id=2,
+            request_mode="literal",
+            source_hash="pg-tg-hash-2",
+            source_text="TG delivery test 2",
+            local_audio_path=str(audio_file2),
+            audio_duration_seconds=40,
+            status=JobState.AUDIO_READY.value,
+        )
+        Session1.add(j2)
+        Session1.commit()
+
+        barrier2 = threading.Barrier(2)
+
+        def worker_task2(session, name):
+            barrier2.wait()
+            cnt = deliver_pending_telegram_jobs(session, mock_client)
+            results[name] = cnt
+
+        t3 = threading.Thread(target=worker_task2, args=(Session1, "w1"))
+        t4 = threading.Thread(target=worker_task2, args=(Session2, "w2"))
+
+        t3.start()
+        t4.start()
+        t3.join()
+        t4.join()
+
+        assert len(sent_chats) == 1
+        assert sent_chats == [8882]
 
         # Verify DB state
         Session1.expire_all()

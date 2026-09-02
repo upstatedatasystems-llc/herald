@@ -187,6 +187,8 @@ def is_user_authorized(db: Session, user_id: int | str, chat_id: int | str | Non
             if x.strip().isdigit()
         ]
         if uid_int in allowed_ids:
+            if cid_int is not None and cid_int != uid_int:
+                return False
             return True
 
     return False

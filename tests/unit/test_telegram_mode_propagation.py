@@ -1,9 +1,9 @@
 from unittest.mock import MagicMock
-
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from herald.ai.factory import reset_ai_provider
 from herald.config import settings
 from herald.db.models import Base, PodcastJob
 from herald.gemini.schema import PodcastScriptResponse, PodcastSegment
@@ -26,7 +26,7 @@ def db_session():
 
 def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypatch):
     """
-    Test Requirement 1:
+    Test Requirement 1 & 9:
     Verify that Telegram messages containing mode directives propagate correctly through
     process_telegram_update -> handle_telegram_content_message -> HeraldRequest -> PodcastJob:
     - literal -> request_mode == 'literal'
@@ -36,6 +36,8 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
     - research medium -> request_mode == 'research', research_depth == 'medium'
     - research high -> request_mode == 'research', research_depth == 'high'
     """
+    reset_ai_provider()
+
     # 1. Authorize owner
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
@@ -59,10 +61,9 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
         "research_sources": [],
     }
 
-    monkeypatch.setattr(
-        "herald.gemini.client.generate_podcast_script",
-        lambda *args, **kwargs: fake_script,
-    )
+    mock_gen_script = lambda *args, **kwargs: fake_script
+    monkeypatch.setattr("herald.gemini.client.generate_podcast_script", mock_gen_script)
+    monkeypatch.setattr("herald.ai.gemini_provider.generate_podcast_script", mock_gen_script)
     monkeypatch.setattr(
         "herald.gemini.client.generate_grounded_research",
         lambda *args, **kwargs: {"raw_text": "evidence", "research_sources": []},
@@ -100,3 +101,5 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
         assert job is not None, f"Job was not created for message_id {msg_id}"
         assert job.request_mode == expected_mode, f"Expected request_mode '{expected_mode}', got '{job.request_mode}'"
         assert job.research_depth == expected_depth, f"Expected research_depth '{expected_depth}', got '{job.research_depth}'"
+
+    reset_ai_provider()
