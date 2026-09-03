@@ -28,7 +28,19 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
     # Check ai_interactions first for authoritative evidence
     if hasattr(job, "ai_interactions") and job.ai_interactions:
         first_ai = job.ai_interactions[0]
-        return first_ai.provider.capitalize(), first_ai.model
+        p_low = str(first_ai.provider or "").lower().strip()
+        provider_display_map = {
+            "gemini": "Gemini",
+            "groq": "Groq",
+            "openrouter": "OpenRouter",
+            "mistral": "Mistral",
+            "cloudflare": "Cloudflare Workers AI",
+            "anthropic": "Anthropic",
+            "openai": "OpenAI",
+            "ollama": "Ollama",
+        }
+        disp_name = provider_display_map.get(p_low, p_low.capitalize())
+        return disp_name, first_ai.model
 
     # Brief / Standard fallback to active AIProvider
     from herald.ai.factory import get_ai_provider

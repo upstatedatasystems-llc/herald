@@ -93,16 +93,25 @@ class Settings(BaseSettings):
     TELEGRAM_ALLOWED_USER_IDS: str = ""
     TELEGRAM_MAX_AUDIO_BYTES: int = 50 * 1024 * 1024  # 50MB Bot API upload limit
     # AI Providers Configuration
-    AI_PROVIDER: str = "gemini"  # "gemini", "anthropic", "openai", "groq", "ollama", "none"
+    AI_PROVIDER: str = "gemini"  # "gemini", "groq", "openrouter", "mistral", "cloudflare", "none", "anthropic", "openai", "ollama"
+    RESEARCH_PROVIDER: str = "gemini"  # Dedicated research provider
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "meta-llama/llama-3.3-70b-instruct"
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_MODEL: str = "mistral-large-latest"
+    CLOUDFLARE_API_TOKEN: str = ""
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_MODEL: str = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-3-7-sonnet-20250219"
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o"
     OPENAI_API_BASE: str = "https://api.openai.com/v1"
-    GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2"
+    DIAGNOSTICS_MAX_BYTES: int = 8 * 1024 * 1024
 
     def is_ai_configured(self) -> bool:
         prov = (self.AI_PROVIDER or "").lower().strip()
@@ -110,14 +119,31 @@ class Settings(BaseSettings):
             return False
         if prov == "gemini":
             return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
+        if prov == "groq":
+            return bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip())
+        if prov == "openrouter":
+            return bool(self.OPENROUTER_API_KEY and self.OPENROUTER_API_KEY.strip())
+        if prov == "mistral":
+            return bool(self.MISTRAL_API_KEY and self.MISTRAL_API_KEY.strip())
+        if prov in ("cloudflare", "cloudflare_workers_ai"):
+            return bool(
+                self.CLOUDFLARE_API_TOKEN
+                and self.CLOUDFLARE_API_TOKEN.strip()
+                and self.CLOUDFLARE_ACCOUNT_ID
+                and self.CLOUDFLARE_ACCOUNT_ID.strip()
+            )
         if prov == "anthropic":
             return bool(self.ANTHROPIC_API_KEY and self.ANTHROPIC_API_KEY.strip())
         if prov == "openai":
             return bool(self.OPENAI_API_KEY and self.OPENAI_API_KEY.strip())
-        if prov == "groq":
-            return bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip())
         if prov == "ollama":
             return bool(self.OLLAMA_BASE_URL and self.OLLAMA_BASE_URL.strip())
+        return False
+
+    def is_research_configured(self) -> bool:
+        r_prov = (self.RESEARCH_PROVIDER or "").lower().strip()
+        if r_prov == "gemini":
+            return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
         return False
 
     def get_default_mode(self) -> str:

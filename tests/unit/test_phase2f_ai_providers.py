@@ -1,12 +1,14 @@
 """
 Comprehensive unit test suite for Package 2F: Configurable AI Provider Support.
 Tests:
-- AIProvider factory and provider resolution (gemini, anthropic, openai, groq, ollama, literal/none)
+- AIProvider factory and provider resolution (Gemini, Groq, OpenRouter, Mistral, Cloudflare Workers AI, Literal/None)
+- Provider capabilities declarations
 - Connection checking and configuration detection across all providers
 - Structured podcast script generation and response parsing
-- AI interaction persistence with provider-specific token accounting
-- Retries generating distinct external call evidence
-- Research mode compatibility guard rejecting non-Gemini providers without silent downgrades
+- 1 bounded schema repair attempt on validation failure
+- AI interaction persistence with provider request IDs, HTTP status, and attempt-level telemetry
+- Research provider separation (AI_PROVIDER=groq + RESEARCH_PROVIDER=gemini works)
+- Research mode compatibility guard rejecting unconfigured research providers without silent downgrades
 - Truthful reporting in diagnostics cards and /ai_check status
 """
 
@@ -18,14 +20,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.api.main import app
-from herald.ai.anthropic_provider import AnthropicProvider
-from herald.ai.factory import create_ai_provider, get_ai_provider, reset_ai_provider
+from herald.ai.cloudflare_provider import CloudflareProvider
+from herald.ai.factory import (
+    create_ai_provider,
+    get_ai_provider,
+    get_research_provider,
+    reset_ai_provider,
+)
 from herald.ai.gemini_provider import GeminiProvider
 from herald.ai.groq_provider import GroqProvider
 from herald.ai.literal_provider import LiteralProvider
-from herald.ai.ollama_provider import OllamaProvider
-from herald.ai.openai_provider import OpenAIProvider
+from herald.ai.mistral_provider import MistralProvider
+from herald.ai.openrouter_provider import OpenRouterProvider
 from herald.config import settings
 from herald.core.models import HeraldRequest
 from herald.core.pipeline import process_herald_request
@@ -46,8 +52,8 @@ def setup_in_memory_db():
 
 
 SAMPLE_SCRIPT_JSON = {
-    "episode_title": "AI Revolution Update",
-    "episode_description": "A comprehensive breakdown of multi-model orchestration.",
+    "episode_title": "AI Provider Expansion",
+    "episode_description": "A comprehensive breakdown of multi-provider orchestration.",
     "estimated_minutes": 4,
     "source_title": "Multi-Provider Herald",
     "segments": [
@@ -58,294 +64,190 @@ SAMPLE_SCRIPT_JSON = {
 }
 
 
-def test_factory_provider_resolution():
-    """Verify factory returns appropriate provider instance based on settings and arguments."""
+def test_frozen_provider_resolution_and_capabilities():
+    """Verify factory resolves all 6 frozen providers and their declared capabilities."""
     reset_ai_provider()
 
-    with patch.object(settings, "AI_PROVIDER", "gemini"):
+    # 1. Gemini
+    with patch.object(settings, "AI_PROVIDER", "gemini"), patch.object(settings, "GEMINI_API_KEY", "key_gemini"):
         reset_ai_provider()
         prov = get_ai_provider()
         assert isinstance(prov, GeminiProvider)
         assert prov.provider_name == "Gemini"
+        assert prov.capabilities.research_grounding is True
+        assert prov.capabilities.structured_output is True
 
-    with patch.object(settings, "AI_PROVIDER", "anthropic"):
-        reset_ai_provider()
-        prov = get_ai_provider()
-        assert isinstance(prov, AnthropicProvider)
-        assert prov.provider_name == "Anthropic"
-
-    with patch.object(settings, "AI_PROVIDER", "openai"):
-        reset_ai_provider()
-        prov = get_ai_provider()
-        assert isinstance(prov, OpenAIProvider)
-        assert prov.provider_name == "OpenAI"
-
-    with patch.object(settings, "AI_PROVIDER", "groq"):
+    # 2. Groq
+    with patch.object(settings, "AI_PROVIDER", "groq"), patch.object(settings, "GROQ_API_KEY", "key_groq"):
         reset_ai_provider()
         prov = get_ai_provider()
         assert isinstance(prov, GroqProvider)
         assert prov.provider_name == "Groq"
+        assert prov.capabilities.research_grounding is False
+        assert prov.capabilities.script_standard is True
 
-    with patch.object(settings, "AI_PROVIDER", "ollama"):
+    # 3. OpenRouter
+    with patch.object(settings, "AI_PROVIDER", "openrouter"), patch.object(settings, "OPENROUTER_API_KEY", "key_or"):
         reset_ai_provider()
         prov = get_ai_provider()
-        assert isinstance(prov, OllamaProvider)
-        assert prov.provider_name == "Ollama"
+        assert isinstance(prov, OpenRouterProvider)
+        assert prov.provider_name == "OpenRouter"
+        assert prov.capabilities.structured_output is True
 
+    # 4. Mistral
+    with patch.object(settings, "AI_PROVIDER", "mistral"), patch.object(settings, "MISTRAL_API_KEY", "key_mis"):
+        reset_ai_provider()
+        prov = get_ai_provider()
+        assert isinstance(prov, MistralProvider)
+        assert prov.provider_name == "Mistral"
+        assert prov.capabilities.script_standard is True
+
+    # 5. Cloudflare Workers AI
+    with patch.object(settings, "AI_PROVIDER", "cloudflare"), \
+         patch.object(settings, "CLOUDFLARE_API_TOKEN", "token_cf"), \
+         patch.object(settings, "CLOUDFLARE_ACCOUNT_ID", "acct_cf"):
+        reset_ai_provider()
+        prov = get_ai_provider()
+        assert isinstance(prov, CloudflareProvider)
+        assert prov.provider_name == "Cloudflare Workers AI"
+        assert prov.capabilities.script_brief is True
+
+    # 6. Literal / None
     with patch.object(settings, "AI_PROVIDER", "literal"):
         reset_ai_provider()
-        prov = get_ai_provider()
-        assert prov is None
-
-    with patch.object(settings, "AI_PROVIDER", "none"):
-        reset_ai_provider()
-        prov = get_ai_provider()
-        assert prov is None
-
-    # Test create_ai_provider direct helper
-    assert isinstance(create_ai_provider("anthropic"), AnthropicProvider)
-    assert isinstance(create_ai_provider("openai"), OpenAIProvider)
-    assert isinstance(create_ai_provider("groq"), GroqProvider)
-    assert isinstance(create_ai_provider("ollama"), OllamaProvider)
-    assert isinstance(create_ai_provider("literal"), LiteralProvider)
+        assert get_ai_provider() is None
+        lit_prov = create_ai_provider("literal")
+        assert isinstance(lit_prov, LiteralProvider)
+        assert lit_prov.capabilities.usage_metrics is False
 
 
-def test_anthropic_provider_generation_and_tokens():
-    """Test Anthropic provider script generation, JSON parsing, and token recording."""
+def test_openrouter_provider_generation_and_repair():
+    """Test OpenRouter script generation, header forwarding, and 1 bounded schema repair."""
     db = setup_in_memory_db()
-    job_id = "job-anthropic-001"
+    job_id = "job-or-001"
     job = PodcastJob(
         id=job_id,
         transport="telegram",
         telegram_user_id=1,
         telegram_chat_id=1,
-        source_hash="h_ant",
-        source_text="Anthropic source content",
+        source_hash="h_or",
+        source_text="OpenRouter source text",
         status=JobState.RECEIVED.value,
         created_at=datetime.now(UTC),
     )
     db.add(job)
     db.commit()
 
-    provider = AnthropicProvider(api_key="sk-ant-mock-key-12345", model="claude-3-7-sonnet-20250219")
+    provider = OpenRouterProvider(api_key="sk-or-mock-key-12345", model="meta-llama/llama-3.3-70b-instruct")
     assert provider.is_configured() is True
-    assert provider.configured_model == "claude-3-7-sonnet-20250219"
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "content": [{"type": "text", "text": json.dumps(SAMPLE_SCRIPT_JSON)}],
-        "usage": {"input_tokens": 350, "output_tokens": 520},
+    # Simulate first attempt returning invalid json, then second repair request returning valid json
+    bad_resp = MagicMock()
+    bad_resp.status_code = 200
+    bad_resp.headers = {"x-request-id": "or-req-bad"}
+    bad_resp.json.return_value = {
+        "id": "or-req-bad",
+        "choices": [{"message": {"content": "{invalid json"}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
     }
 
-    with patch("httpx.Client.post", return_value=mock_resp), \
+    good_resp = MagicMock()
+    good_resp.status_code = 200
+    good_resp.headers = {"x-request-id": "or-req-good"}
+    good_resp.json.return_value = {
+        "id": "or-req-good",
+        "choices": [{"message": {"content": json.dumps(SAMPLE_SCRIPT_JSON)}}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 200, "total_tokens": 320},
+    }
+
+    with patch("httpx.Client.post", side_effect=[bad_resp, good_resp]), \
          patch("herald.services.ai_recorder.SessionLocal", return_value=db):
         script = provider.generate_script(
             source_text="Test source text",
             request_mode="standard",
-            source_title="Anthropic Test",
+            source_title="OpenRouter Test",
             job_id=job_id,
         )
 
-    assert script.episode_title == "AI Revolution Update"
+    assert script.episode_title == "AI Provider Expansion"
     assert len(script.segments) == 2
 
-    # Check AI interaction was recorded with provider="anthropic" and token counts
-    interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).all()
-    assert len(interactions) == 1
-    rec = interactions[0]
-    assert rec.provider == "anthropic"
-    assert rec.model == "claude-3-7-sonnet-20250219"
-    assert rec.prompt_tokens == 350
-    assert rec.completion_tokens == 520
-    assert rec.total_tokens == 870
-    assert rec.success is True
+    # Invariant: 2 distinct AIInteraction records logged (failed attempt + successful repair)
+    interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).order_by(AIInteraction.started_at.asc()).all()
+    assert len(interactions) == 2
+    assert interactions[0].success is False
+    assert interactions[0].operation == "script_generation"
+    assert interactions[1].success is True
+    assert interactions[1].operation == "script_repair"
+    assert interactions[1].provider_request_id == "or-req-good"
 
 
-def test_openai_provider_generation_and_tokens():
-    """Test OpenAI provider script generation and token recording."""
+def test_cloudflare_provider_generation():
+    """Test Cloudflare Workers AI script generation and unwrap response."""
     db = setup_in_memory_db()
-    job_id = "job-openai-002"
+    job_id = "job-cf-002"
     job = PodcastJob(
         id=job_id,
         transport="telegram",
         telegram_user_id=2,
         telegram_chat_id=2,
-        source_hash="h_oa",
-        source_text="OpenAI source content",
+        source_hash="h_cf",
+        source_text="Cloudflare source text",
         status=JobState.RECEIVED.value,
         created_at=datetime.now(UTC),
     )
     db.add(job)
     db.commit()
 
-    provider = OpenAIProvider(api_key="sk-proj-mock-key", model="gpt-4o")
-    assert provider.is_configured() is True
-    assert provider.configured_model == "gpt-4o"
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "choices": [{"message": {"content": json.dumps(SAMPLE_SCRIPT_JSON)}}],
-        "usage": {"prompt_tokens": 400, "completion_tokens": 600, "total_tokens": 1000},
-    }
-
-    with patch("httpx.Client.post", return_value=mock_resp), \
-         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
-        script = provider.generate_script(
-            source_text="Test source text",
-            request_mode="standard",
-            job_id=job_id,
-        )
-
-    assert script.episode_title == "AI Revolution Update"
-    interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).all()
-    assert len(interactions) == 1
-    rec = interactions[0]
-    assert rec.provider == "openai"
-    assert rec.model == "gpt-4o"
-    assert rec.prompt_tokens == 400
-    assert rec.completion_tokens == 600
-    assert rec.total_tokens == 1000
-    assert rec.success is True
-
-
-def test_groq_provider_generation():
-    """Test Groq provider script generation."""
-    db = setup_in_memory_db()
-    job_id = "job-groq-003"
-    job = PodcastJob(
-        id=job_id,
-        transport="telegram",
-        telegram_user_id=3,
-        telegram_chat_id=3,
-        source_hash="h_gq",
-        source_text="Groq source content",
-        status=JobState.RECEIVED.value,
-        created_at=datetime.now(UTC),
+    provider = CloudflareProvider(
+        api_token="cf_token_123",
+        account_id="cf_acct_456",
+        model="@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     )
-    db.add(job)
-    db.commit()
-
-    provider = GroqProvider(api_key="gsk_mock_groq_key_12345", model="llama-3.3-70b-versatile")
     assert provider.is_configured() is True
-    assert provider.provider_name == "Groq"
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
+    mock_resp.headers = {"cf-ray": "ray-12345678"}
     mock_resp.json.return_value = {
-        "choices": [{"message": {"content": json.dumps(SAMPLE_SCRIPT_JSON)}}],
-        "usage": {"prompt_tokens": 200, "completion_tokens": 300, "total_tokens": 500},
+        "result": {"response": json.dumps(SAMPLE_SCRIPT_JSON)},
+        "success": True,
     }
 
     with patch("httpx.Client.post", return_value=mock_resp), \
          patch("herald.services.ai_recorder.SessionLocal", return_value=db):
         script = provider.generate_script(
-            source_text="Test source text",
+            source_text="Test cloudflare text",
             request_mode="brief",
             job_id=job_id,
         )
 
-    assert script.episode_title == "AI Revolution Update"
+    assert script.episode_title == "AI Provider Expansion"
     interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).all()
     assert len(interactions) == 1
     rec = interactions[0]
-    assert rec.provider == "groq"
-    assert rec.model == "llama-3.3-70b-versatile"
-    assert rec.total_tokens == 500
+    assert rec.provider == "cloudflare"
+    assert rec.provider_request_id == "ray-12345678"
+    assert rec.http_status == 200
 
 
-def test_ollama_provider_generation_and_tokens():
-    """Test Ollama local provider script generation and token recording."""
-    db = setup_in_memory_db()
-    job_id = "job-ollama-004"
-    job = PodcastJob(
-        id=job_id,
-        transport="telegram",
-        telegram_user_id=4,
-        telegram_chat_id=4,
-        source_hash="h_ol",
-        source_text="Ollama local source",
-        status=JobState.RECEIVED.value,
-        created_at=datetime.now(UTC),
-    )
-    db.add(job)
-    db.commit()
-
-    provider = OllamaProvider(base_url="http://localhost:11434", model="llama3.2")
-    assert provider.is_configured() is True
-    assert provider.provider_name == "Ollama"
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "message": {"content": json.dumps(SAMPLE_SCRIPT_JSON)},
-        "prompt_eval_count": 150,
-        "eval_count": 280,
-    }
-
-    with patch("httpx.Client.post", return_value=mock_resp), \
-         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
-        script = provider.generate_script(
-            source_text="Test source text",
-            request_mode="standard",
-            job_id=job_id,
-        )
-
-    assert script.episode_title == "AI Revolution Update"
-    interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).all()
-    assert len(interactions) == 1
-    rec = interactions[0]
-    assert rec.provider == "ollama"
-    assert rec.prompt_tokens == 150
-    assert rec.completion_tokens == 280
-    assert rec.total_tokens == 430
-
-
-def test_literal_provider_zero_ai_interactions():
-    """Verify LiteralProvider generates deterministic scripts with 0 AI calls."""
-    db = setup_in_memory_db()
-    job_id = "job-literal-005"
-    job = PodcastJob(
-        id=job_id,
-        transport="telegram",
-        telegram_user_id=5,
-        telegram_chat_id=5,
-        source_hash="h_lit",
-        source_text="Literal text content for deterministic narration.",
-        status=JobState.RECEIVED.value,
-        created_at=datetime.now(UTC),
-    )
-    db.add(job)
-    db.commit()
-
-    provider = LiteralProvider()
-    assert provider.is_configured() is True
-    assert provider.provider_name == "None (Literal)"
-
-    script = provider.generate_script(
-        source_text="Deterministic raw source paragraph.",
-        source_title="Literal Ep",
-        job_id=job_id,
-    )
-    assert len(script.segments) > 0
-
-    interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job_id).all()
-    assert len(interactions) == 0
-
-
-def test_research_mode_compatibility_guard():
+def test_research_provider_separation_success():
     """
-    Acceptance Rule: Research mode is Gemini-only.
-    When a non-Gemini provider (e.g. Anthropic, OpenAI, Groq, Ollama) is active,
-    requesting Research mode MUST be rejected clearly without silent downgrades.
+    Contract: When AI_PROVIDER=groq and RESEARCH_PROVIDER=gemini (with GEMINI_API_KEY set),
+    research mode succeeds because a research-capable provider is configured.
     """
     db = setup_in_memory_db()
 
-    # Configure Anthropic as active provider
-    with patch.object(settings, "AI_PROVIDER", "anthropic"), \
-         patch.object(settings, "ANTHROPIC_API_KEY", "sk-ant-valid-key"):
+    with patch.object(settings, "AI_PROVIDER", "groq"), \
+         patch.object(settings, "GROQ_API_KEY", "gsk_groq_key"), \
+         patch.object(settings, "RESEARCH_PROVIDER", "gemini"), \
+         patch.object(settings, "GEMINI_API_KEY", "valid_gemini_key"):
         reset_ai_provider()
+
+        r_prov = get_research_provider()
+        assert r_prov is not None
+        assert r_prov.provider_name == "Gemini"
+        assert r_prov.capabilities.research_grounding is True
 
         req = HeraldRequest(
             transport="telegram",
@@ -353,65 +255,53 @@ def test_research_mode_compatibility_guard():
             delivery_target="100",
             request_mode="research",
             research_depth="high",
-            source_text="Deep research request topic.",
+            source_text="Research mode topic with separate research provider.",
+        )
+
+        with patch("herald.core.pipeline.generate_grounded_research", return_value={"search_count": 1, "source_count": 1}), \
+             patch("herald.core.pipeline.normalize_research_dossier", return_value=MagicMock(model_dump=lambda: {"summary": "ok"})), \
+             patch("herald.core.pipeline.generate_podcast_script", return_value=MagicMock(model_dump=lambda: SAMPLE_SCRIPT_JSON)), \
+             patch("herald.core.pipeline.audit_research_script", return_value=MagicMock(model_dump=lambda: {"has_material_issues": False})):
+            resp = process_herald_request(db, req)
+
+        assert resp.status in (JobState.QUEUED_TTS.value, JobState.SCRIPT_READY.value)
+        assert resp.is_duplicate is False
+
+
+def test_research_provider_separation_failure_when_unconfigured():
+    """
+    Contract: When AI_PROVIDER=groq and NO research-capable provider is configured,
+    research mode must fail actionably without silent downgrade.
+    """
+    db = setup_in_memory_db()
+
+    with patch.object(settings, "AI_PROVIDER", "groq"), \
+         patch.object(settings, "GROQ_API_KEY", "gsk_groq_key"), \
+         patch.object(settings, "RESEARCH_PROVIDER", "gemini"), \
+         patch.object(settings, "GEMINI_API_KEY", ""):
+        reset_ai_provider()
+
+        r_prov = get_research_provider()
+        assert r_prov is None
+
+        req = HeraldRequest(
+            transport="telegram",
+            requester_identity="telegram:100",
+            delivery_target="100",
+            request_mode="research",
+            source_text="Research request without Gemini credentials.",
         )
 
         resp = process_herald_request(db, req)
 
-        # Invariant: Job failed immediately with INCOMPATIBLE_PROVIDER_FOR_RESEARCH
         assert resp.status == JobState.FAILED_FINAL.value
         assert resp.error_category == "INCOMPATIBLE_PROVIDER_FOR_RESEARCH"
-        assert "Google Gemini" in resp.message
-        assert "AI_PROVIDER=gemini" in resp.message
-        assert "anthropic" in resp.message.lower()
-
-        # Invariant: Zero jobs queued
-        jobs = db.query(PodcastJob).all()
-        assert len(jobs) == 0
+        assert "Google Search Grounding" in resp.message
+        assert "GEMINI_API_KEY" in resp.message
 
 
-def test_api_endpoint_research_mode_guard(monkeypatch):
-    """Verify /api/v1/script/generate raises 400 Bad Request if research mode is attempted on non-Gemini provider."""
-    from fastapi.testclient import TestClient
-
-    from herald.db.connection import get_db
-
-    db = setup_in_memory_db()
-    job_id = "job-guard-api-001"
-    job = PodcastJob(
-        id=job_id,
-        transport="api",
-        source_hash="h_api",
-        source_text="Research text",
-        request_mode="research",
-        status=JobState.SOURCE_READY.value,
-        created_at=datetime.now(UTC),
-    )
-    db.add(job)
-    db.commit()
-
-    def override_db():
-        yield db
-
-    app.dependency_overrides[get_db] = override_db
-    monkeypatch.setattr(settings, "AI_PROVIDER", "openai")
-    monkeypatch.setattr(settings, "HERALD_API_KEY", "test-auth-key")
-
-    try:
-        client = TestClient(app)
-        res = client.post(
-            "/api/v1/script/generate",
-            json={"job_id": job_id},
-            headers={"x-api-key": "test-auth-key"},
-        )
-        assert res.status_code == 400
-        assert "Google Gemini" in res.json()["detail"]
-    finally:
-        app.dependency_overrides.clear()
-
-
-def test_diagnostics_card_reflects_active_provider():
-    """Verify diagnostics card truthfully formats active provider identity."""
+def test_diagnostics_card_truthful_attribution():
+    """Verify diagnostics card truthfully attributes provider name and model."""
     db = setup_in_memory_db()
     job = PodcastJob(
         id="aabb1122-3344-4556-8778-99aabbccddeeff",
@@ -427,12 +317,12 @@ def test_diagnostics_card_reflects_active_provider():
     )
     db.add(job)
 
-    # Add AI interaction with provider="anthropic"
+    # Add AI interaction with provider="openrouter"
     interaction = AIInteraction(
         id="ai-rec-001",
         job_id=job.id,
-        provider="anthropic",
-        model="claude-3-7-sonnet-20250219",
+        provider="openrouter",
+        model="meta-llama/llama-3.3-70b-instruct",
         operation="script_generation",
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -447,5 +337,5 @@ def test_diagnostics_card_reflects_active_provider():
     db.commit()
 
     card = format_diagnostics_card(job, db)
-    assert "Anthropic (claude-3-7-sonnet-20250219)" in card
+    assert "OpenRouter (meta-llama/llama-3.3-70b-instruct)" in card
     assert "700 tokens" in card

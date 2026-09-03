@@ -1,7 +1,6 @@
 """
-OpenAI-Compatible Provider Implementation for Herald.
-Generates structured podcast scripts using Chat Completions API with JSON mode,
-truthful one-call/one-record interaction tracking, and 1 bounded schema repair attempt.
+Cloudflare Workers AI Provider Implementation for Herald.
+Routes script generation requests directly through Cloudflare Workers AI API endpoint.
 """
 
 import json
@@ -19,11 +18,11 @@ from herald.config import settings
 from herald.gemini.client import load_system_prompt
 from herald.services.ai_recorder import record_ai_interaction
 
-logger = logging.getLogger("herald.ai.openai")
+logger = logging.getLogger("herald.ai.cloudflare")
 
 
 def _extract_json_block(text: str) -> dict[str, Any]:
-    """Extract JSON object from markdown or raw text."""
+    """Extract JSON object from text or markdown codeblock."""
     clean = text.strip()
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean, re.DOTALL)
     if match:
@@ -31,24 +30,20 @@ def _extract_json_block(text: str) -> dict[str, Any]:
     return json.loads(clean)
 
 
-class OpenAIProvider(AIProvider):
+class CloudflareProvider(AIProvider):
     def __init__(
         self,
-        api_key: str | None = None,
+        api_token: str | None = None,
+        account_id: str | None = None,
         model: str | None = None,
-        api_base: str | None = None,
-        provider_name: str = "OpenAI",
-        custom_headers: dict[str, str] | None = None,
     ):
-        self._api_key = api_key or settings.OPENAI_API_KEY
-        self._model = model or settings.OPENAI_MODEL or "gpt-4o"
-        self._api_base = (api_base or settings.OPENAI_API_BASE or "https://api.openai.com/v1").rstrip("/")
-        self._custom_provider_name = provider_name
-        self._custom_headers = custom_headers or {}
+        self._api_token = api_token or settings.CLOUDFLARE_API_TOKEN
+        self._account_id = account_id or settings.CLOUDFLARE_ACCOUNT_ID
+        self._model = model or settings.CLOUDFLARE_MODEL or "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
     @property
     def provider_name(self) -> str:
-        return self._custom_provider_name
+        return "Cloudflare Workers AI"
 
     @property
     def configured_model(self) -> str:
@@ -65,7 +60,12 @@ class OpenAIProvider(AIProvider):
         )
 
     def is_configured(self) -> bool:
-        return bool(self._api_key and self._api_key.strip())
+        return bool(
+            self._api_token
+            and self._api_token.strip()
+            and self._account_id
+            and self._account_id.strip()
+        )
 
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         if not self.is_configured():
@@ -74,11 +74,11 @@ class OpenAIProvider(AIProvider):
                 "configured": False,
                 "connected": False,
                 "model": self.configured_model,
-                "error": f"{self.provider_name} API key is not configured.",
+                "error": "Cloudflare API token or Account ID is not configured.",
             }
 
-        url = f"{self._api_base}/models"
-        headers = {"Authorization": f"Bearer {self._api_key}", **self._custom_headers}
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self._account_id.strip()}/ai/models/search"
+        headers = {"Authorization": f"Bearer {self._api_token.strip()}"}
 
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
@@ -96,7 +96,7 @@ class OpenAIProvider(AIProvider):
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": f"{self.provider_name} HTTP {resp.status_code}: {resp.text}",
+                "error": f"Cloudflare HTTP {resp.status_code}: {resp.text}",
             }
         except Exception as e:
             return {
@@ -116,7 +116,7 @@ class OpenAIProvider(AIProvider):
         job_id: str | None = None,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
-            raise RuntimeError(f"{self.provider_name} API key is not configured.")
+            raise RuntimeError("Cloudflare Workers AI API token or Account ID is not configured.")
 
         mode_clean = (request_mode or "standard").lower()
         system_prompt = load_system_prompt()
@@ -137,11 +137,11 @@ SOURCE TITLE: {source_title or 'N/A'}
 Generate the podcast script JSON response now.
 """
 
-        url = f"{self._api_base}/chat/completions"
+        model_clean = self._model.strip().lstrip("/")
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self._account_id.strip()}/ai/run/{model_clean}"
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {self._api_token.strip()}",
             "Content-Type": "application/json",
-            **self._custom_headers,
         }
 
         max_attempts = settings.GEMINI_RETRY_COUNT
@@ -150,13 +150,10 @@ Generate the podcast script JSON response now.
         for attempt in range(1, max_attempts + 1):
             t0 = datetime.now(UTC)
             payload = {
-                "model": self._model,
                 "messages": [
                     {"role": "system", "content": f"{system_prompt}{json_instruction}"},
                     {"role": "user", "content": user_content},
                 ],
-                "response_format": {"type": "json_object"},
-                "temperature": settings.GEMINI_TEMPERATURE,
             }
 
             try:
@@ -164,12 +161,12 @@ Generate the podcast script JSON response now.
                 with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
                     resp = client.post(url, json=payload, headers=headers)
 
-                req_id = resp.headers.get("x-request-id") or resp.headers.get("cf-ray") or resp.headers.get("openai-organization")
+                req_id = resp.headers.get("cf-ray") or resp.headers.get("x-request-id")
 
                 if resp.status_code != 200:
                     record_ai_interaction(
                         job_id=job_id,
-                        provider=self.provider_name.lower(),
+                        provider="cloudflare",
                         model=self._model,
                         operation="script_generation",
                         attempt=attempt,
@@ -187,28 +184,24 @@ Generate the podcast script JSON response now.
                         time.sleep(backoff)
                         backoff *= 2.0
                         continue
-                    raise RuntimeError(f"{self.provider_name} API error ({resp.status_code}): {resp.text}")
+                    raise RuntimeError(f"Cloudflare Workers AI API error ({resp.status_code}): {resp.text}")
 
                 result_json = resp.json()
-                req_id = req_id or result_json.get("id")
-                choices = result_json.get("choices", [])
-                if not choices:
-                    raise ValueError(f"{self.provider_name} returned no response choices.")
+                raw_content = ""
+                if "result" in result_json and isinstance(result_json["result"], dict):
+                    raw_content = result_json["result"].get("response", "")
+                elif "response" in result_json:
+                    raw_content = result_json.get("response", "")
+                elif "choices" in result_json and result_json["choices"]:
+                    raw_content = result_json["choices"][0].get("message", {}).get("content", "")
 
-                raw_content = choices[0].get("message", {}).get("content", "")
-                usage = result_json.get("usage", {})
-                p_tok = usage.get("prompt_tokens")
-                c_tok = usage.get("completion_tokens")
-                t_tok = usage.get("total_tokens")
-
-                # Parse and validate with 1 bounded schema repair attempt if needed
                 try:
                     script_dict = _extract_json_block(raw_content)
                     parsed_script = PodcastScriptResponse(**script_dict)
 
                     record_ai_interaction(
                         job_id=job_id,
-                        provider=self.provider_name.lower(),
+                        provider="cloudflare",
                         model=self._model,
                         operation="script_generation",
                         attempt=attempt,
@@ -218,9 +211,6 @@ Generate the podcast script JSON response now.
                         started_at=t0,
                         completed_at=datetime.now(UTC),
                         success=True,
-                        prompt_tokens=p_tok,
-                        completion_tokens=c_tok,
-                        total_tokens=t_tok,
                         request_json=payload,
                         response_json=result_json,
                         metadata={"attempt": attempt, "mode": mode_clean},
@@ -229,14 +219,13 @@ Generate the podcast script JSON response now.
 
                 except Exception as parse_err:
                     logger.warning(
-                        "%s output parsing failed on attempt %d: %s. Initiating 1 bounded repair retry.",
-                        self.provider_name,
+                        "Cloudflare Workers AI output parsing failed on attempt %d: %s. Initiating 1 bounded repair retry.",
                         attempt,
                         parse_err,
                     )
                     record_ai_interaction(
                         job_id=job_id,
-                        provider=self.provider_name.lower(),
+                        provider="cloudflare",
                         model=self._model,
                         operation="script_generation",
                         attempt=attempt,
@@ -254,66 +243,60 @@ Generate the podcast script JSON response now.
 
                     # Bounded Repair Attempt
                     t_repair = datetime.now(UTC)
-                    repair_messages = [
-                        {"role": "system", "content": f"{system_prompt}{json_instruction}"},
-                        {"role": "user", "content": user_content},
-                        {"role": "assistant", "content": raw_content},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Your previous response produced a validation error: {parse_err}. "
-                                "Please fix the error and return only the valid JSON response adhering strictly to the schema."
-                            ),
-                        },
-                    ]
                     repair_payload = {
-                        "model": self._model,
-                        "messages": repair_messages,
-                        "response_format": {"type": "json_object"},
-                        "temperature": settings.GEMINI_TEMPERATURE,
+                        "messages": [
+                            {"role": "system", "content": f"{system_prompt}{json_instruction}"},
+                            {"role": "user", "content": user_content},
+                            {"role": "assistant", "content": raw_content},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your previous response produced a validation error: {parse_err}. "
+                                    "Please fix the error and return only valid JSON adhering strictly to the schema."
+                                ),
+                            },
+                        ],
                     }
 
                     with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
                         repair_resp = client.post(url, json=repair_payload, headers=headers)
 
-                    repair_req_id = repair_resp.headers.get("x-request-id") or repair_resp.headers.get("cf-ray")
+                    repair_req_id = repair_resp.headers.get("cf-ray") or repair_resp.headers.get("x-request-id")
                     if repair_resp.status_code == 200:
-                        repair_result_json = repair_resp.json()
-                        repair_req_id = repair_req_id or repair_result_json.get("id")
-                        repair_choices = repair_result_json.get("choices", [])
-                        if repair_choices:
-                            repair_raw = repair_choices[0].get("message", {}).get("content", "")
-                            repair_dict = _extract_json_block(repair_raw)
-                            repaired_script = PodcastScriptResponse(**repair_dict)
+                        rep_json = repair_resp.json()
+                        rep_raw = ""
+                        if "result" in rep_json and isinstance(rep_json["result"], dict):
+                            rep_raw = rep_json["result"].get("response", "")
+                        elif "response" in rep_json:
+                            rep_raw = rep_json.get("response", "")
 
-                            rep_usage = repair_result_json.get("usage", {})
-                            record_ai_interaction(
-                                job_id=job_id,
-                                provider=self.provider_name.lower(),
-                                model=self._model,
-                                operation="script_repair",
-                                attempt=attempt,
-                                http_status=repair_resp.status_code,
-                                provider_request_id=repair_req_id,
-                                input_chars=len(user_content),
-                                started_at=t_repair,
-                                completed_at=datetime.now(UTC),
-                                success=True,
-                                prompt_tokens=rep_usage.get("prompt_tokens"),
-                                completion_tokens=rep_usage.get("completion_tokens"),
-                                total_tokens=rep_usage.get("total_tokens"),
-                                request_json=repair_payload,
-                                response_json=repair_result_json,
-                                metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_success"},
-                            )
-                            return repaired_script
+                        rep_dict = _extract_json_block(rep_raw)
+                        repaired_script = PodcastScriptResponse(**rep_dict)
+
+                        record_ai_interaction(
+                            job_id=job_id,
+                            provider="cloudflare",
+                            model=self._model,
+                            operation="script_repair",
+                            attempt=attempt,
+                            http_status=repair_resp.status_code,
+                            provider_request_id=repair_req_id,
+                            input_chars=len(user_content),
+                            started_at=t_repair,
+                            completed_at=datetime.now(UTC),
+                            success=True,
+                            request_json=repair_payload,
+                            response_json=rep_json,
+                            metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_success"},
+                        )
+                        return repaired_script
 
                     raise parse_err
 
             except Exception as e:
                 record_ai_interaction(
                     job_id=job_id,
-                    provider=self.provider_name.lower(),
+                    provider="cloudflare",
                     model=self._model,
                     operation="script_generation",
                     attempt=attempt,
@@ -325,8 +308,8 @@ Generate the podcast script JSON response now.
                     metadata={"attempt": attempt, "mode": mode_clean},
                 )
                 if attempt == max_attempts:
-                    raise RuntimeError(f"{self.provider_name} script generation failed: {e}")
+                    raise RuntimeError(f"Cloudflare Workers AI script generation failed: {e}")
                 time.sleep(backoff)
                 backoff *= 2.0
 
-        raise RuntimeError(f"Failed to generate podcast script from {self.provider_name} after retries.")
+        raise RuntimeError("Failed to generate podcast script from Cloudflare Workers AI after retries.")

@@ -1,15 +1,19 @@
+"""
+Gemini AI Provider implementation with response caching, secure header auth, and full capabilities.
+"""
+
 import logging
 import time
 from typing import Any
 
 import httpx
 
-from herald.ai.base import AIProvider
+from herald.ai.base import AIProvider, ProviderCapabilities
+from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
 from herald.gemini.client import (
     generate_podcast_script,
 )
-from herald.gemini.schema import PodcastScriptResponse
 
 logger = logging.getLogger("herald.ai.gemini")
 
@@ -29,6 +33,16 @@ class GeminiProvider(AIProvider):
     @property
     def configured_model(self) -> str:
         return settings.GEMINI_MODEL
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            script_brief=True,
+            script_standard=True,
+            structured_output=True,
+            research_grounding=True,
+            usage_metrics=True,
+        )
 
     def is_configured(self) -> bool:
         return bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())

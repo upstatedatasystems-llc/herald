@@ -5,8 +5,8 @@ Generates local podcast scripts deterministically with zero external AI calls an
 
 from typing import Any
 
-from herald.ai.base import AIProvider
-from herald.gemini.schema import PodcastScriptResponse
+from herald.ai.base import AIProvider, ProviderCapabilities
+from herald.ai.schema import PodcastScriptResponse
 from herald.literal.script_generator import generate_literal_script
 
 
@@ -18,6 +18,16 @@ class LiteralProvider(AIProvider):
     @property
     def configured_model(self) -> str:
         return "local-literal-chunker"
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            script_brief=True,
+            script_standard=True,
+            structured_output=True,
+            research_grounding=False,
+            usage_metrics=False,
+        )
 
     def is_configured(self) -> bool:
         return True

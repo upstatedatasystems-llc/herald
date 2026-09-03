@@ -1,21 +1,42 @@
+"""
+Abstract Base Class and Capabilities Contract for Herald AI Providers.
+"""
+
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
-from herald.gemini.schema import PodcastScriptResponse
+from herald.ai.schema import PodcastScriptResponse
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Explicit capability matrix for an AI provider."""
+
+    script_brief: bool = True
+    script_standard: bool = True
+    structured_output: bool = True
+    research_grounding: bool = False
+    usage_metrics: bool = True
 
 
 class AIProvider(ABC):
-    """Abstract base class for AI script generation and health monitoring."""
+    """Abstract base class for AI script generation, capability declaration, and health monitoring."""
 
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """Human-readable provider name (e.g. 'Gemini', 'None (Literal)')."""
+        """Human-readable provider name (e.g. 'Gemini', 'Groq', 'OpenRouter', 'None (Literal)')."""
 
     @property
     @abstractmethod
     def configured_model(self) -> str:
         """The configured model identifier."""
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        """Declared provider capabilities. Defaults to standard scripting capabilities."""
+        return ProviderCapabilities()
 
     @abstractmethod
     def is_configured(self) -> bool:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from herald.ai.factory import get_ai_provider
+from herald.ai.factory import get_ai_provider, get_research_provider
 from herald.config import settings
 from herald.core.models import HeraldRequest, HeraldResponse
 from herald.db.models import JobState, PodcastJob, RequestMode, SourceType
@@ -92,24 +92,10 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         RequestMode.STANDARD.value,
         RequestMode.RESEARCH.value,
     )
-    if is_ai_mode and not settings.is_ai_configured():
-        return HeraldResponse(
-            job_id="",
-            status=JobState.FAILED_FINAL.value,
-            request_mode=mode_val,
-            source_type=SourceType.TEXT.value,
-            is_duplicate=False,
-            message=(
-                f"AI provider is not configured. Mode '{mode_val}' requires an AI API key. "
-                "Currently available mode is 'literal'. Configure an AI provider or use 'literal' mode."
-            ),
-            error_category="AI_PROVIDER_NOT_CONFIGURED",
-        )
-
-    # Research mode is Gemini-only (requires Google Search Grounding).
     if mode_val == RequestMode.RESEARCH.value:
-        active_prov = (settings.AI_PROVIDER or "").lower().strip()
-        if active_prov != "gemini":
+        research_prov = get_research_provider()
+        if not research_prov:
+            r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
             return HeraldResponse(
                 job_id="",
                 status=JobState.FAILED_FINAL.value,
@@ -117,10 +103,25 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_type=SourceType.TEXT.value,
                 is_duplicate=False,
                 message=(
-                    f"Research mode is only supported with the Google Gemini provider (active provider: '{settings.AI_PROVIDER}'). "
-                    "Please set AI_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
+                    f"Research mode requires a provider capable of Google Search Grounding (configured RESEARCH_PROVIDER='{r_name}'). "
+                    "Please configure GEMINI_API_KEY with RESEARCH_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
                 ),
                 error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
+            )
+    elif is_ai_mode:
+        ai_prov = get_ai_provider()
+        if not ai_prov or not ai_prov.is_configured():
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.TEXT.value,
+                is_duplicate=False,
+                message=(
+                    f"AI provider is not configured. Mode '{mode_val}' requires an AI API key. "
+                    "Currently available mode is 'literal'. Configure an AI provider or use 'literal' mode."
+                ),
+                error_category="AI_PROVIDER_NOT_CONFIGURED",
             )
 
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
@@ -450,8 +451,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_title=job.custom_title,
                 job_id=job.id,
             )
-            job.script_json = script_resp.model_dump()
-            job.gemini_model = getattr(provider, "configured_model", settings.GEMINI_MODEL)
+            m_val = getattr(provider, "configured_model", None) or getattr(provider, "model_name", None) or settings.GEMINI_MODEL
+            job.gemini_model = m_val if isinstance(m_val, str) else settings.GEMINI_MODEL
             db.commit()
             record_stage_metric(
                 job_id=job.id,

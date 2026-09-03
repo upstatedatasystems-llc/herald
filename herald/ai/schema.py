@@ -1,0 +1,63 @@
+"""
+Canonical Provider-Neutral Podcast Script Schema for Herald.
+Defines the core Pydantic models for podcast segments and structured script responses.
+All AI providers, script generators, and pipeline consumers adhere to this neutral contract.
+"""
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class PodcastSegment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(..., description="1-indexed sequence number of narration segment", ge=1)
+    heading: str = Field(..., description="Section heading or topic title")
+    narration: str = Field(..., description="Spoken narration text for TTS synthesis")
+
+    @field_validator("heading", "narration")
+    def validate_non_empty_strings(cls, v: str, info) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError(f"Segment field '{info.field_name}' must not be empty.")
+        return s
+
+
+class PodcastScriptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_title: str = Field(..., description="Catchy descriptive title for podcast episode")
+    episode_description: str = Field(..., description="Summary overview of the episode")
+    estimated_minutes: int | None = Field(default=None, description="Legacy estimated spoken duration in minutes")
+    source_title: str | None = Field(default=None, description="Title of source article or email")
+    segments: list[PodcastSegment] = Field(..., min_length=1, description="Ordered narration segments")
+    warnings: list[str] = Field(..., description="Any content warnings or extraction notes")
+
+    @field_validator("estimated_minutes")
+    def validate_estimated_minutes(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("estimated_minutes must be >= 1 if provided.")
+        return v
+
+    @field_validator("episode_title", "episode_description")
+    def validate_non_empty_top_fields(cls, v: str, info) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError(f"Field '{info.field_name}' must not be empty after trimming.")
+        return s
+
+    @field_validator("segments")
+    def validate_segment_order(cls, v: list[PodcastSegment]) -> list[PodcastSegment]:
+        if not v:
+            raise ValueError("Script must contain at least one narration segment.")
+
+        expected = 1
+        seen_orders = set()
+        for seg in v:
+            if seg.order in seen_orders:
+                raise ValueError(f"Duplicate segment order found: {seg.order}")
+            seen_orders.add(seg.order)
+
+            if seg.order != expected:
+                raise ValueError(f"Segment order error: expected sequential order starting at 1, but got {seg.order} at position {expected}")
+            expected += 1
+        return v

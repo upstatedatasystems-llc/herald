@@ -101,24 +101,27 @@ fi
 
 # 2. AI Provider Selection & Existing Configuration Inference
 AI_PROVIDER=$(get_env_val "AI_PROVIDER")
-GEMINI_KEY=$(get_env_val "GEMINI_API_KEY")
 
 if [ -z "$AI_PROVIDER" ]; then
-    if [ -n "$GEMINI_KEY" ]; then
-        # Preserve existing Gemini configuration on upgrade
-        AI_PROVIDER="gemini"
-        echo "ℹ️  Existing GEMINI_API_KEY detected. Inferred AI_PROVIDER=gemini."
-        set_env_val "AI_PROVIDER" "gemini"
-    else
-        echo ""
-        echo "Select an AI Scripting Provider:"
-        echo "  1) None (Deterministic Literal reading only — zero external AI calls)"
-        echo "  2) Google Gemini (Enables Brief, Standard, and Deep-Dive Research modes)"
-        read -rp "Enter choice [1 or 2, default: 1]: " AI_CHOICE
-        AI_CHOICE=${AI_CHOICE:-1}
+    echo ""
+    echo "Select an AI Scripting Provider:"
+    echo "  1) None / Literal (Deterministic local reading only — zero external AI calls)"
+    echo "  2) Google Gemini (Recommended — enables Brief, Standard, and Grounded Research)"
+    echo "  3) Groq Cloud (Ultra-fast inference with Llama-3.3-70B)"
+    echo "  4) OpenRouter (Multi-model gateway, e.g. Claude, Llama 3.3, DeepSeek)"
+    echo "  5) Mistral AI (Mistral Large / Mistral Small Chat API)"
+    echo "  6) Cloudflare Workers AI (Serverless Edge Inference)"
+    read -rp "Enter choice [1-6, default: 2]: " AI_CHOICE
+    AI_CHOICE=${AI_CHOICE:-2}
 
-        if [ "$AI_CHOICE" = "2" ]; then
+    case "$AI_CHOICE" in
+        1)
+            AI_PROVIDER="none"
+            set_env_val "AI_PROVIDER" "none"
+            ;;
+        2)
             AI_PROVIDER="gemini"
+            GEMINI_KEY=""
             while [ -z "$GEMINI_KEY" ]; do
                 read -s -rp "Enter your Gemini API Key: " GEMINI_KEY
                 echo ""
@@ -130,24 +133,153 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "AI_PROVIDER" "gemini"
             set_env_val "GEMINI_API_KEY" "$GEMINI_KEY"
             set_env_val "GEMINI_MODEL" "gemini-3.5-flash"
-        else
+            set_env_val "RESEARCH_PROVIDER" "gemini"
+            ;;
+        3)
+            AI_PROVIDER="groq"
+            GROQ_KEY=""
+            while [ -z "$GROQ_KEY" ]; do
+                read -s -rp "Enter your Groq API Key (gsk_...): " GROQ_KEY
+                echo ""
+                GROQ_KEY=$(echo "$GROQ_KEY" | xargs)
+                if [ -z "$GROQ_KEY" ]; then
+                    echo "⚠️  Groq API Key cannot be empty."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "groq"
+            set_env_val "GROQ_API_KEY" "$GROQ_KEY"
+            set_env_val "GROQ_MODEL" "llama-3.3-70b-versatile"
+            ;;
+        4)
+            AI_PROVIDER="openrouter"
+            OR_KEY=""
+            while [ -z "$OR_KEY" ]; do
+                read -s -rp "Enter your OpenRouter API Key (sk-or-...): " OR_KEY
+                echo ""
+                OR_KEY=$(echo "$OR_KEY" | xargs)
+                if [ -z "$OR_KEY" ]; then
+                    echo "⚠️  OpenRouter API Key cannot be empty."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "openrouter"
+            set_env_val "OPENROUTER_API_KEY" "$OR_KEY"
+            set_env_val "OPENROUTER_MODEL" "meta-llama/llama-3.3-70b-instruct"
+            ;;
+        5)
+            AI_PROVIDER="mistral"
+            MIS_KEY=""
+            while [ -z "$MIS_KEY" ]; do
+                read -s -rp "Enter your Mistral API Key: " MIS_KEY
+                echo ""
+                MIS_KEY=$(echo "$MIS_KEY" | xargs)
+                if [ -z "$MIS_KEY" ]; then
+                    echo "⚠️  Mistral API Key cannot be empty."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "mistral"
+            set_env_val "MISTRAL_API_KEY" "$MIS_KEY"
+            set_env_val "MISTRAL_MODEL" "mistral-large-latest"
+            ;;
+        6)
+            AI_PROVIDER="cloudflare"
+            CF_TOKEN=""
+            CF_ACCT=""
+            while [ -z "$CF_TOKEN" ]; do
+                read -s -rp "Enter your Cloudflare API Token: " CF_TOKEN
+                echo ""
+                CF_TOKEN=$(echo "$CF_TOKEN" | xargs)
+            done
+            while [ -z "$CF_ACCT" ]; do
+                read -rp "Enter your Cloudflare Account ID: " CF_ACCT
+                CF_ACCT=$(echo "$CF_ACCT" | xargs)
+            done
+            set_env_val "AI_PROVIDER" "cloudflare"
+            set_env_val "CLOUDFLARE_API_TOKEN" "$CF_TOKEN"
+            set_env_val "CLOUDFLARE_ACCOUNT_ID" "$CF_ACCT"
+            set_env_val "CLOUDFLARE_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+            ;;
+        *)
             AI_PROVIDER="none"
             set_env_val "AI_PROVIDER" "none"
+            ;;
+    esac
+
+    # Optional Gemini Research configuration for non-Gemini providers
+    if [ "$AI_PROVIDER" != "gemini" ] && [ "$AI_PROVIDER" != "none" ]; then
+        echo ""
+        echo "ℹ️  Research mode requires Google Search Grounding (Gemini)."
+        read -rp "Would you like to configure an optional GEMINI_API_KEY for Research mode? [y/N]: " WANT_RES
+        if [[ "$WANT_RES" =~ ^[Yy]$ ]]; then
+            read -s -rp "Enter Gemini API Key for Research: " RES_KEY
+            echo ""
+            RES_KEY=$(echo "$RES_KEY" | xargs)
+            if [ -n "$RES_KEY" ]; then
+                set_env_val "GEMINI_API_KEY" "$RES_KEY"
+                set_env_val "RESEARCH_PROVIDER" "gemini"
+                echo "✅ Gemini Research configured alongside ${AI_PROVIDER}."
+            fi
         fi
     fi
 else
     echo "✅ AI Provider is configured: ${AI_PROVIDER}"
 fi
 
-# 3. Test Gemini if configured
-if [ "$AI_PROVIDER" = "gemini" ] && [ -n "$GEMINI_KEY" ]; then
-    echo "🔍 Validating Gemini API Key..."
-    GEM_RESP=$(curl -s -H "x-goog-api-key: ${GEMINI_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash" || true)
-    if echo "$GEM_RESP" | grep -q '"name":'; then
-        echo "✅ Gemini API connection verified."
-    else
-        echo "⚠️  Gemini verification failed. Literal mode remains fully operational."
+# 3. Live Validate Active Provider Connection without Echoing Secrets
+echo ""
+echo "🔍 Validating AI Provider connection..."
+if [ "$AI_PROVIDER" = "gemini" ]; then
+    G_KEY=$(get_env_val "GEMINI_API_KEY")
+    if [ -n "$G_KEY" ]; then
+        GEM_RESP=$(curl -s -H "x-goog-api-key: ${G_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash" || true)
+        if echo "$GEM_RESP" | grep -q '"name":'; then
+            echo "✅ Gemini API connection verified."
+        else
+            echo "⚠️  Gemini verification failed. Literal mode remains available."
+        fi
     fi
+elif [ "$AI_PROVIDER" = "groq" ]; then
+    GR_KEY=$(get_env_val "GROQ_API_KEY")
+    if [ -n "$GR_KEY" ]; then
+        GR_RESP=$(curl -s -H "Authorization: Bearer ${GR_KEY}" "https://api.groq.com/openai/v1/models" || true)
+        if echo "$GR_RESP" | grep -q '"data":'; then
+            echo "✅ Groq Cloud connection verified."
+        else
+            echo "⚠️  Groq verification failed. Literal mode remains available."
+        fi
+    fi
+elif [ "$AI_PROVIDER" = "openrouter" ]; then
+    OR_K=$(get_env_val "OPENROUTER_API_KEY")
+    if [ -n "$OR_K" ]; then
+        OR_RESP=$(curl -s -H "Authorization: Bearer ${OR_K}" "https://openrouter.ai/api/v1/models" || true)
+        if echo "$OR_RESP" | grep -q '"data":'; then
+            echo "✅ OpenRouter connection verified."
+        else
+            echo "⚠️  OpenRouter verification failed. Literal mode remains available."
+        fi
+    fi
+elif [ "$AI_PROVIDER" = "mistral" ]; then
+    M_K=$(get_env_val "MISTRAL_API_KEY")
+    if [ -n "$M_K" ]; then
+        M_RESP=$(curl -s -H "Authorization: Bearer ${M_K}" "https://api.mistral.ai/v1/models" || true)
+        if echo "$M_RESP" | grep -q '"data":'; then
+            echo "✅ Mistral AI connection verified."
+        else
+            echo "⚠️  Mistral verification failed. Literal mode remains available."
+        fi
+    fi
+elif [ "$AI_PROVIDER" = "cloudflare" ]; then
+    CF_T=$(get_env_val "CLOUDFLARE_API_TOKEN")
+    CF_A=$(get_env_val "CLOUDFLARE_ACCOUNT_ID")
+    if [ -n "$CF_T" ] && [ -n "$CF_A" ]; then
+        CF_RESP=$(curl -s -H "Authorization: Bearer ${CF_T}" "https://api.cloudflare.com/client/v4/accounts/${CF_A}/ai/models/search" || true)
+        if echo "$CF_RESP" | grep -q '"success":true'; then
+            echo "✅ Cloudflare Workers AI connection verified."
+        else
+            echo "⚠️  Cloudflare verification failed. Literal mode remains available."
+        fi
+    fi
+else
+    echo "ℹ️  Literal mode selected (no external AI provider calls)."
 fi
 
 # 4. Ensure internal defaults & secrets are present without overwriting existing
