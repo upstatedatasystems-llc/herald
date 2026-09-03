@@ -11,11 +11,14 @@ import httpx
 from herald.ai.base import AIProvider, ProviderCapabilities
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
-from herald.gemini.client import (
-    generate_podcast_script,
-)
 
 logger = logging.getLogger("herald.ai.gemini")
+
+
+def generate_podcast_script(*args, **kwargs):
+    """Lazy wrapper for herald.gemini.client.generate_podcast_script to prevent circular imports."""
+    from herald.gemini.client import generate_podcast_script as _gps
+    return _gps(*args, **kwargs)
 
 
 class GeminiProvider(AIProvider):

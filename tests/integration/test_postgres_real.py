@@ -640,3 +640,81 @@ def test_postgres_approval_vs_cancel_cas_race(pg_session_factory):
         SessionAdmin.close()
         SessionApprove.close()
         SessionCancel.close()
+
+
+def test_postgres_migration_014_telemetry_and_cascade(pg_session_factory):
+    """
+    Prove that migration 014 schema additions (job_diagnostic_events table,
+    extended ai_interactions columns) work durably on real PostgreSQL,
+    and ON DELETE CASCADE cleanly cascades job deletions to diagnostic events and ai_interactions.
+    """
+    from herald.db.models import AIInteraction, JobDiagnosticEvent
+
+    session = pg_session_factory()
+    try:
+        job = PodcastJob(
+            gmail_message_id="pg-mig014-msg",
+            telegram_user_id=888,
+            telegram_chat_id=888,
+            request_mode="standard",
+            source_hash="pg-mig014-hash",
+            source_text="Migration 014 verification source",
+            status=JobState.COMPLETE.value,
+        )
+        session.add(job)
+        session.commit()
+
+        # Insert AIInteraction with full 014 columns
+        interaction = AIInteraction(
+            job_id=job.id,
+            provider="groq",
+            model="llama-3.3-70b-versatile",
+            operation="script_generation",
+            attempt=1,
+            http_status=200,
+            provider_request_id="req-pg-014",
+            input_chars=150,
+            prompt_tokens=40,
+            completion_tokens=60,
+            total_tokens=100,
+            success=True,
+            request_json_sanitized={"mode": "standard", "attempt": 1},
+            response_json_sanitized={"http_status": 200, "schema_validation": "valid"},
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+        )
+        session.add(interaction)
+
+        # Insert JobDiagnosticEvent with full 014 columns
+        event = JobDiagnosticEvent(
+            job_id=job.id,
+            timestamp=datetime.now(UTC),
+            level="INFO",
+            component="test",
+            event_type="EXTRACTION_COMPLETE",
+            message="Test extraction event on real PostgreSQL",
+            metadata_json_sanitized={"url": "https://example.com/test"},
+        )
+        session.add(event)
+        session.commit()
+
+        # Query back and verify persistence
+        saved_int = session.query(AIInteraction).filter_by(job_id=job.id).first()
+        assert saved_int is not None
+        assert saved_int.provider == "groq"
+        assert saved_int.http_status == 200
+        assert saved_int.request_json_sanitized["mode"] == "standard"
+
+        saved_evt = session.query(JobDiagnosticEvent).filter_by(job_id=job.id).first()
+        assert saved_evt is not None
+        assert saved_evt.event_type == "EXTRACTION_COMPLETE"
+        assert saved_evt.metadata_json_sanitized["url"] == "https://example.com/test"
+
+        # Verify ON DELETE CASCADE
+        session.delete(job)
+        session.commit()
+
+        assert session.query(AIInteraction).filter_by(job_id=job.id).count() == 0
+        assert session.query(JobDiagnosticEvent).filter_by(job_id=job.id).count() == 0
+    finally:
+        session.close()

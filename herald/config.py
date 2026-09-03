@@ -103,7 +103,8 @@ class Settings(BaseSettings):
     MISTRAL_MODEL: str = "mistral-large-latest"
     CLOUDFLARE_API_TOKEN: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""
-    CLOUDFLARE_MODEL: str = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    CLOUDFLARE_AI_MODEL: str = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    CLOUDFLARE_MODEL: str | None = None  # Backward-compatible alias
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-3-7-sonnet-20250219"
     OPENAI_API_KEY: str = ""

@@ -12,10 +12,9 @@ from typing import Any
 
 import httpx
 
-from herald.ai.base import AIProvider
+from herald.ai.base import AIProvider, load_system_prompt
+from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
-from herald.gemini.client import load_system_prompt
-from herald.gemini.schema import PodcastScriptResponse
 from herald.services.ai_recorder import record_ai_interaction
 
 logger = logging.getLogger("herald.ai.ollama")
@@ -74,20 +73,35 @@ class OllamaProvider(AIProvider):
                     "model_installed": has_model,
                     "error": None,
                 }
+            if resp.status_code == 404:
+                err_msg = "configured model unavailable"
+            elif resp.status_code >= 500:
+                err_msg = "provider unavailable"
+            else:
+                err_msg = f"HTTP error {resp.status_code}"
             return {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": f"Ollama HTTP {resp.status_code}: {resp.text}",
+                "error": err_msg,
+            }
+        except httpx.TimeoutException:
+            return {
+                "provider": self.provider_name,
+                "configured": True,
+                "connected": False,
+                "model": self.configured_model,
+                "error": "connection timed out",
             }
         except Exception as e:
+            from herald.services.redaction import sanitize_error
             return {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": str(e),
+                "error": sanitize_error(str(e)),
             }
 
     def generate_script(

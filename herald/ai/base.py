@@ -4,9 +4,18 @@ Abstract Base Class and Capabilities Contract for Herald AI Providers.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from herald.ai.schema import PodcastScriptResponse
+
+
+def load_system_prompt() -> str:
+    """Load canonical system prompt from prompts directory or fallback string."""
+    prompt_file = Path(__file__).parent.parent.parent / "prompts" / "podcast_script" / "prompt.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    return "Transform the provided source content into a podcast script JSON matching schema."
 
 
 @dataclass(frozen=True)

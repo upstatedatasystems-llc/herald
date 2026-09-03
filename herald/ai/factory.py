@@ -69,6 +69,7 @@ def get_ai_provider() -> AIProvider | None:
         getattr(settings, "MISTRAL_MODEL", ""),
         getattr(settings, "CLOUDFLARE_API_TOKEN", ""),
         getattr(settings, "CLOUDFLARE_ACCOUNT_ID", ""),
+        getattr(settings, "CLOUDFLARE_AI_MODEL", ""),
         getattr(settings, "CLOUDFLARE_MODEL", ""),
         getattr(settings, "ANTHROPIC_API_KEY", ""),
         getattr(settings, "ANTHROPIC_MODEL", ""),
@@ -105,7 +106,7 @@ def get_research_provider() -> AIProvider | None:
         return _research_provider_instance
 
     prov = create_ai_provider(r_prov)
-    if prov and prov.capabilities.research_grounding and prov.is_configured():
+    if prov and prov.capabilities.research_grounding:
         _research_provider_instance = prov
     else:
         _research_provider_instance = None

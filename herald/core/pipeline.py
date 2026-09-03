@@ -94,7 +94,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     )
     if mode_val == RequestMode.RESEARCH.value:
         research_prov = get_research_provider()
-        if not research_prov:
+        if not research_prov or not research_prov.is_configured():
             r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
             return HeraldResponse(
                 job_id="",

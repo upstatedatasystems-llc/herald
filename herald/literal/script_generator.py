@@ -1,11 +1,11 @@
 import re
 
+from herald.ai.schema import PodcastScriptResponse, PodcastSegment
 from herald.extraction.source_cleaner import (
     clean_source_text,
     deduplicate_source_blocks,
     sanitize_unicode,
 )
-from herald.gemini.schema import PodcastScriptResponse, PodcastSegment
 
 
 def normalize_tts_spoken_text(text: str) -> str:

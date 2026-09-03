@@ -19,6 +19,13 @@ from herald.services.ai_recorder import record_ai_interaction
 logger = logging.getLogger("herald.gemini")
 
 
+def load_system_prompt() -> str:
+    prompt_file = Path(__file__).parent.parent.parent / "prompts" / "podcast_script" / "prompt.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    return "Transform the provided source content into a podcast script JSON matching schema."
+
+
 def _extract_tokens(result_json: dict | None) -> tuple[int | None, int | None, int | None]:
     """Safely extract prompt, completion, and total tokens from Gemini usageMetadata."""
     if not isinstance(result_json, dict):
@@ -44,13 +51,6 @@ class GeminiQuotaError(GeminiError):
 
 class GeminiValidationError(GeminiError):
     """Returned response failed schema validation."""
-
-
-def load_system_prompt() -> str:
-    prompt_file = Path(__file__).parent.parent.parent / "prompts" / "podcast_script" / "prompt.md"
-    if prompt_file.exists():
-        return prompt_file.read_text(encoding="utf-8")
-    return "Transform the provided source content into a podcast script JSON matching schema."
 
 
 def generate_grounded_research(

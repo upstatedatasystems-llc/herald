@@ -196,6 +196,7 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "AI_PROVIDER" "cloudflare"
             set_env_val "CLOUDFLARE_API_TOKEN" "$CF_TOKEN"
             set_env_val "CLOUDFLARE_ACCOUNT_ID" "$CF_ACCT"
+            set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
             set_env_val "CLOUDFLARE_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
             ;;
         *)
@@ -224,62 +225,101 @@ else
     echo "✅ AI Provider is configured: ${AI_PROVIDER}"
 fi
 
-# 3. Live Validate Active Provider Connection without Echoing Secrets
+# 3. Live Validate Active Provider Connection and Configured Model without Echoing Secrets
 echo ""
-echo "🔍 Validating AI Provider connection..."
+echo "🔍 Validating AI Provider and model availability..."
+AI_VALID=true
 if [ "$AI_PROVIDER" = "gemini" ]; then
     G_KEY=$(get_env_val "GEMINI_API_KEY")
+    G_MOD=$(get_env_val "GEMINI_MODEL")
+    G_MOD=${G_MOD:-"gemini-3.5-flash"}
     if [ -n "$G_KEY" ]; then
-        GEM_RESP=$(curl -s -H "x-goog-api-key: ${G_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash" || true)
+        GEM_RESP=$(curl -s -H "x-goog-api-key: ${G_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/${G_MOD}" || true)
         if echo "$GEM_RESP" | grep -q '"name":'; then
-            echo "✅ Gemini API connection verified."
+            echo "✅ Gemini API connection and model '${G_MOD}' verified."
         else
-            echo "⚠️  Gemini verification failed. Literal mode remains available."
+            echo "⚠️  Gemini verification for '${G_MOD}' failed."
+            AI_VALID=false
         fi
     fi
 elif [ "$AI_PROVIDER" = "groq" ]; then
     GR_KEY=$(get_env_val "GROQ_API_KEY")
+    GR_MOD=$(get_env_val "GROQ_MODEL")
+    GR_MOD=${GR_MOD:-"llama-3.3-70b-versatile"}
     if [ -n "$GR_KEY" ]; then
-        GR_RESP=$(curl -s -H "Authorization: Bearer ${GR_KEY}" "https://api.groq.com/openai/v1/models" || true)
-        if echo "$GR_RESP" | grep -q '"data":'; then
-            echo "✅ Groq Cloud connection verified."
+        GR_RESP=$(curl -s -H "Authorization: Bearer ${GR_KEY}" "https://api.groq.com/openai/v1/models/${GR_MOD}" || true)
+        if echo "$GR_RESP" | grep -q '"id":'; then
+            echo "✅ Groq Cloud connection and model '${GR_MOD}' verified."
         else
-            echo "⚠️  Groq verification failed. Literal mode remains available."
+            echo "⚠️  Groq verification for '${GR_MOD}' failed."
+            AI_VALID=false
         fi
     fi
 elif [ "$AI_PROVIDER" = "openrouter" ]; then
     OR_K=$(get_env_val "OPENROUTER_API_KEY")
+    OR_MOD=$(get_env_val "OPENROUTER_MODEL")
+    OR_MOD=${OR_MOD:-"meta-llama/llama-3.3-70b-instruct"}
     if [ -n "$OR_K" ]; then
         OR_RESP=$(curl -s -H "Authorization: Bearer ${OR_K}" "https://openrouter.ai/api/v1/models" || true)
-        if echo "$OR_RESP" | grep -q '"data":'; then
-            echo "✅ OpenRouter connection verified."
+        if echo "$OR_RESP" | grep -q "${OR_MOD}"; then
+            echo "✅ OpenRouter connection and model '${OR_MOD}' verified."
         else
-            echo "⚠️  OpenRouter verification failed. Literal mode remains available."
+            echo "⚠️  OpenRouter verification for '${OR_MOD}' failed."
+            AI_VALID=false
         fi
     fi
 elif [ "$AI_PROVIDER" = "mistral" ]; then
     M_K=$(get_env_val "MISTRAL_API_KEY")
+    M_MOD=$(get_env_val "MISTRAL_MODEL")
+    M_MOD=${M_MOD:-"mistral-large-latest"}
     if [ -n "$M_K" ]; then
-        M_RESP=$(curl -s -H "Authorization: Bearer ${M_K}" "https://api.mistral.ai/v1/models" || true)
-        if echo "$M_RESP" | grep -q '"data":'; then
-            echo "✅ Mistral AI connection verified."
+        M_RESP=$(curl -s -H "Authorization: Bearer ${M_K}" "https://api.mistral.ai/v1/models/${M_MOD}" || true)
+        if echo "$M_RESP" | grep -q '"id":'; then
+            echo "✅ Mistral AI connection and model '${M_MOD}' verified."
         else
-            echo "⚠️  Mistral verification failed. Literal mode remains available."
+            echo "⚠️  Mistral verification for '${M_MOD}' failed."
+            AI_VALID=false
         fi
     fi
 elif [ "$AI_PROVIDER" = "cloudflare" ]; then
     CF_T=$(get_env_val "CLOUDFLARE_API_TOKEN")
     CF_A=$(get_env_val "CLOUDFLARE_ACCOUNT_ID")
+    CF_MOD=$(get_env_val "CLOUDFLARE_AI_MODEL")
+    CF_MOD=${CF_MOD:-$(get_env_val "CLOUDFLARE_MODEL")}
+    CF_MOD=${CF_MOD:-"@cf/meta/llama-3.3-70b-instruct-fp8-fast"}
     if [ -n "$CF_T" ] && [ -n "$CF_A" ]; then
-        CF_RESP=$(curl -s -H "Authorization: Bearer ${CF_T}" "https://api.cloudflare.com/client/v4/accounts/${CF_A}/ai/models/search" || true)
+        CF_RESP=$(curl -s -H "Authorization: Bearer ${CF_T}" "https://api.cloudflare.com/client/v4/accounts/${CF_A}/ai/models/search?search=${CF_MOD}" || true)
         if echo "$CF_RESP" | grep -q '"success":true'; then
-            echo "✅ Cloudflare Workers AI connection verified."
+            echo "✅ Cloudflare Workers AI connection and model '${CF_MOD}' verified."
         else
-            echo "⚠️  Cloudflare verification failed. Literal mode remains available."
+            echo "⚠️  Cloudflare verification for '${CF_MOD}' failed."
+            AI_VALID=false
         fi
     fi
 else
     echo "ℹ️  Literal mode selected (no external AI provider calls)."
+fi
+
+# Fallback safely to Literal if configured AI provider validation failed
+if [ "$AI_VALID" = false ]; then
+    echo "⚠️  Configured AI provider was not verified. Falling back to Literal mode to ensure pipeline stability."
+    set_env_val "AI_PROVIDER" "none"
+fi
+
+# Validate optional Gemini Research configuration if present
+RES_PROV=$(get_env_val "RESEARCH_PROVIDER")
+if [ "$RES_PROV" = "gemini" ] && [ "$AI_PROVIDER" != "gemini" ]; then
+    G_RES_K=$(get_env_val "GEMINI_API_KEY")
+    G_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
+    G_RES_M=${G_RES_M:-"gemini-2.5-flash"}
+    if [ -n "$G_RES_K" ]; then
+        G_RES_RESP=$(curl -s -H "x-goog-api-key: ${G_RES_K}" "https://generativelanguage.googleapis.com/v1beta/models/${G_RES_M}" || true)
+        if echo "$G_RES_RESP" | grep -q '"name":'; then
+            echo "✅ Gemini Research model '${G_RES_M}' verified."
+        else
+            echo "⚠️  Gemini Research verification for '${G_RES_M}' failed."
+        fi
+    fi
 fi
 
 # 4. Ensure internal defaults & secrets are present without overwriting existing
