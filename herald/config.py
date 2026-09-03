@@ -92,7 +92,17 @@ class Settings(BaseSettings):
     TELEGRAM_POLL_TIMEOUT_SECONDS: int = 30
     TELEGRAM_ALLOWED_USER_IDS: str = ""
     TELEGRAM_MAX_AUDIO_BYTES: int = 50 * 1024 * 1024  # 50MB Bot API upload limit
-    AI_PROVIDER: str = "gemini"  # "gemini" or "none"
+    # AI Providers Configuration
+    AI_PROVIDER: str = "gemini"  # "gemini", "anthropic", "openai", "groq", "ollama", "none"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-3-7-sonnet-20250219"
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_API_BASE: str = "https://api.openai.com/v1"
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.2"
 
     def is_ai_configured(self) -> bool:
         prov = (self.AI_PROVIDER or "").lower().strip()
@@ -100,6 +110,14 @@ class Settings(BaseSettings):
             return False
         if prov == "gemini":
             return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
+        if prov == "anthropic":
+            return bool(self.ANTHROPIC_API_KEY and self.ANTHROPIC_API_KEY.strip())
+        if prov == "openai":
+            return bool(self.OPENAI_API_KEY and self.OPENAI_API_KEY.strip())
+        if prov == "groq":
+            return bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip())
+        if prov == "ollama":
+            return bool(self.OLLAMA_BASE_URL and self.OLLAMA_BASE_URL.strip())
         return False
 
     def get_default_mode(self) -> str:

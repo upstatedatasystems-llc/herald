@@ -423,9 +423,10 @@ def handle_telegram_command(
         prov_name = html.escape(res.get("provider", "AI"))
         model_name = html.escape(res.get("model", "default"))
         if res.get("connected"):
+            cap_note = "Ready for brief, standard, and research requests." if prov_name.lower() == "gemini" else "Ready for brief and standard requests (Research mode requires Gemini)."
             client.send_message(
                 chat_id=chat_id,
-                text=f"✅ <b>{prov_name} Connected Successfully!</b>\n\nModel: <code>{model_name}</code>\nStatus: Ready for brief, standard, and research requests.",
+                text=f"✅ <b>{prov_name} Connected Successfully!</b>\n\nModel: <code>{model_name}</code>\nStatus: {cap_note}",
                 parse_mode="HTML",
             )
         else:

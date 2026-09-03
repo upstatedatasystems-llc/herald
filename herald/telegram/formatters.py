@@ -14,7 +14,7 @@ from herald.services.eta_calculator import calculate_script_duration
 
 def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
     """
-    Return truthful (provider_name, model_name) for a job based on its request mode and persisted model evidence.
+    Return truthful (provider_name, model_name) for a job based on its request mode, active provider, and persisted model evidence.
     Returns (None, None) for Literal mode (no AI used).
     """
     mode = getattr(job, "request_mode", RequestMode.STANDARD.value)
@@ -25,7 +25,18 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
         model = getattr(job, "research_model", None) or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-2.5-flash")
         return "Gemini", model
 
-    # Brief / Standard
+    # Check ai_interactions first for authoritative evidence
+    if hasattr(job, "ai_interactions") and job.ai_interactions:
+        first_ai = job.ai_interactions[0]
+        return first_ai.provider.capitalize(), first_ai.model
+
+    # Brief / Standard fallback to active AIProvider
+    from herald.ai.factory import get_ai_provider
+
+    prov = get_ai_provider()
+    if prov:
+        return prov.provider_name, getattr(job, "gemini_model", None) or prov.configured_model
+
     model = getattr(job, "gemini_model", None) or getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
     return "Gemini", model
 

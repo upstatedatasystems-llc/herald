@@ -13,6 +13,7 @@ from sqlalchemy import and_, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from herald.ai import GeminiProvider
 from herald.audio.artifact_generator import (
     ensure_details_artifact,
     get_artifact_filenames,
@@ -764,6 +765,12 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     input_chars=len(job.source_text or ""),
                 )
         elif req_mode == "research":
+            active_prov = (settings.AI_PROVIDER or "").lower().strip()
+            if active_prov != "gemini":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Research mode is only supported with Google Gemini provider (active: '{settings.AI_PROVIDER}').",
+                )
             # Stage 1a: Grounded Research Call using GEMINI_RESEARCH_MODEL
             if not job.research_grounding_json:
                 logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")
@@ -927,18 +934,29 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             # Brief or Standard mode
             if not job.script_json:
                 t0 = datetime.now(UTC)
-                script = generate_podcast_script(
-                    source_text=job.source_text,
-                    request_mode=req_mode,
-                    source_title=job.custom_title,
-                    job_id=job.id,
-                )
+                from herald.ai.factory import get_ai_provider
+                provider = get_ai_provider()
+                if provider and not isinstance(provider, GeminiProvider):
+                    script_resp = provider.generate_script(
+                        source_text=job.source_text,
+                        request_mode=req_mode,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
+                else:
+                    script_resp = generate_podcast_script(
+                        source_text=job.source_text,
+                        request_mode=req_mode,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
                 t1 = datetime.now(UTC)
-                job.script_json = script.model_dump()
+                job.script_json = script_resp.model_dump()
+                job.gemini_model = getattr(provider, "configured_model", settings.GEMINI_MODEL) if provider else settings.GEMINI_MODEL
                 db.commit()
                 record_stage_metric(
                     job_id=job.id,
-                    stage="GEMINI_SCRIPT",
+                    stage="AI_SCRIPT",
                     started_at=t0,
                     finished_at=t1,
                     status="success",

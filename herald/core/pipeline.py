@@ -105,6 +105,23 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             error_category="AI_PROVIDER_NOT_CONFIGURED",
         )
 
+    # Research mode is Gemini-only (requires Google Search Grounding).
+    if mode_val == RequestMode.RESEARCH.value:
+        active_prov = (settings.AI_PROVIDER or "").lower().strip()
+        if active_prov != "gemini":
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.TEXT.value,
+                is_duplicate=False,
+                message=(
+                    f"Research mode is only supported with the Google Gemini provider (active provider: '{settings.AI_PROVIDER}'). "
+                    "Please set AI_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
+                ),
+                error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
+            )
+
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
     if req.transport == "telegram" and req.transport_message_id and req.delivery_target:
         tg_chat = (

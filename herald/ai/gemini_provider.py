@@ -7,7 +7,6 @@ import httpx
 from herald.ai.base import AIProvider
 from herald.config import settings
 from herald.gemini.client import (
-    GeminiAuthError,
     generate_podcast_script,
 )
 from herald.gemini.schema import PodcastScriptResponse
@@ -42,8 +41,6 @@ class GeminiProvider(AIProvider):
         source_title: str | None = None,
         job_id: str | None = None,
     ) -> PodcastScriptResponse:
-        if not self.is_configured():
-            raise GeminiAuthError("Gemini API key is not configured.")
         return generate_podcast_script(
             source_text=source_text,
             request_mode=request_mode,
