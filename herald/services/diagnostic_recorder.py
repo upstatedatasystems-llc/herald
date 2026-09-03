@@ -1,14 +1,13 @@
 """
 Centralized Non-Fatal Job Diagnostic Event Recording Service.
 Records high-level pipeline, worker, audio, and delivery events for support diagnostics.
+Uses isolated database sessions to guarantee diagnostic writes never interfere with caller transactions.
 """
 
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-
-from sqlalchemy.orm import Session
 
 from herald.db.connection import SessionLocal
 from herald.db.models import JobDiagnosticEvent
@@ -24,12 +23,13 @@ def record_job_diagnostic_event(
     event_type: str,
     message: str,
     metadata: dict[str, Any] | None = None,
-    db: Session | None = None,
+    db: Any = None,  # Retained for signature compatibility, isolated session always used
     timestamp: datetime | None = None,
 ) -> JobDiagnosticEvent | None:
     """
     Persist a structured job diagnostic event.
-    Non-fatal: catches and logs any persistence exception without failing the pipeline.
+    Truly non-fatal: creates an isolated transaction and will never commit or
+    roll back any caller-supplied session.
     """
     if not job_id:
         return None
@@ -51,20 +51,20 @@ def record_job_diagnostic_event(
         created_at=datetime.now(UTC),
     )
 
-    should_close = False
-    session = db
-    if session is None:
-        session = SessionLocal()
-        should_close = True
-
+    session = SessionLocal()
     try:
         session.add(event)
         session.commit()
         return event
     except Exception as e:
-        session.rollback()
-        logger.warning("Failed to record job diagnostic event for job '%s': %s", job_id, e)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        logger.warning("Non-fatal: Failed to record job diagnostic event for job '%s': %s", job_id, e)
         return None
     finally:
-        if should_close:
+        try:
             session.close()
+        except Exception:
+            pass

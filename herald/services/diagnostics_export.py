@@ -103,6 +103,7 @@ def build_manifest_dict(
     db: Session,
     included_files: list[str],
     truncated_files: list[str],
+    truncations_detail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build canonical manifest.json describing the diagnostics bundle."""
     from herald.telegram.formatters import get_job_ai_identity
@@ -111,15 +112,33 @@ def build_manifest_dict(
 
     created_utc = _to_utc(job.created_at)
     completed_utc = _to_utc(job.completed_at) or _to_utc(job.delivered_at)
+    app_req_utc = _to_utc(job.approval_requested_at)
+    app_done_utc = _to_utc(job.approved_at)
+
     total_seconds = None
     if created_utc and completed_utc:
-        total_seconds = max(0, int((completed_utc - created_utc).total_seconds()))
+        raw_sec = max(0, int((completed_utc - created_utc).total_seconds()))
+        if app_req_utc and app_done_utc:
+            hold_sec = max(0, int((app_done_utc - app_req_utc).total_seconds()))
+            total_seconds = max(1, raw_sec - hold_sec)
+        else:
+            total_seconds = raw_sec
 
     source_words = len((job.source_text or "").split())
     script_obj = job.script_json or {}
     narration_words = 0
     for seg in script_obj.get("segments", []):
         narration_words += len((seg.get("narration") or "").split())
+
+    # Authoritative chunk counts from podcast_tts_chunks table
+    actual_chunks_count = (
+        db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == job.id).count()
+    )
+    completed_chunks_count = (
+        db.query(PodcastTTSChunk)
+        .filter(PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED")
+        .count()
+    )
 
     conc_profile = "default"
     try:
@@ -148,13 +167,15 @@ def build_manifest_dict(
         "narration_word_count": narration_words,
         "predicted_duration_minutes": script_obj.get("estimated_minutes"),
         "actual_duration_seconds": job.audio_duration_seconds,
-        "actual_tts_chunk_count": job.completed_chunk_index or 0,
+        "actual_tts_chunk_count": actual_chunks_count,
+        "completed_tts_chunk_count": completed_chunks_count,
         "total_processing_seconds": total_seconds,
         "status": job.status,
         "error_code": job.error_code,
         "concurrency_profile": conc_profile,
         "included_files": sorted(included_files),
         "truncated_files": sorted(truncated_files),
+        "truncations": truncations_detail or [],
     }
 
 
@@ -301,10 +322,19 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             .order_by(JobDiagnosticEvent.timestamp.asc())
             .all()
         )
+        orig_events_count = len(events)
+        truncations_detail: list[dict[str, Any]] = []
+
         # Size bounding on events: keep last 1000 events if huge
         if len(events) > 1000:
             events = events[-1000:]
             truncated_files.append("diagnostic-events.jsonl")
+            truncations_detail.append({
+                "file": "diagnostic-events.jsonl",
+                "reason": "event_count_limit",
+                "original_count": orig_events_count,
+                "retained_count": len(events),
+            })
 
         event_lines = [
             json.dumps(
@@ -329,6 +359,17 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             .order_by(AIInteraction.started_at.asc())
             .all()
         )
+        orig_ai_count = len(interactions)
+        if len(interactions) > 200:
+            interactions = interactions[-200:]
+            truncated_files.append("ai-interactions.json")
+            truncations_detail.append({
+                "file": "ai-interactions.json",
+                "reason": "interaction_count_limit",
+                "original_count": orig_ai_count,
+                "retained_count": len(interactions),
+            })
+
         ai_list = [
             {
                 "id": r.id,
@@ -393,8 +434,37 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                 )
                 included_files.append("research/audit.json")
 
+        # Check total staged size before manifest and compress if exceeding budget
+        staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
+        if staged_bytes > TARGET_DIAGNOSTIC_BYTES:
+            # Step 1: Reduce events to last 200
+            if len(events) > 200:
+                events = events[-200:]
+                event_lines = [
+                    json.dumps(
+                        {
+                            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                            "level": e.level,
+                            "component": e.component,
+                            "event_type": e.event_type,
+                            "message": redact_text(e.message),
+                            "metadata": redact_dict(e.metadata_json_sanitized),
+                        }
+                    )
+                    for e in events
+                ]
+                (staging_dir / "diagnostic-events.jsonl").write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
+                if "diagnostic-events.jsonl" not in truncated_files:
+                    truncated_files.append("diagnostic-events.jsonl")
+                truncations_detail.append({
+                    "file": "diagnostic-events.jsonl",
+                    "reason": "target_budget_reduction",
+                    "original_count": orig_events_count,
+                    "retained_count": len(events),
+                })
+
         # 13. manifest.json
-        manifest_data = build_manifest_dict(job, db, included_files, truncated_files)
+        manifest_data = build_manifest_dict(job, db, included_files, truncated_files, truncations_detail)
         (staging_dir / "manifest.json").write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
         included_files.append("manifest.json")
 

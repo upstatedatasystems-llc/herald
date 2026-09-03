@@ -9,9 +9,10 @@ Verifies:
 - Pre-send fail-closed secret scan on generated ZIP bundle
 - Safe delivery failure masking (no raw exceptions or secrets in user-facing message)
 - Literal mode zero AI interaction invariant
-- Job diagnostic event recording and export in diagnostic-events.jsonl
-- Completion inline keyboard Diagnostics button (h2:diag:<uuid>) and repeat safety
-- setMyCommands registration of diagnostics command
+- Non-fatal diagnostic event recorder transaction isolation (caller transactions never committed or rolled back)
+- Authoritative manifest chunk count & active processing time excluding approval hold
+- Deterministic size management with manifest truncation tracking
+- Application-wide event instrumentation (scripting, TTS, FFmpeg, Telegram delivery)
 """
 
 import json
@@ -21,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from herald.config import settings
 from herald.db.connection import Base
@@ -34,7 +36,9 @@ from herald.db.models import (
     PodcastTTSChunk,
     TelegramUser,
 )
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.diagnostics_export import (
+    build_manifest_dict,
     generate_job_diagnostics_zip,
 )
 from herald.telegram.bot import handle_telegram_command
@@ -43,7 +47,11 @@ from herald.telegram.resolver import resolve_user_job
 
 
 def setup_in_memory_db():
-    engine = create_engine("sqlite:///:memory:")
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     return session_factory()
@@ -186,7 +194,6 @@ def test_diagnostics_command_with_latest_alias(tmp_path):
     }
 
     with patch("herald.config.settings.HERALD_WORK_DIR", str(tmp_path)):
-        # Test /diagnostics latest
         handle_telegram_command(db, mock_client, mock_msg, "diagnostics", "latest")
 
     assert mock_client.send_message.called
@@ -253,8 +260,8 @@ def test_diagnostics_canonical_13_artifact_bundle(tmp_path):
         message="Scripting finished",
     )
     # Add chunks
-    c1 = PodcastTTSChunk(job_id=job.id, chunk_index=0, text_hash="h1", status="COMPLETE", audio_duration=60.0)
-    c2 = PodcastTTSChunk(job_id=job.id, chunk_index=1, text_hash="h2", status="COMPLETE", audio_duration=60.0)
+    c1 = PodcastTTSChunk(job_id=job.id, chunk_index=0, text_hash="h1", status="COMPLETED", audio_duration=60.0)
+    c2 = PodcastTTSChunk(job_id=job.id, chunk_index=1, text_hash="h2", status="COMPLETED", audio_duration=60.0)
     # Add AI interaction
     ai = AIInteraction(
         job_id=job.id,
@@ -336,6 +343,8 @@ def test_diagnostics_canonical_13_artifact_bundle(tmp_path):
             manifest = json.loads(manifest_raw)
             assert manifest["job_id"] == job.id
             assert manifest["schema_version"] == "2.0.0"
+            assert manifest["actual_tts_chunk_count"] == 2
+            assert manifest["completed_tts_chunk_count"] == 2
             assert "episode-details.md" in manifest["included_files"]
             assert "source.txt" in manifest["included_files"]
             assert "script.json" in manifest["included_files"]
@@ -343,6 +352,131 @@ def test_diagnostics_canonical_13_artifact_bundle(tmp_path):
             # Verify diagnostic-events.jsonl
             events_raw = zf.read("diagnostic-events.jsonl").decode("utf-8")
             assert "SCRIPTING_BEGIN" in events_raw
+
+
+def test_diagnostics_recorder_non_fatal_isolation():
+    """Verify diagnostic recorder uses isolated transaction and never alters caller session."""
+    caller_db = setup_in_memory_db()
+    job = PodcastJob(
+        id="caller-job-1234",
+        transport="telegram",
+        telegram_user_id=1,
+        telegram_chat_id=1,
+        source_hash="h1",
+        source_text="Caller source",
+        status=JobState.RECEIVED.value,
+        created_at=datetime.now(UTC),
+    )
+    caller_db.add(job)
+    caller_db.flush()
+
+    # Modify an attribute in caller_db without committing
+    job.custom_title = "Uncommitted Caller Title"
+
+    # Simulate diagnostic record failure on a detached session
+    with patch("herald.services.diagnostic_recorder.SessionLocal") as mock_sl:
+        mock_session = MagicMock()
+        mock_session.add.side_effect = RuntimeError("Simulated DB lock error")
+        mock_sl.return_value = mock_session
+
+        res = record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "pipeline",
+            "TEST_EVENT",
+            "Test message",
+            db=caller_db,
+        )
+        assert res is None
+
+    # Invariant: Caller session is still intact and dirty (not rolled back or committed)
+    assert job.custom_title == "Uncommitted Caller Title"
+    assert job in caller_db.dirty
+    caller_db.commit()
+
+    saved_job = caller_db.query(PodcastJob).filter(PodcastJob.id == job.id).first()
+    assert saved_job.custom_title == "Uncommitted Caller Title"
+
+
+def test_manifest_authoritative_chunk_count_and_hold_time():
+    """Verify manifest calculates authoritative chunk counts and excludes approval hold time."""
+    db = setup_in_memory_db()
+    now = datetime.now(UTC)
+
+    job = PodcastJob(
+        id="hold-calc-job-111",
+        transport="telegram",
+        telegram_user_id=1,
+        telegram_chat_id=1,
+        source_hash="h_hold",
+        source_text="Hold text",
+        status=JobState.COMPLETE.value,
+        created_at=now - timedelta(seconds=300),
+        approval_requested_at=now - timedelta(seconds=280),
+        approved_at=now - timedelta(seconds=160),  # Held for 120s
+        completed_at=now,
+    )
+    db.add(job)
+
+    # 3 total chunks: 2 COMPLETED, 1 FAILED
+    c0 = PodcastTTSChunk(job_id=job.id, chunk_index=0, text_hash="h0", status="COMPLETED")
+    c1 = PodcastTTSChunk(job_id=job.id, chunk_index=1, text_hash="h1", status="FAILED")
+    c2 = PodcastTTSChunk(job_id=job.id, chunk_index=2, text_hash="h2", status="COMPLETED")
+    db.add_all([c0, c1, c2])
+    db.commit()
+
+    manifest = build_manifest_dict(job, db, included_files=[], truncated_files=[])
+    assert manifest["actual_tts_chunk_count"] == 3
+    assert manifest["completed_tts_chunk_count"] == 2
+    # Total elapsed was 300s, approval hold was 120s -> active time = 180s
+    assert manifest["total_processing_seconds"] == 180
+
+
+def test_diagnostics_size_management_and_truncation(tmp_path):
+    """Verify diagnostic export trims verbose data deterministically and logs truncations."""
+    db = setup_in_memory_db()
+    now = datetime.now(UTC)
+
+    job = PodcastJob(
+        id="size-trim-job-222",
+        transport="telegram",
+        telegram_user_id=1,
+        telegram_chat_id=1,
+        source_hash="h_trim",
+        source_text="Size trim text",
+        status=JobState.COMPLETE.value,
+        created_at=now,
+    )
+    db.add(job)
+
+    # Add 1200 diagnostic events to trigger count limit
+    for i in range(1200):
+        db.add(
+            JobDiagnosticEvent(
+                job_id=job.id,
+                timestamp=now,
+                level="DEBUG",
+                component="worker",
+                event_type="HEARTBEAT",
+                message=f"Heartbeat tick {i}",
+            )
+        )
+    db.commit()
+
+    with patch("herald.config.settings.HERALD_WORK_DIR", str(tmp_path)):
+        zip_path = generate_job_diagnostics_zip(db, job)
+        assert zip_path.exists()
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            manifest_raw = zf.read("manifest.json").decode("utf-8")
+            manifest = json.loads(manifest_raw)
+
+            assert "diagnostic-events.jsonl" in manifest["truncated_files"]
+            assert len(manifest["truncations"]) > 0
+            trunc_info = manifest["truncations"][0]
+            assert trunc_info["file"] == "diagnostic-events.jsonl"
+            assert trunc_info["original_count"] == 1200
+            assert trunc_info["retained_count"] <= 1000
 
 
 def test_diagnostics_pre_send_secret_scan_rejection(tmp_path):
@@ -367,14 +501,13 @@ def test_diagnostics_pre_send_secret_scan_rejection(tmp_path):
         db.add(job)
         db.commit()
 
-        # Intentionally inject the raw secret into a non-sanitized mock file during ZIP generation
         with patch("herald.services.diagnostics_export.build_safe_environment_summary", return_value={"leaked": sentinel_secret}):
             try:
                 generate_job_diagnostics_zip(db, job)
                 assert False, "Expected generate_job_diagnostics_zip to raise a security error"
             except RuntimeError as re:
                 assert "Security violation" in str(re)
-                assert sentinel_secret not in str(re)  # Exception does not echo secret
+                assert sentinel_secret not in str(re)
 
 
 def test_deliver_job_diagnostics_error_masking(tmp_path):
@@ -399,7 +532,6 @@ def test_deliver_job_diagnostics_error_masking(tmp_path):
     with patch("herald.services.diagnostics_export.generate_job_diagnostics_zip", side_effect=ValueError(raw_secret_error)):
         deliver_job_diagnostics(db, mock_client, job, chat_id=1)
 
-    # Invariant: User receives generic safe error, NOT the raw exception
     assert mock_client.send_message.called
     sent_text = mock_client.send_message.call_args[1]["text"]
     assert "Diagnostics package generation failed" in sent_text
@@ -426,3 +558,93 @@ def test_diagnostics_caption_formatting():
     assert "standard" in caption_small
     assert "COMPLETE" in caption_small
     assert "45.0 KB" in caption_small
+
+
+def test_application_diagnostic_events_flow(tmp_path):
+    """Verify application-wide event instrumentation across intake, scripting, TTS, FFmpeg, and delivery."""
+    from herald.core.models import HeraldRequest
+    from herald.core.pipeline import process_herald_request
+    from herald.telegram.delivery import deliver_single_job
+    from herald.tts.chunk_manager import sync_and_prepare_chunks, synthesize_single_chunk
+    from herald.tts.chunker import TTSChunk
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    db = session_factory()
+
+    req = HeraldRequest(
+        transport="telegram",
+        requester_identity="telegram:777",
+        delivery_target="777",
+        source_url="https://example.com/ai-update",
+        source_text="Test source article for diagnostics instrumentation.",
+        request_mode="literal",
+    )
+
+    with patch("herald.services.diagnostic_recorder.SessionLocal", side_effect=session_factory), \
+         patch("herald.core.pipeline.extract_article_from_url", return_value=("AI Update", "Extracted text content from URL", "https://example.com/ai-update")):
+        resp = process_herald_request(db, req)
+
+    job_id = resp.job_id
+    assert job_id
+
+    # Verify intake & extraction events
+    events = db.query(JobDiagnosticEvent).filter(JobDiagnosticEvent.job_id == job_id).all()
+    event_types = [e.event_type for e in events]
+    assert "INTAKE_RECEIVED" in event_types
+    assert "EXTRACTION_COMPLETE" in event_types
+    assert "SCRIPTING_BEGIN" in event_types
+    assert "SCRIPTING_COMPLETE" in event_types
+    assert "QUEUED_FOR_TTS" in event_types
+
+    # Synthesize a single chunk and check TTS events
+    job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+    chunk = TTSChunk(index=0, text="Intro narration segment", segment_order=1, is_section_end=True)
+    sync_and_prepare_chunks(db, job_id, [chunk], "af_heart", 1.0, tmp_path)
+
+    mock_kokoro = MagicMock()
+    mock_kokoro.synthesize_chunk.side_effect = lambda text, output_path, **kwargs: output_path.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    import threading
+    with patch("herald.services.diagnostic_recorder.SessionLocal", side_effect=session_factory), \
+         patch("herald.tts.chunk_manager.validate_audio_file", return_value={"size_bytes": 104, "duration_seconds": 1.5}):
+        synthesize_single_chunk(
+            session_factory=session_factory,
+            job_id=job_id,
+            chunk=chunk,
+            voice="af_heart",
+            speed=1.0,
+            synthesis_timeout=30,
+            chunks_dir=tmp_path,
+            kokoro_client=mock_kokoro,
+            global_semaphore=threading.Semaphore(1),
+            per_job_semaphore=threading.Semaphore(1),
+            total_chunks=1,
+            worker_id="worker-1",
+        )
+
+    tts_events = db.query(JobDiagnosticEvent).filter(JobDiagnosticEvent.job_id == job_id).all()
+    tts_types = [e.event_type for e in tts_events]
+    assert "TTS_CHUNK_BEGIN" in tts_types
+    assert "TTS_CHUNK_COMPLETE" in tts_types
+
+    # Set audio file and test delivery events
+    audio_path = tmp_path / f"{job_id}_test.mp3"
+    audio_path.write_bytes(b"ID3" + b"\x00" * 500)
+    job.local_audio_path = str(audio_path)
+    job.audio_bytes = len(audio_path.read_bytes())
+    job.audio_duration_seconds = 2.0
+    job.status = JobState.AUDIO_READY.value
+    db.commit()
+
+    mock_tg = MagicMock()
+    mock_tg.send_audio.return_value = {"message_id": 123, "audio": {"file_id": "file_123"}}
+
+    with patch("herald.services.diagnostic_recorder.SessionLocal", side_effect=session_factory):
+        deliver_single_job(db, job, mock_tg)
+
+    deliv_events = db.query(JobDiagnosticEvent).filter(JobDiagnosticEvent.job_id == job_id).all()
+    deliv_types = [e.event_type for e in deliv_events]
+    assert "TELEGRAM_DELIVERY_BEGIN" in deliv_types
+    assert "TELEGRAM_DELIVERY_COMPLETE" in deliv_types

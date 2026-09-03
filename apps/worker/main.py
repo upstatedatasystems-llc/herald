@@ -18,6 +18,7 @@ from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob, RequestMode
 from herald.db.state_machine import transition_job_state
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.performance_metrics import record_stage_metric
 from herald.services.resource_monitor import TTSResourceMonitor
 from herald.tts.chunk_manager import process_tts_chunks_parallel
@@ -463,6 +464,15 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             t_ffmpeg_start = datetime.now(UTC)
             audio_info = None
 
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "encoding",
+                "FFMPEG_BEGIN",
+                f"Assembling {len(generated_chunk_paths)} audio chunks into normalized MP3",
+                metadata={"chunk_count": len(generated_chunk_paths)},
+            )
+
             # Execute FFmpeg join (concurrency protected internally within join_and_normalize_audio)
             for ffmpeg_attempt in range(1, 3):
                 try:
@@ -487,11 +497,27 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         attempt=ffmpeg_attempt,
                         metadata_json={"worker_id": worker_id},
                     )
+                    record_job_diagnostic_event(
+                        job.id,
+                        "INFO",
+                        "encoding",
+                        "FFMPEG_COMPLETE",
+                        f"Audio assembled successfully ({audio_info['duration_seconds']:.1f}s, {audio_info['file_bytes']} bytes)",
+                        metadata={"duration_seconds": audio_info["duration_seconds"], "file_bytes": audio_info["file_bytes"], "attempt": ffmpeg_attempt},
+                    )
                     break
                 except Exception as fe:
                     logger.warning(f"FFmpeg assembly attempt {ffmpeg_attempt} failed: {fe}")
                     if output_mp3_path.exists():
                         output_mp3_path.unlink(missing_ok=True)
+                    record_job_diagnostic_event(
+                        job.id,
+                        "ERROR",
+                        "encoding",
+                        "FFMPEG_FAILED",
+                        f"FFmpeg audio assembly failed on attempt {ffmpeg_attempt}: {fe}",
+                        metadata={"attempt": ffmpeg_attempt, "error": str(fe)},
+                    )
                     if ffmpeg_attempt == 2:
                         record_stage_metric(
                             job_id=job.id,

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from herald.audio.ffmpeg_builder import validate_audio_file
 from herald.concurrency import get_tts_slot_wait_timeout_seconds, tts_slot_lock
 from herald.db.models import PodcastJob, PodcastTTSChunk
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.performance_metrics import record_stage_metric
 from herald.tts.chunker import TTSChunk
 from herald.tts.kokoro_client import (
@@ -210,6 +211,14 @@ def synthesize_single_chunk(
             for attempt in range(1, max_attempts + 1):
                 t0_utc = datetime.now(UTC)
                 t0_mono = time.monotonic()
+                record_job_diagnostic_event(
+                    job_id,
+                    "INFO",
+                    "tts",
+                    "TTS_CHUNK_BEGIN",
+                    f"Synthesizing TTS chunk {chunk.index}/{total_chunks} ({len(chunk.text)} chars, voice={voice})",
+                    metadata={"chunk_index": chunk.index, "total_chunks": total_chunks, "char_count": len(chunk.text), "voice": voice, "attempt": attempt},
+                )
                 try:
                     logger.info(
                         f"Worker '{worker_id}' synthesizing chunk {chunk.index}/{total_chunks} (attempt {attempt}): "
@@ -297,6 +306,14 @@ def synthesize_single_chunk(
                             f"Job '{job_id}' progress: {max_completed}/{total_chunks} chunks completed"
                         )
 
+                    record_job_diagnostic_event(
+                        job_id,
+                        "INFO",
+                        "tts",
+                        "TTS_CHUNK_COMPLETE",
+                        f"Synthesized TTS chunk {chunk.index}/{total_chunks} ({audio_dur_sec:.1f}s)",
+                        metadata={"chunk_index": chunk.index, "total_chunks": total_chunks, "duration_sec": audio_dur_sec, "attempt": attempt},
+                    )
                     logger.info(
                         f"Chunk {chunk.index}/{total_chunks} completed successfully in {elapsed_ms / 1000.0:.1f}s"
                     )
@@ -341,6 +358,14 @@ def synthesize_single_chunk(
                 db_chunk.status = "FAILED"
                 db_chunk.error_detail = str(last_error)
                 db.commit()
+                record_job_diagnostic_event(
+                    job_id,
+                    "ERROR",
+                    "tts",
+                    "TTS_CHUNK_FAILED",
+                    f"TTS chunk {chunk.index}/{total_chunks} failed: {last_error}",
+                    metadata={"chunk_index": chunk.index, "total_chunks": total_chunks, "error": str(last_error)},
+                )
 
                 is_timeout = (
                     isinstance(last_error, KokoroTTSTimeoutError)

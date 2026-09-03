@@ -26,7 +26,9 @@ from herald.db.models import (
 from herald.extraction.email_parser import (
     URL_REGEX,
 )
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_job_eta
+from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
     ensure_voice_sample,
@@ -661,10 +663,10 @@ def handle_telegram_content_message(
     try:
         response: HeraldResponse = process_herald_request(db=db, req=req)
     except Exception as e:
-        logger.exception("Error processing Telegram request")
+        logger.exception("Error processing Telegram request: %s", redact_text(str(e)))
         client.send_message(
             chat_id=chat_id,
-            text=f"❌ <b>Error processing request:</b> {html.escape(str(e))}",
+            text="❌ <b>Herald could not process this request.</b>\nPlease retry or use <code>/diagnostics latest</code> if a job was created.",
             reply_to_message_id=msg_id,
             parse_mode="HTML",
         )
@@ -911,6 +913,24 @@ def handle_telegram_callback_query(
             db.commit()
             db.refresh(job)
 
+            record_job_diagnostic_event(
+                job_id,
+                "INFO",
+                "approval",
+                "APPROVED",
+                f"User {user_id} approved job for audio generation",
+                metadata={"telegram_user_id": user_id},
+                db=db,
+            )
+            record_job_diagnostic_event(
+                job_id,
+                "INFO",
+                "queue",
+                "QUEUED_FOR_TTS",
+                "Job queued for Kokoro TTS synthesis following user approval",
+                db=db,
+            )
+
             client.answer_callback_query(cb_id, text="Approved! Queued for synthesis.")
             eta_info = calculate_job_eta(db, job)
             queued_text = format_queued(job, job.script_json, eta_info)
@@ -992,6 +1012,17 @@ def handle_telegram_callback_query(
             )
             db.add(transition_rec)
             db.commit()
+            db.refresh(job)
+
+            record_job_diagnostic_event(
+                job_id,
+                "INFO",
+                "approval",
+                "CANCELLED",
+                f"User {user_id} cancelled job",
+                metadata={"telegram_user_id": user_id},
+                db=db,
+            )
 
             client.answer_callback_query(cb_id, text="Generation cancelled.")
             try:

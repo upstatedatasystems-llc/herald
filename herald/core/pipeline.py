@@ -360,6 +360,16 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
     transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
     record_job_diagnostic_event(job.id, "INFO", "intake", "INTAKE_RECEIVED", f"Accepted {req.transport} intake request (mode={mode_val})", db=db)
+    if source_url:
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "extraction",
+            "EXTRACTION_COMPLETE",
+            f"Extracted article from source URL ({len(job.source_text or '')} chars)",
+            metadata={"source_url": source_url, "char_count": len(job.source_text or "")},
+            db=db,
+        )
     transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
     record_job_diagnostic_event(job.id, "INFO", "scripting", "SCRIPTING_BEGIN", f"Starting script generation for mode '{mode_val}'", db=db)
 
@@ -386,6 +396,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         elif mode_val == RequestMode.RESEARCH.value:
             # Multi-stage grounded research workflow
             if not job.research_grounding_json:
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "RESEARCH_GROUNDING_BEGIN", f"Starting grounded research (depth={job.research_depth or 'medium'})", db=db
+                )
                 grounded_data = generate_grounded_research(
                     source_text=job.source_text,
                     research_depth=job.research_depth or "medium",
@@ -395,8 +408,20 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.research_search_count = grounded_data.get("search_count", 0)
                 job.research_source_count = grounded_data.get("source_count", 0)
                 db.commit()
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_GROUNDING_COMPLETE",
+                    f"Grounded research complete ({job.research_source_count} sources, {job.research_search_count} searches)",
+                    metadata={"sources_count": job.research_source_count, "search_count": job.research_search_count},
+                    db=db,
+                )
 
             if not job.research_json:
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "RESEARCH_NORMALIZATION_BEGIN", "Normalizing research claims and sources into structured dossier", db=db
+                )
                 dossier = normalize_research_dossier(
                     source_text=job.source_text,
                     grounded_research_data=job.research_grounding_json,
@@ -405,6 +430,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.research_json = dossier.model_dump()
                 job.research_model = settings.GEMINI_RESEARCH_MODEL
                 db.commit()
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "RESEARCH_NORMALIZATION_COMPLETE", "Research dossier normalized successfully", db=db
+                )
 
             if not job.script_json:
                 script = generate_podcast_script(
@@ -418,6 +446,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 db.commit()
 
             if not job.research_audit_json:
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "RESEARCH_AUDIT_BEGIN", "Auditing research script against grounding sources", db=db
+                )
                 audit = audit_research_script(
                     source_text=job.source_text,
                     research_dossier=job.research_json,
@@ -426,9 +457,21 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 )
                 job.research_audit_json = audit.model_dump()
                 db.commit()
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_AUDIT_COMPLETE",
+                    f"Research audit completed (has_material_issues={bool((job.research_audit_json or {}).get('has_material_issues'))})",
+                    metadata={"has_material_issues": bool((job.research_audit_json or {}).get("has_material_issues"))},
+                    db=db,
+                )
 
             audit_data = job.research_audit_json or {}
             if audit_data.get("has_material_issues") and job.research_repair_count == 0:
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "SCRIPT_REPAIR_BEGIN", "Repairing research script based on audit findings", db=db
+                )
                 repaired = repair_research_script(
                     source_text=job.source_text,
                     research_dossier=job.research_json,
@@ -439,6 +482,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.script_json = repaired.model_dump()
                 job.research_repair_count = 1
                 db.commit()
+                record_job_diagnostic_event(
+                    job.id, "INFO", "research", "SCRIPT_REPAIR_COMPLETE", "Research script repair completed", db=db
+                )
         else:
             # Brief or Standard AI mode
             t_script0 = datetime.now(UTC)

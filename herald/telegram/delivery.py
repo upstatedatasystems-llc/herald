@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.db.state_machine import transition_job_state
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.performance_metrics import record_stage_metric
 from herald.telegram.client import TelegramAPIError, TelegramClient
 
@@ -177,6 +178,15 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     reply_id = int(job.telegram_message_id) if job.telegram_message_id else None
 
     # Upload MP3 to Telegram
+    record_job_diagnostic_event(
+        job.id,
+        "INFO",
+        "telegram-delivery",
+        "TELEGRAM_DELIVERY_BEGIN",
+        f"Attempting Telegram audio delivery to chat {chat_id} ({file_size_bytes} bytes)",
+        metadata={"chat_id": chat_id, "file_size_bytes": file_size_bytes, "attempt": (job.delivery_attempt_count or 0) + 1},
+        db=db,
+    )
     try:
         res = client.send_audio(
             chat_id=chat_id,
@@ -219,6 +229,16 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             job.failed_stage = "TELEGRAM_DELIVERY"
             job.error_code = "TELEGRAM_DELIVERY_FAILED"
             job.error_detail = str(de)[:500]
+
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "telegram-delivery",
+                "TELEGRAM_DELIVERY_FAILED",
+                f"Telegram delivery failed on attempt {job.delivery_attempt_count}: {de}",
+                metadata={"attempt": job.delivery_attempt_count, "error": str(de)},
+                db=db,
+            )
 
             if job.delivery_attempt_count >= 3:
                 transition_job_state(
@@ -263,6 +283,15 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         status="success",
         output_bytes=file_size_bytes,
         audio_duration_ms=dur_secs * 1000,
+    )
+    record_job_diagnostic_event(
+        job.id,
+        "INFO",
+        "telegram-delivery",
+        "TELEGRAM_DELIVERY_COMPLETE",
+        f"Audio delivered successfully to Telegram chat {chat_id} ({file_size_bytes} bytes)",
+        metadata={"file_size_bytes": file_size_bytes, "duration_seconds": dur_secs},
+        db=db,
     )
 
     logger.info(f"Delivered completed MP3 for job '{job.id}' to Telegram chat '{chat_id}'")
