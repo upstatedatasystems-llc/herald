@@ -224,13 +224,29 @@ def reset_semaphores_for_tests():
     _GLOBAL_SEMAPHORES = None
 
 
+def get_effective_tts_global_slots() -> int:
+    """
+    Return authoritative global TTS slot count derived from ConcurrencyConfig,
+    supporting auto-profile, profile defaults, and explicit overrides.
+    """
+    from herald.config import settings
+
+    config = settings.get_concurrency_config()
+    return max(1, config.tts_global_slots)
+
+
 @contextmanager
-def tts_slot_lock(db=None, timeout_seconds: float = 60.0):
+def tts_slot_lock(db=None, timeout_seconds: float | None = None):
     """
     Acquire a global TTS synthesis slot.
     On PostgreSQL, uses an advisory lock slot pool across all containers/processes.
     On SQLite/test environments, uses the in-process global TTS semaphore.
     """
+    from herald.config import settings
+
+    if timeout_seconds is None:
+        timeout_seconds = max(180.0, getattr(settings, "KOKORO_TIMEOUT_SECONDS", 180.0) * 1.5)
+
     is_postgres = False
     if db is not None:
         try:
@@ -243,9 +259,8 @@ def tts_slot_lock(db=None, timeout_seconds: float = 60.0):
     if is_postgres and db is not None:
         from sqlalchemy import text as sa_text
 
-        from herald.config import settings
         base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", 920000)
-        num_slots = max(1, getattr(settings, "HERALD_TTS_GLOBAL_SLOTS", 3))
+        num_slots = get_effective_tts_global_slots()
         t_start = time.monotonic()
         acquired_key = None
 
@@ -264,7 +279,9 @@ def tts_slot_lock(db=None, timeout_seconds: float = 60.0):
             time.sleep(0.1)
 
         if acquired_key is None:
-            raise TimeoutError(f"Timed out waiting for available TTS slot after {timeout_seconds}s")
+            raise TimeoutError(
+                f"Could not acquire global TTS synthesis slot (all {num_slots} slots busy; timed out waiting after {timeout_seconds}s)"
+            )
 
         try:
             yield acquired_key

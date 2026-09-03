@@ -9,6 +9,7 @@ from herald.db.models import Base, JobState, PodcastJob
 from herald.telegram.auth import generate_pairing_code, verify_and_claim_pairing_code
 from herald.telegram.bot import handle_telegram_callback_query, handle_telegram_command
 from herald.telegram.client import TelegramClient
+from herald.telegram.delivery import deliver_job_download
 from herald.telegram.formatters import format_completion_markup
 from herald.telegram.resolver import resolve_user_job
 
@@ -25,14 +26,34 @@ def db_session():
         session.close()
 
 
-def test_resolve_user_job_latest_and_by_id(db_session):
-    """resolve_user_job correctly resolves user's latest job, exact UUID, and short prefix."""
+def test_resolve_user_job_resolver_contract(db_session):
+    """
+    Test full approved resolve_user_job contract:
+    - latest completed caller job
+    - exact UUID match
+    - unambiguous prefix match
+    - ambiguous prefix rejected
+    - completed_only flag filters out non-COMPLETE
+    - wildcard / injection characters rejected
+    - tenant isolation (cross-user invisible)
+    """
     now = datetime.now(UTC)
     user_id = 12345
     chat_id = 12345
 
-    # 1. Older completed job
-    j1 = PodcastJob(
+    # 1. Non-complete job (SYNTHESIZING)
+    j_synth = PodcastJob(
+        id="11111111-2222-3333-4444-000000000000",
+        transport="telegram",
+        telegram_user_id=user_id,
+        telegram_chat_id=chat_id,
+        status=JobState.SYNTHESIZING.value,
+        source_hash="h0",
+        source_text="Test synth",
+        created_at=now - timedelta(minutes=1),
+    )
+    # 2. Older completed job
+    j_old = PodcastJob(
         id="11111111-2222-3333-4444-555555555555",
         transport="telegram",
         telegram_user_id=user_id,
@@ -43,9 +64,9 @@ def test_resolve_user_job_latest_and_by_id(db_session):
         created_at=now - timedelta(hours=2),
         completed_at=now - timedelta(hours=2),
     )
-    # 2. Newer completed job
-    j2 = PodcastJob(
-        id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    # 3. Newer completed job (shares prefix "1111" with j_old!)
+    j_ambig = PodcastJob(
+        id="11111111-9999-3333-4444-888888888888",
         transport="telegram",
         telegram_user_id=user_id,
         telegram_chat_id=chat_id,
@@ -55,8 +76,8 @@ def test_resolve_user_job_latest_and_by_id(db_session):
         created_at=now - timedelta(minutes=10),
         completed_at=now - timedelta(minutes=5),
     )
-    # 3. Another user's job
-    j3 = PodcastJob(
+    # 4. Another user's job
+    j_other = PodcastJob(
         id="99999999-9999-9999-9999-999999999999",
         transport="telegram",
         telegram_user_id=99999,
@@ -67,138 +88,187 @@ def test_resolve_user_job_latest_and_by_id(db_session):
         created_at=now,
         completed_at=now,
     )
-    db_session.add_all([j1, j2, j3])
+    db_session.add_all([j_synth, j_old, j_ambig, j_other])
     db_session.commit()
 
-    # Default query (no arg) returns latest (j2)
-    latest = resolve_user_job(db_session, user_id, chat_id)
-    assert latest is not None
-    assert latest.id == j2.id
+    # Default query with completed_only=True returns latest completed (j_ambig)
+    latest_c = resolve_user_job(db_session, user_id, chat_id, completed_only=True)
+    assert latest_c is not None
+    assert latest_c.id == j_ambig.id
 
-    # Exact UUID query for older job (j1)
-    exact = resolve_user_job(db_session, user_id, chat_id, "11111111-2222-3333-4444-555555555555")
-    assert exact is not None
-    assert exact.id == j1.id
+    # completed_only=True rejects explicit non-complete job
+    non_c = resolve_user_job(db_session, user_id, chat_id, identifier="11111111-2222-3333-4444-000000000000", completed_only=True)
+    assert non_c is None
 
-    # Prefix query (min 4 chars)
-    prefix = resolve_user_job(db_session, user_id, chat_id, "aaaaaaa")
-    assert prefix is not None
-    assert prefix.id == j2.id
+    # Ambiguous prefix "11111111" (matches both j_old and j_ambig) -> returns None
+    ambig_match = resolve_user_job(db_session, user_id, chat_id, identifier="11111111", completed_only=True)
+    assert ambig_match is None
 
-    # Cross-tenant query for j3 is rejected
-    cross = resolve_user_job(db_session, user_id, chat_id, "99999999-9999-9999-9999-999999999999")
-    assert cross is None
+    # Unambiguous prefix "11111111-9999" -> matches j_ambig
+    unique_match = resolve_user_job(db_session, user_id, chat_id, identifier="11111111-9999", completed_only=True)
+    assert unique_match is not None
+    assert unique_match.id == j_ambig.id
+
+    # Wildcard and SQL injection characters rejected
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="%") is None
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="_") is None
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="1111%") is None
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="abc'; DROP TABLE") is None
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="12") is None  # Too short (< 4 chars)
+
+    # Cross-tenant query rejected
+    assert resolve_user_job(db_session, user_id, chat_id, identifier="99999999-9999-9999-9999-999999999999") is None
 
 
-def test_download_command_reuses_document_file_id(db_session):
-    """/download reuses telegram_document_file_id when available without uploading disk file."""
-    code = generate_pairing_code(db_session)
-    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
-
-    job = PodcastJob(
-        id="download-test-job-001",
-        transport="telegram",
-        telegram_user_id=12345,
-        telegram_chat_id=12345,
-        status=JobState.COMPLETE.value,
-        source_hash="h1",
-        source_text="Test source text",
-        telegram_document_file_id="tg_doc_file_id_abc123",
-        completed_at=datetime.now(UTC),
-    )
-    db_session.add(job)
-    db_session.commit()
-
+def test_deliver_job_download_priority_hierarchy(db_session, tmp_path):
+    """
+    Test delivery priority hierarchy in deliver_job_download:
+    1. local MP3 exists -> sendDocument -> MIME audio/mpeg -> capture telegram_document_file_id
+    2. local MP3 absent + telegram_document_file_id exists -> sendDocument(file_id=...)
+    3. no document form + telegram_audio_file_id exists -> sendAudio(file_id=...)
+    4. neither -> clear unavailable response
+    """
     mock_client = MagicMock(spec=TelegramClient)
-    msg = {
-        "chat": {"id": 12345, "type": "private"},
-        "from": {"id": 12345},
-        "message_id": 401,
-    }
 
-    handle_telegram_command(db_session, mock_client, msg, "download", "")
-
-    mock_client.send_document.assert_called_once()
-    call_kwargs = mock_client.send_document.call_args[1]
-    assert call_kwargs["file_id"] == "tg_doc_file_id_abc123"
-
-
-def test_download_command_uploads_local_file_and_caches_file_id(db_session, tmp_path):
-    """/download uploads local MP3 as document when document_file_id is absent, then persists it."""
-    code = generate_pairing_code(db_session)
-    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
-
-    mp3_file = tmp_path / "test_ep.mp3"
-    mp3_file.write_bytes(b"dummy mp3 data")
-
-    job = PodcastJob(
-        id="download-test-job-002",
+    # 1. Local file present
+    local_mp3 = tmp_path / "ep1.mp3"
+    local_mp3.write_bytes(b"mp3_data_bytes")
+    job1 = PodcastJob(
+        id="dl-prio-1111-2222-3333-444444444444",
         transport="telegram",
-        telegram_user_id=12345,
-        telegram_chat_id=12345,
+        telegram_user_id=123,
+        telegram_chat_id=123,
         status=JobState.COMPLETE.value,
-        source_hash="h2",
-        source_text="Test source text",
-        local_audio_path=str(mp3_file),
-        completed_at=datetime.now(UTC),
+        local_audio_path=str(local_mp3),
+        source_hash="p1",
+        source_text="Test priority 1 text",
+        custom_title="Priority One Episode",
     )
-    db_session.add(job)
+    db_session.add(job1)
     db_session.commit()
 
-    mock_client = MagicMock(spec=TelegramClient)
     mock_client.send_document.return_value = {
-        "message_id": 999,
-        "document": {"file_id": "newly_generated_doc_file_id_789"},
+        "message_id": 101,
+        "document": {"file_id": "doc_file_id_prio1"},
     }
 
-    msg = {
-        "chat": {"id": 12345, "type": "private"},
-        "from": {"id": 12345},
-        "message_id": 402,
-    }
-
-    handle_telegram_command(db_session, mock_client, msg, "download", "download-test-job-002")
-
+    res1 = deliver_job_download(db_session, mock_client, job1, chat_id=123)
+    assert res1 is True
     mock_client.send_document.assert_called_once()
-    assert mock_client.send_document.call_args[1]["document_path"] == str(mp3_file)
+    call1 = mock_client.send_document.call_args[1]
+    assert call1["document_path"] == str(local_mp3)
+    assert call1["parse_mode"] == "HTML"
+    assert call1["mime_type"] == "audio/mpeg"
+    assert "Priority One Episode" in call1["caption"]
+    db_session.refresh(job1)
+    assert job1.telegram_document_file_id == "doc_file_id_prio1"
 
-    # Verify cached document_file_id in database
-    db_session.refresh(job)
-    assert job.telegram_document_file_id == "newly_generated_doc_file_id_789"
+    # 2. Local file absent + document_file_id present
+    mock_client.reset_mock()
+    job2 = PodcastJob(
+        id="dl-prio-2222-2222-3333-444444444444",
+        transport="telegram",
+        telegram_user_id=123,
+        telegram_chat_id=123,
+        status=JobState.COMPLETE.value,
+        telegram_document_file_id="cached_doc_id_222",
+        source_hash="p2",
+        source_text="Test priority 2 text",
+    )
+    db_session.add(job2)
+    db_session.commit()
+
+    res2 = deliver_job_download(db_session, mock_client, job2, chat_id=123)
+    assert res2 is True
+    mock_client.send_document.assert_called_once()
+    call2 = mock_client.send_document.call_args[1]
+    assert call2["file_id"] == "cached_doc_id_222"
+    assert call2["parse_mode"] == "HTML"
+
+    # 3. No document file + audio_file_id present -> sendAudio
+    mock_client.reset_mock()
+    job3 = PodcastJob(
+        id="dl-prio-3333-2222-3333-444444444444",
+        transport="telegram",
+        telegram_user_id=123,
+        telegram_chat_id=123,
+        status=JobState.COMPLETE.value,
+        telegram_audio_file_id="cached_audio_id_333",
+        source_hash="p3",
+        source_text="Test priority 3 text",
+    )
+    db_session.add(job3)
+    db_session.commit()
+
+    res3 = deliver_job_download(db_session, mock_client, job3, chat_id=123)
+    assert res3 is True
+    mock_client.send_audio.assert_called_once()
+    call3 = mock_client.send_audio.call_args[1]
+    assert call3["file_id"] == "cached_audio_id_333"
+    assert call3["parse_mode"] == "HTML"
+
+    # 4. Neither exists -> unavailable message
+    mock_client.reset_mock()
+    job4 = PodcastJob(
+        id="dl-prio-4444-2222-3333-444444444444",
+        transport="telegram",
+        telegram_user_id=123,
+        telegram_chat_id=123,
+        status=JobState.COMPLETE.value,
+        source_hash="p4",
+        source_text="Test priority 4 text",
+    )
+    db_session.add(job4)
+    db_session.commit()
+
+    res4 = deliver_job_download(db_session, mock_client, job4, chat_id=123)
+    assert res4 is False
+    mock_client.send_message.assert_called_once()
+    assert "Audio file is no longer available" in mock_client.send_message.call_args[1]["text"]
 
 
-def test_download_callback_handles_request(db_session):
-    """h2:download:<uuid> callback answers callback and sends document."""
+def test_download_command_and_callback_share_service(db_session, tmp_path):
+    """Both /download command and h2:download callback route through deliver_job_download."""
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
 
+    local_file = tmp_path / "shared_dl.mp3"
+    local_file.write_bytes(b"test_audio_bytes")
+
     job = PodcastJob(
-        id="download-cb-job-001",
+        id="aaaaaaaa-1111-2222-3333-444444444444",
         transport="telegram",
         telegram_user_id=12345,
         telegram_chat_id=12345,
         status=JobState.COMPLETE.value,
-        source_hash="h3",
-        source_text="Test source text",
-        telegram_document_file_id="doc_file_id_cb",
+        source_hash="sh1",
+        source_text="Test shared dl source",
+        local_audio_path=str(local_file),
         completed_at=datetime.now(UTC),
     )
     db_session.add(job)
     db_session.commit()
 
     mock_client = MagicMock(spec=TelegramClient)
-    cb_query = {
-        "id": "cb-dl-1",
-        "from": {"id": 12345},
-        "message": {"message_id": 501, "chat": {"id": 12345, "type": "private"}},
-        "data": "h2:download:download-cb-job-001",
-    }
+    mock_client.send_document.return_value = {"message_id": 301, "document": {"file_id": "file_id_xyz"}}
 
-    handle_telegram_callback_query(db_session, mock_client, cb_query)
-
-    mock_client.answer_callback_query.assert_called_with("cb-dl-1", text="Sending MP3 file...")
+    # Test /download command
+    msg = {"chat": {"id": 12345, "type": "private"}, "from": {"id": 12345}, "message_id": 10}
+    handle_telegram_command(db_session, mock_client, msg, "download", "aaaaaaaa")
     mock_client.send_document.assert_called_once()
-    assert mock_client.send_document.call_args[1]["file_id"] == "doc_file_id_cb"
+    assert mock_client.send_document.call_args[1]["document_path"] == str(local_file)
+
+    # Test callback query
+    mock_client.reset_mock()
+    cb_query = {
+        "id": "cb-dl-shared",
+        "from": {"id": 12345},
+        "message": {"message_id": 20, "chat": {"id": 12345, "type": "private"}},
+        "data": "h2:download:aaaaaaaa-1111-2222-3333-444444444444",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_query)
+    mock_client.answer_callback_query.assert_called_with("cb-dl-shared", text="Sending MP3 file...")
+    mock_client.send_document.assert_called_once()
 
 
 def test_format_completion_markup_contains_download_button():

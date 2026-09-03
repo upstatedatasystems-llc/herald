@@ -97,10 +97,12 @@ research high
 | :--- | :--- |
 | `/start` | Welcome message and pairing status |
 | `/help` | Concise Telegram usage instructions |
+| `/voices` | Interactive voice catalog, audio sample previews, and default voice selection |
+| `/download [id]` | Download completed podcast MP3 as an audio document |
 | `/status` | Live runtime, TTS readiness, AI provider health, queue, disk, and uptime |
-| `/ai-check` | Dedicated AI API configuration and connection test |
+| `/ai_check` | Dedicated AI API configuration and connection test |
 | `/queue` | View pending and in-progress podcast jobs |
-| `/settings` | View current user-facing configuration and defaults (`KOKORO_VOICE`, `KOKORO_SPEED`) |
+| `/settings` | View current user-facing configuration and preferences |
 | `/readme` | Send the project `README.md` document |
 | `/pair <code>` | Pair Telegram account as instance owner |
 

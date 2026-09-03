@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -278,4 +279,123 @@ def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp
     finally:
         Session1.close()
         Session2.close()
+
+
+def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch):
+    """
+    Prove real PostgreSQL advisory lock slot pool across independent database sessions.
+    Given effective global slots = 2:
+    - Session A acquires slot 1
+    - Session B acquires slot 2
+    - Session C cannot enter while both are held (times out)
+    - When Session A releases, Session C acquires
+    - Exceptions inside block automatically release advisory lock in finally
+    """
+    from herald.concurrency import tts_slot_lock
+    from herald.config import settings
+
+    monkeypatch.setattr(settings, "HERALD_TTS_GLOBAL_SLOTS", 2)
+    monkeypatch.setattr(settings, "HERALD_TTS_SLOT_BASE", 930000)
+
+    SessionA = pg_session_factory()
+    SessionB = pg_session_factory()
+    SessionC = pg_session_factory()
+
+    try:
+        # A acquires slot 1
+        with tts_slot_lock(db=SessionA, timeout_seconds=5.0) as slotA:
+            assert slotA in (930000, 930001)
+
+            # B acquires slot 2
+            with tts_slot_lock(db=SessionB, timeout_seconds=5.0) as slotB:
+                assert slotB in (930000, 930001)
+                assert slotA != slotB
+
+                # C attempts to acquire 3rd slot -> should time out because all 2 slots are busy!
+                with pytest.raises(TimeoutError, match="busy"):
+                    with tts_slot_lock(db=SessionC, timeout_seconds=0.3):
+                        pass
+
+            # B has released slotB; C can now acquire
+            with tts_slot_lock(db=SessionC, timeout_seconds=2.0) as slotC:
+                assert slotC in (930000, 930001)
+
+        # Failure inside block releases advisory lock
+        try:
+            with tts_slot_lock(db=SessionA, timeout_seconds=2.0):
+                raise ValueError("Deliberate error inside TTS slot")
+        except ValueError:
+            pass
+
+        # Session A can re-acquire immediately
+        with tts_slot_lock(db=SessionA, timeout_seconds=2.0) as slotNew:
+            assert slotNew in (930000, 930001)
+    finally:
+        SessionA.close()
+        SessionB.close()
+        SessionC.close()
+
+
+def test_postgres_approval_cas_race(pg_session_factory):
+    """
+    Prove that simultaneous atomic Compare-And-Swap approval decisions across independent
+    PostgreSQL sessions result in exactly ONE winner and preserve strict state consistency.
+    """
+    SessionAdmin = pg_session_factory()
+    SessionUser1 = pg_session_factory()
+    SessionUser2 = pg_session_factory()
+
+    try:
+        # 1. Setup job awaiting approval
+        job = PodcastJob(
+            id="pg-cas-job-1111-2222-333333333333",
+            transport="telegram",
+            telegram_user_id=777,
+            telegram_chat_id=777,
+            request_mode="standard",
+            source_hash="pg-cas-h1",
+            source_text="CAS test",
+            status=JobState.AWAITING_APPROVAL.value,
+        )
+        SessionAdmin.add(job)
+        SessionAdmin.commit()
+
+        # Race 1: SessionUser1 (Approve) vs SessionUser2 (Approve)
+        barrier = threading.Barrier(2)
+        results = {}
+
+        def approve_task(session, name):
+            barrier.wait()
+            now = datetime.now(UTC)
+            updated = (
+                session.query(PodcastJob)
+                .filter(
+                    PodcastJob.id == job.id,
+                    PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                    PodcastJob.telegram_user_id == 777,
+                    PodcastJob.telegram_chat_id == 777,
+                )
+                .update({"status": JobState.QUEUED_TTS.value, "approved_at": now}, synchronize_session=False)
+            )
+            session.commit()
+            results[name] = updated
+
+        t1 = threading.Thread(target=approve_task, args=(SessionUser1, "u1"))
+        t2 = threading.Thread(target=approve_task, args=(SessionUser2, "u2"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Exactly ONE session updated the row from AWAITING_APPROVAL to QUEUED_TTS
+        assert results["u1"] + results["u2"] == 1
+
+        # Verify DB state
+        SessionAdmin.expire_all()
+        db_job = SessionAdmin.query(PodcastJob).filter_by(id=job.id).first()
+        assert db_job.status == JobState.QUEUED_TTS.value
+    finally:
+        SessionAdmin.close()
+        SessionUser1.close()
+        SessionUser2.close()
 

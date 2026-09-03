@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from apps.telegram_bot.main import TELEGRAM_BOT_COMMANDS
+from herald.config import settings
 from herald.db.models import Base, PodcastJob
 from herald.telegram.auth import (
     generate_pairing_code,
@@ -310,8 +311,11 @@ def test_settings_command_and_formatting(db_session):
     assert markup["inline_keyboard"][0][0]["callback_data"] == "h2:settings:confirm:on"
 
 
-def test_typed_preference_setters(db_session):
+def test_typed_preference_setters(db_session, monkeypatch):
     """Test strictly typed preference setters with input validation."""
+    monkeypatch.setattr(settings, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
 

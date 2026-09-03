@@ -2,8 +2,10 @@ import html
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -25,7 +27,12 @@ from herald.extraction.email_parser import (
     URL_REGEX,
 )
 from herald.services.eta_calculator import calculate_job_eta
-from herald.services.voice_manager import VOICE_METADATA, ensure_voice_sample
+from herald.services.voice_manager import (
+    VOICE_METADATA,
+    ensure_voice_sample,
+    get_voice_sample_path,
+    is_valid_sample_audio,
+)
 from herald.telegram.auth import (
     get_effective_user_preferences,
     get_paired_owner,
@@ -36,7 +43,7 @@ from herald.telegram.auth import (
     verify_and_claim_pairing_code,
 )
 from herald.telegram.client import TelegramClient
-from herald.telegram.delivery import deliver_pending_telegram_jobs
+from herald.telegram.delivery import deliver_job_download, deliver_pending_telegram_jobs
 from herald.telegram.formatters import (
     format_approval,
     format_help,
@@ -44,6 +51,7 @@ from herald.telegram.formatters import (
     format_quickstart,
     format_settings,
     format_voices_browser,
+    get_job_display_title,
 )
 from herald.telegram.resolver import resolve_user_job
 from herald.tts.kokoro_client import KokoroClient
@@ -51,6 +59,11 @@ from herald.tts.kokoro_client import KokoroClient
 logger = logging.getLogger("herald.telegram.bot")
 
 _START_TIME = datetime.now(UTC)
+
+# Dedicated bounded background threadpool for voice sample pre-rendering (cache miss)
+_VOICE_SAMPLE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="voice-sample")
+_IN_FLIGHT_VOICE_SAMPLES: set[str] = set()
+_VOICE_SAMPLE_LOCK = Lock()
 
 
 def parse_telegram_message_directives(text: str) -> dict[str, Any]:
@@ -336,19 +349,14 @@ def handle_telegram_command(
         else:
             ai_status_str = "⚪ Not configured (Literal mode default)"
 
-        # Queue counts
+        # Queue counts across all nonterminal active states
+        nonterminal_states = [
+            s.value for s in JobState
+            if s not in (JobState.COMPLETE, JobState.FAILED_FINAL, JobState.CANCELLED)
+        ]
         active_count = (
             db.query(PodcastJob)
-            .filter(PodcastJob.status.in_([
-                JobState.RECEIVED.value,
-                JobState.VALIDATING.value,
-                JobState.EXTRACTING.value,
-                JobState.SCRIPTING.value,
-                JobState.QUEUED_TTS.value,
-                JobState.SYNTHESIZING.value,
-                JobState.ENCODING.value,
-                JobState.DELIVERING.value,
-            ]))
+            .filter(PodcastJob.status.in_(nonterminal_states))
             .count()
         )
         completed_count = db.query(PodcastJob).filter(PodcastJob.status == JobState.COMPLETE.value).count()
@@ -399,21 +407,28 @@ def handle_telegram_command(
             )
 
     elif cmd_clean == "queue":
-        jobs = (
-            db.query(PodcastJob)
-            .filter(PodcastJob.status.notin_([JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value]))
-            .order_by(PodcastJob.created_at.asc())
-            .limit(10)
-            .all()
+        owner = get_paired_owner(db)
+        is_owner = (owner is not None and int(user_id) == owner.telegram_user_id)
+
+        q = db.query(PodcastJob).filter(
+            PodcastJob.status.notin_([JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value])
         )
+        if not is_owner:
+            q = q.filter(
+                PodcastJob.transport == "telegram",
+                PodcastJob.telegram_user_id == int(user_id),
+                PodcastJob.telegram_chat_id == int(chat_id),
+            )
+
+        jobs = q.order_by(PodcastJob.created_at.asc()).limit(10).all()
         if not jobs:
             client.send_message(chat_id=chat_id, text="📭 <b>Queue is currently empty.</b>", reply_to_message_id=msg_id, parse_mode="HTML")
             return
 
         lines = ["📋 <b>Active Podcast Queue:</b>\n"]
         for j in jobs:
-            t = html.escape(j.custom_title or (j.script_json or {}).get("episode_title") or "Untitled")
-            mode = html.escape(j.request_mode)
+            t = html.escape(get_job_display_title(j))
+            mode = html.escape(j.request_mode or "standard")
             st = html.escape(j.status)
             lines.append(f"• <b>{t}</b> [{mode}] — <code>{st}</code>")
 
@@ -444,67 +459,17 @@ def handle_telegram_command(
         )
 
     elif cmd_clean == "download":
-        job = resolve_user_job(db, user_id=user_id, chat_id=chat_id, query_or_id=args)
+        job = resolve_user_job(db, telegram_user_id=user_id, telegram_chat_id=chat_id, identifier=args, completed_only=True)
         if not job:
             client.send_message(
                 chat_id=chat_id,
-                text="ℹ️ <b>No completed podcast found to download.</b>\n\nProvide an episode ID (e.g. <code>/download &lt;id&gt;</code>) or generate a podcast first.",
+                text="ℹ️ <b>No completed podcast found to download.</b>\n\nProvide a valid episode ID (e.g. <code>/download &lt;id&gt;</code>) or generate a podcast first.",
                 reply_to_message_id=msg_id,
                 parse_mode="HTML",
             )
             return
 
-        title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
-        caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
-
-        # 1. Reusable document file_id
-        if job.telegram_document_file_id:
-            try:
-                client.send_document(
-                    chat_id=chat_id,
-                    file_id=job.telegram_document_file_id,
-                    caption=caption,
-                    reply_to_message_id=msg_id,
-                )
-                return
-            except Exception as e:
-                logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
-
-        # 2. Local audio path
-        if job.local_audio_path and os.path.exists(job.local_audio_path):
-            try:
-                res = client.send_document(
-                    chat_id=chat_id,
-                    document_path=job.local_audio_path,
-                    caption=caption,
-                    reply_to_message_id=msg_id,
-                )
-                if res and isinstance(res, dict) and (res.get("document") or {}).get("file_id"):
-                    job.telegram_document_file_id = res["document"]["file_id"]
-                    db.commit()
-                return
-            except Exception as e:
-                logger.error(f"Failed uploading local MP3 document: {e}")
-
-        # 3. Audio file_id fallback
-        if job.telegram_audio_file_id:
-            try:
-                client.send_audio(
-                    chat_id=chat_id,
-                    file_id=job.telegram_audio_file_id,
-                    caption=caption,
-                    reply_to_message_id=msg_id,
-                )
-                return
-            except Exception as e:
-                logger.warning(f"Failed sending audio by file_id '{job.telegram_audio_file_id}': {e}")
-
-        client.send_message(
-            chat_id=chat_id,
-            text="⚠️ <b>Audio file is no longer available on server.</b>",
-            reply_to_message_id=msg_id,
-            parse_mode="HTML",
-        )
+        deliver_job_download(db, client, job, chat_id=chat_id, reply_to_message_id=msg_id)
 
     elif cmd_clean == "readme":
         readme_path = Path("README.md")
@@ -945,59 +910,13 @@ def handle_telegram_callback_query(
 
     elif raw_data.startswith("h2:download:"):
         job_id = raw_data[len("h2:download:"):]
-        job = resolve_user_job(db, user_id=user_id, chat_id=chat_id, query_or_id=job_id)
+        job = resolve_user_job(db, telegram_user_id=user_id, telegram_chat_id=chat_id, identifier=job_id, completed_only=True)
         if not job:
             client.answer_callback_query(cb_id, text="Podcast not found or access denied.", show_alert=True)
             return
 
         client.answer_callback_query(cb_id, text="Sending MP3 file...")
-        title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
-        caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
-
-        # 1. Reusable document file_id
-        if job.telegram_document_file_id:
-            try:
-                client.send_document(
-                    chat_id=chat_id,
-                    file_id=job.telegram_document_file_id,
-                    caption=caption,
-                )
-                return
-            except Exception as e:
-                logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
-
-        # 2. Local audio path
-        if job.local_audio_path and os.path.exists(job.local_audio_path):
-            try:
-                res = client.send_document(
-                    chat_id=chat_id,
-                    document_path=job.local_audio_path,
-                    caption=caption,
-                )
-                if res and isinstance(res, dict) and (res.get("document") or {}).get("file_id"):
-                    job.telegram_document_file_id = res["document"]["file_id"]
-                    db.commit()
-                return
-            except Exception as e:
-                logger.error(f"Failed uploading local MP3 document: {e}")
-
-        # 3. Audio file_id fallback
-        if job.telegram_audio_file_id:
-            try:
-                client.send_audio(
-                    chat_id=chat_id,
-                    file_id=job.telegram_audio_file_id,
-                    caption=caption,
-                )
-                return
-            except Exception as e:
-                logger.warning(f"Failed sending audio by file_id '{job.telegram_audio_file_id}': {e}")
-
-        client.send_message(
-            chat_id=chat_id,
-            text="⚠️ <b>Audio file is no longer available on server.</b>",
-            parse_mode="HTML",
-        )
+        deliver_job_download(db, client, job, chat_id=chat_id)
         return
 
     elif raw_data.startswith("h2:voice:set:"):
@@ -1032,33 +951,90 @@ def handle_telegram_callback_query(
             client.answer_callback_query(cb_id, text=f"Invalid voice '{v_name}'.", show_alert=True)
             return
 
-        client.answer_callback_query(cb_id, text=f"Preparing voice sample for {v_name}...")
-        try:
-            sample_path = ensure_voice_sample(voice=v_name, db=db)
-            meta = VOICE_METADATA.get(v_name, {})
-            disp_name = meta.get("display_name", v_name)
-            caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
-            sample_markup = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": f"⭐ Set as Default ({disp_name})",
-                            "callback_data": f"h2:voice:set:{v_name}",
-                        }
-                    ]
+        meta = VOICE_METADATA.get(v_name, {})
+        disp_name = meta.get("display_name", v_name)
+        sample_path = get_voice_sample_path(v_name)
+
+        sample_markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": f"⭐ Set as Default ({disp_name})",
+                        "callback_data": f"h2:voice:set:{v_name}",
+                    }
                 ]
-            }
+            ]
+        }
+
+        # Cache hit: fast immediate delivery
+        if is_valid_sample_audio(sample_path):
+            client.answer_callback_query(cb_id, text=f"Playing sample for {disp_name}...")
+            caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
             client.send_audio(
                 chat_id=chat_id,
                 audio_path=sample_path,
                 title=f"Sample: {disp_name}",
                 performer="Herald",
                 caption=caption,
+                parse_mode="HTML",
                 reply_markup=sample_markup,
             )
-        except Exception as e:
-            logger.error(f"Failed to generate voice sample for '{v_name}': {e}")
-            client.send_message(chat_id=chat_id, text=f"⚠️ Failed to generate voice sample: {e}")
+            return
+
+        # Cache miss: non-blocking background generation with in-flight deduplication
+        with _VOICE_SAMPLE_LOCK:
+            if v_name in _IN_FLIGHT_VOICE_SAMPLES:
+                client.answer_callback_query(
+                    cb_id,
+                    text=f"Sample for {disp_name} is already being prepared...",
+                    show_alert=False,
+                )
+                return
+            _IN_FLIGHT_VOICE_SAMPLES.add(v_name)
+
+        client.answer_callback_query(cb_id, text=f"Preparing voice sample for {disp_name}... Herald will send it shortly.")
+
+        def _bg_generate_sample(target_voice: str, target_chat_id: int):
+            try:
+                with SessionLocal() as db_session:
+                    gen_path = ensure_voice_sample(voice=target_voice, db=db_session)
+                v_meta = VOICE_METADATA.get(target_voice, {})
+                d_name = v_meta.get("display_name", target_voice)
+                cap = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(target_voice)}</code> ({html.escape(d_name)})\nSpeed: 1.0x"
+                m_up = {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": f"⭐ Set as Default ({d_name})",
+                                "callback_data": f"h2:voice:set:{target_voice}",
+                            }
+                        ]
+                    ]
+                }
+                client.send_audio(
+                    chat_id=target_chat_id,
+                    audio_path=gen_path,
+                    title=f"Sample: {d_name}",
+                    performer="Herald",
+                    caption=cap,
+                    parse_mode="HTML",
+                    reply_markup=m_up,
+                )
+            except Exception as e:
+                logger.error(f"Background voice sample generation failed for '{target_voice}': {e}", exc_info=True)
+                try:
+                    client.send_message(
+                        chat_id=target_chat_id,
+                        text="⚠️ <b>Voice sample generation failed. Please try again.</b>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            finally:
+                with _VOICE_SAMPLE_LOCK:
+                    _IN_FLIGHT_VOICE_SAMPLES.discard(target_voice)
+
+        _VOICE_SAMPLE_EXECUTOR.submit(_bg_generate_sample, v_name, int(chat_id))
         return
 
     else:
@@ -1150,6 +1126,12 @@ def sweep_unpresented_approval_cards(db: Session, client: TelegramClient) -> int
                 job.approval_requested_at = now
                 db.commit()
                 delivered += 1
+            else:
+                job.attempt_count = (job.attempt_count or 0) + 1
+                db.commit()
+                logger.warning(
+                    f"Approval card presentation returned no message_id for job '{job.id}' (attempt {job.attempt_count})"
+                )
         except Exception as e:
             job.attempt_count = (job.attempt_count or 0) + 1
             db.commit()

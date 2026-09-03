@@ -10,6 +10,7 @@ from threading import Semaphore
 from sqlalchemy.orm import Session
 
 from herald.audio.ffmpeg_builder import validate_audio_file
+from herald.concurrency import tts_slot_lock
 from herald.db.models import PodcastJob, PodcastTTSChunk
 from herald.services.performance_metrics import record_stage_metric
 from herald.tts.chunker import TTSChunk
@@ -200,13 +201,14 @@ def synthesize_single_chunk(
                             f"Worker '{worker_id}' synthesizing chunk {chunk.index}/{total_chunks} (attempt {attempt}): "
                             f"{len(chunk.text)} chars | timeout: {synthesis_timeout}s"
                         )
-                        kokoro_client.synthesize_chunk(
-                            text=chunk.text,
-                            output_path=chunk_file,
-                            voice=voice,
-                            speed=speed,
-                            timeout=synthesis_timeout,
-                        )
+                        with tts_slot_lock(db=db):
+                            kokoro_client.synthesize_chunk(
+                                text=chunk.text,
+                                output_path=chunk_file,
+                                voice=voice,
+                                speed=speed,
+                                timeout=synthesis_timeout,
+                            )
                         val_meta = validate_audio_file(chunk_file)
 
                         t1_mono = time.monotonic()

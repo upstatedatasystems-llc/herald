@@ -221,6 +221,10 @@ def is_user_authorized(db: Session, user_id: int | str, chat_id: int | str | Non
 def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str, Any]:
     """
     Retrieve user preferences from database with automatic fallback to instance settings.
+    Validates stored preferences against current runtime configuration:
+    - default_voice must be in current ALLOWED_VOICES
+    - default_speed must be between MIN_SPEED and MAX_SPEED
+    - default_mode must be valid, falling back to literal if AI is unconfigured
     """
     try:
         uid_int = int(user_id)
@@ -236,14 +240,42 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
         )
 
     confirm = bool(user.confirm_before_tts) if user and user.confirm_before_tts is not None else False
-    voice = (user.default_voice if user and user.default_voice else None) or getattr(settings, "KOKORO_VOICE", "af_heart")
-    speed = (user.default_speed if user and user.default_speed else None) or getattr(settings, "KOKORO_SPEED", 1.0)
-    mode = (user.default_mode if user and user.default_mode else None) or settings.get_default_mode()
+
+    # 1. Voice validation against current allowed voices
+    allowed_voices = settings.get_allowed_voices_list()
+    stored_voice = (user.default_voice.strip().lower()) if user and user.default_voice else None
+    if stored_voice and stored_voice in allowed_voices:
+        voice = stored_voice
+    else:
+        inst_voice = getattr(settings, "KOKORO_VOICE", "af_heart").strip().lower()
+        voice = inst_voice if inst_voice in allowed_voices else (allowed_voices[0] if allowed_voices else "af_heart")
+
+    # 2. Speed validation against runtime bounds
+    min_spd = getattr(settings, "MIN_SPEED", 0.8)
+    max_spd = getattr(settings, "MAX_SPEED", 1.2)
+    stored_speed = user.default_speed if user and user.default_speed is not None else None
+    if stored_speed is not None and min_spd <= float(stored_speed) <= max_spd:
+        speed = float(stored_speed)
+    else:
+        speed = float(getattr(settings, "KOKORO_SPEED", 1.0))
+
+    # 3. Mode validation against recognized modes and AI provider status
+    allowed_modes = {"standard", "brief", "literal", "research"}
+    stored_mode = (user.default_mode.strip().lower()) if user and user.default_mode else None
+    if stored_mode and stored_mode in allowed_modes:
+        cand_mode = stored_mode
+    else:
+        cand_mode = settings.get_default_mode().lower()
+
+    if not settings.is_ai_configured() and cand_mode != "literal":
+        mode = "literal"
+    else:
+        mode = cand_mode
 
     return {
         "confirm_before_tts": confirm,
         "default_voice": voice,
-        "default_speed": float(speed),
+        "default_speed": speed,
         "default_mode": mode,
         "ai_provider": getattr(settings, "AI_PROVIDER", None) or "None (Literal only)",
     }

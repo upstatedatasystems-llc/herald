@@ -398,6 +398,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
 
             is_section_end_list = [c.is_section_end for c in chunks]
 
+            initial_completed = job.completed_chunk_index or 0
             monitor = TTSResourceMonitor(interval_seconds=5.0)
             monitor.start()
 
@@ -444,7 +445,11 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                 started_at=t_tts_total_start,
                 finished_at=t_tts_total_finish,
                 status="success",
-                metadata_json={"chunks_count": len(chunks), "worker_id": worker_id},
+                metadata_json={
+                    "chunks_count": len(chunks),
+                    "worker_id": worker_id,
+                    "full_synthesis": (initial_completed == 0),
+                },
             )
 
             # Transition to ENCODING

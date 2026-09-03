@@ -1,3 +1,4 @@
+import html
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -111,7 +112,13 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     max_bytes = getattr(settings, "TELEGRAM_MAX_AUDIO_BYTES", 50 * 1024 * 1024)
 
     from herald.db.models import PodcastTTSChunk
-    from herald.telegram.formatters import format_completion, format_completion_markup
+    from herald.telegram.formatters import (
+        format_completion,
+        format_completion_markup,
+        get_job_display_title,
+    )
+
+    ep_title = get_job_display_title(job)
 
     chunks_count = (
         db.query(PodcastTTSChunk)
@@ -122,10 +129,25 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         chunks_count = job.completed_chunk_index
 
     dur_secs = int(job.audio_duration_seconds or 0)
+
+    # Authoritative active processing time calculation as-of delivery timestamp
+    active_sec = None
+    c_at = job.created_at.replace(tzinfo=UTC) if (job.created_at and job.created_at.tzinfo is None) else job.created_at
+    if c_at:
+        total_sec = (t0 - c_at).total_seconds()
+        app_at = job.approved_at.replace(tzinfo=UTC) if (job.approved_at and job.approved_at.tzinfo is None) else job.approved_at
+        req_at = job.approval_requested_at.replace(tzinfo=UTC) if (job.approval_requested_at and job.approval_requested_at.tzinfo is None) else job.approval_requested_at
+        if app_at and req_at:
+            hold_sec = (app_at - req_at).total_seconds()
+            active_sec = max(1, int(total_sec - hold_sec))
+        else:
+            active_sec = max(1, int(total_sec))
+
     caption = format_completion(
         job=job,
         actual_chunks_count=chunks_count,
         file_size_bytes=file_size_bytes,
+        active_processing_seconds=active_sec,
     )
     completion_markup = format_completion_markup(job)
 
@@ -133,8 +155,9 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     if file_size_bytes > max_bytes:
         size_mb = file_size_bytes / (1024 * 1024)
         max_mb = max_bytes / (1024 * 1024)
+        esc_title = html.escape(ep_title)
         warn_msg = (
-            f"⚠️ <b>Podcast Rendered</b>: {ep_title}\n\n"
+            f"⚠️ <b>Podcast Rendered</b>: {esc_title}\n\n"
             f"Your episode was generated successfully ({size_mb:.1f} MB), but exceeds this Herald "
             f"instance's Telegram delivery limit ({max_mb:.0f} MB).\n\n"
             f"The file has been retained locally for administrator recovery.\nJob ID: <code>{job.id[:8]}</code>"
@@ -159,6 +182,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             chat_id=chat_id,
             audio_path=audio_path,
             caption=caption,
+            parse_mode="HTML",
             title=ep_title,
             performer="Herald",
             duration=dur_secs,
@@ -179,6 +203,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                 chat_id=chat_id,
                 document_path=audio_path,
                 caption=caption,
+                parse_mode="HTML",
                 reply_to_message_id=reply_id,
                 reply_markup=completion_markup,
             )
@@ -242,3 +267,82 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
 
     logger.info(f"Delivered completed MP3 for job '{job.id}' to Telegram chat '{chat_id}'")
     return True
+
+
+def deliver_job_download(
+    db: Session,
+    client: TelegramClient,
+    job: PodcastJob,
+    chat_id: int | str,
+    reply_to_message_id: int | None = None,
+) -> bool:
+    """
+    Deliver completed podcast MP3 download to Telegram user with approved priority:
+    1. Retained local MP3 on disk -> sendDocument(document_path=...) -> capture/persist telegram_document_file_id
+    2. No local file + telegram_document_file_id -> sendDocument(file_id=...)
+    3. No document form + telegram_audio_file_id -> sendAudio(file_id=...)
+    4. None -> clear unavailable message
+    """
+    import os
+
+    from herald.telegram.formatters import get_job_display_title
+
+    title = get_job_display_title(job)
+    caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
+
+    # Priority 1: Retained local MP3 on disk
+    if job.local_audio_path and os.path.exists(job.local_audio_path) and os.path.getsize(job.local_audio_path) > 0:
+        try:
+            res = client.send_document(
+                chat_id=chat_id,
+                document_path=job.local_audio_path,
+                caption=caption,
+                parse_mode="HTML",
+                mime_type="audio/mpeg",
+                reply_to_message_id=reply_to_message_id,
+            )
+            if res and isinstance(res, dict):
+                doc_obj = res.get("document") or {}
+                if doc_obj.get("file_id"):
+                    job.telegram_document_file_id = doc_obj["file_id"]
+                    db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed uploading local MP3 document for download: {e}")
+
+    # Priority 2: Reusable telegram_document_file_id
+    if job.telegram_document_file_id:
+        try:
+            client.send_document(
+                chat_id=chat_id,
+                file_id=job.telegram_document_file_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
+
+    # Priority 3: Fallback to telegram_audio_file_id via sendAudio
+    if job.telegram_audio_file_id:
+        try:
+            client.send_audio(
+                chat_id=chat_id,
+                file_id=job.telegram_audio_file_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed sending audio by file_id '{job.telegram_audio_file_id}': {e}")
+
+    # Priority 4: Unavailable
+    client.send_message(
+        chat_id=chat_id,
+        text="⚠️ <b>Audio file is no longer available on server.</b>",
+        parse_mode="HTML",
+        reply_to_message_id=reply_to_message_id,
+    )
+    return False

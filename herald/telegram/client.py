@@ -200,6 +200,7 @@ class TelegramClient:
         audio_path: str | Path | None = None,
         file_id: str | None = None,
         caption: str | None = None,
+        parse_mode: str | None = None,
         title: str | None = None,
         performer: str = "Herald",
         duration: int | None = None,
@@ -216,6 +217,8 @@ class TelegramClient:
         }
         if caption:
             data["caption"] = caption
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         if title:
             data["title"] = title
         if duration is not None:
@@ -264,6 +267,7 @@ class TelegramClient:
         document_path: str | Path | None = None,
         file_id: str | None = None,
         caption: str | None = None,
+        parse_mode: str | None = None,
         reply_to_message_id: int | None = None,
         mime_type: str | None = None,
         reply_markup: dict[str, Any] | None = None,
@@ -275,6 +279,8 @@ class TelegramClient:
         data: dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:
             data["caption"] = caption
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         if reply_to_message_id:
             data["reply_to_message_id"] = str(reply_to_message_id)
 

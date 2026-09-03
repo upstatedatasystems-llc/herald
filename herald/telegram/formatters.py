@@ -129,16 +129,35 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
     return text, reply_markup
 
 
-def format_approval(job: PodcastJob, script_json: dict | None, eta_info: dict | None = None) -> tuple[str, dict]:
+def get_job_display_title(job: PodcastJob) -> str:
     """
-    Format pre-TTS approval card with actual job and script data.
+    Return authoritative display title with strict precedence:
+    job.custom_title -> (job.script_json or {}).get("episode_title") -> "Herald Episode"
+    """
+    if job.custom_title and str(job.custom_title).strip():
+        return str(job.custom_title).strip()
+    if job.script_json and isinstance(job.script_json, dict):
+        ep_title = job.script_json.get("episode_title")
+        if ep_title and str(ep_title).strip():
+            return str(ep_title).strip()
+    return "Herald Episode"
+
+
+def format_approval(
+    job: PodcastJob,
+    script_json: dict | None,
+    eta_info: dict | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Format interactive approval card message with Approve and Cancel buttons.
     Returns:
         (text, reply_markup_dict)
     """
     script_obj = script_json or job.script_json or {}
-    title = html.escape(script_obj.get("episode_title") or job.custom_title or "Herald Episode")
+    title_raw = get_job_display_title(job)
+    title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
     desc = script_obj.get("episode_description") or ""
-    desc_clean = html.escape(desc[:200] + "..." if len(desc) > 200 else desc)
+    desc_clean = html.escape(desc[:150] + "..." if len(desc) > 150 else desc)
 
     mode_str = html.escape((job.request_mode or "standard").capitalize())
     if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
@@ -194,9 +213,10 @@ def format_approval(job: PodcastJob, script_json: dict | None, eta_info: dict | 
 def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | None = None) -> str:
     """Format rich queued card for automatically queued or explicitly approved jobs."""
     script_obj = script_json or job.script_json or {}
-    title = html.escape(script_obj.get("episode_title") or job.custom_title or "Herald Episode")
+    title_raw = get_job_display_title(job)
+    title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
     desc = script_obj.get("episode_description") or ""
-    desc_clean = html.escape(desc[:200] + "..." if len(desc) > 200 else desc)
+    desc_clean = html.escape(desc[:150] + "..." if len(desc) > 150 else desc)
 
     mode_str = html.escape((job.request_mode or "standard").capitalize())
     if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
@@ -209,6 +229,15 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
 
     voice = html.escape(job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
     speed = float(job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+
+    # Source type
+    src_type_raw = job.source_type or "text"
+    if job.source_url:
+        src_disp = f"URL ({html.escape(job.source_url[:35])}{'...' if len(job.source_url) > 35 else ''})"
+    elif src_type_raw == "email_body":
+        src_disp = "Email body"
+    else:
+        src_disp = html.escape(src_type_raw.capitalize())
 
     jobs_ahead = (eta_info or {}).get("jobs_ahead", 0)
     eta_range = (eta_info or {}).get("estimated_completion_range") or "approximately 3–5 minutes"
@@ -224,14 +253,14 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
         f"🎙️ <b>Podcast Queued for Synthesis</b>\n\n"
         f"<b>{title}</b>{desc_section}\n"
         f"• <b>Mode:</b> {mode_str}\n"
-        f"• <b>Source:</b> {source_words:,} words\n"
+        f"• <b>Source:</b> {src_disp} ({source_words:,} words)\n"
         f"• <b>Narration:</b> {narration_words:,} words (~{pred_duration})\n"
         f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
         f"{ai_line}"
         f"{queue_line}\n"
         f"• <b>Estimated Range:</b> {html.escape(eta_range)}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>\n\n"
-        f"Synthesizing audio now. You will receive the completed MP3 file shortly."
+        f"Queued for synthesis. Herald will begin when TTS capacity is available."
     )
 
 
@@ -239,12 +268,14 @@ def format_completion(
     job: PodcastJob,
     actual_chunks_count: int | None = None,
     file_size_bytes: int | None = None,
+    active_processing_seconds: int | float | None = None,
 ) -> str:
     """
     Format concise rich caption for audio delivery adhering to Telegram's 1024-char limit.
     """
     script_obj = job.script_json or {}
-    title = html.escape(script_obj.get("episode_title") or job.custom_title or "Herald Episode")
+    title_raw = get_job_display_title(job)
+    title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
     desc = script_obj.get("episode_description") or ""
 
     mode_str = html.escape((job.request_mode or "standard").capitalize())
@@ -255,9 +286,16 @@ def format_completion(
     size_mb_str = f"{file_size_bytes / (1024 * 1024):.1f} MB" if file_size_bytes else ""
     dur_size_str = f"{dur_str} ({size_mb_str})" if size_mb_str else dur_str
 
+    # Word counts
+    source_words = len((job.source_text or "").split()) if job.source_text else 0
+    dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+    narration_words = dur_data.get("narration_word_count", 0)
+
     # Active processing time calculation
     proc_time_str = ""
-    if job.completed_at and job.created_at:
+    if active_processing_seconds is not None and active_processing_seconds > 0:
+        proc_time_str = format_duration_sec(active_processing_seconds)
+    elif job.completed_at and job.created_at:
         total_sec = (job.completed_at - job.created_at).total_seconds()
         if job.approved_at and job.approval_requested_at:
             hold_sec = (job.approved_at - job.approval_requested_at).total_seconds()
@@ -275,22 +313,46 @@ def format_completion(
     ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
 
     # Truncate description safely to stay well within 1024 chars
-    desc_clean = html.escape(desc[:150] + "..." if len(desc) > 150 else desc) if desc else ""
+    desc_clean = html.escape(desc[:120] + "..." if len(desc) > 120 else desc) if desc else ""
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
+
+    words_line = ""
+    if source_words > 0 and narration_words > 0:
+        words_line = f"\n• <b>Words:</b> {source_words:,} src / {narration_words:,} nar"
+    elif narration_words > 0:
+        words_line = f"\n• <b>Words:</b> {narration_words:,} nar"
 
     chunks_line = f"\n• <b>TTS Chunks:</b> {chunks_str}" if chunks_str else ""
     proc_line = f"\n• <b>Processing Time:</b> {proc_time_str}" if proc_time_str else ""
 
-    return (
+    caption = (
         f"🎙️ <b>{title}</b>{desc_section}\n"
         f"• <b>Duration:</b> {dur_size_str}\n"
         f"• <b>Mode:</b> {mode_str}\n"
         f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
         f"{ai_line}"
+        f"{words_line}"
         f"{chunks_line}"
         f"{proc_line}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>"
     )
+
+    # Ensure strictly within Telegram's 1024-char caption limit
+    if len(caption) > 1024:
+        # Emergency trim of description
+        desc_section = ""
+        caption = (
+            f"🎙️ <b>{title}</b>\n"
+            f"• <b>Duration:</b> {dur_size_str}\n"
+            f"• <b>Mode:</b> {mode_str}\n"
+            f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
+            f"{ai_line}"
+            f"{words_line}"
+            f"{chunks_line}"
+            f"{proc_line}\n"
+            f"• <b>Job ID:</b> <code>{short_id}</code>"
+        )
+    return caption
 
 
 def format_completion_markup(job: PodcastJob) -> dict[str, Any]:

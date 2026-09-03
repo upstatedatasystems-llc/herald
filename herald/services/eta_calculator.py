@@ -1,4 +1,5 @@
 import math
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -6,7 +7,7 @@ from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 
 
-def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> dict:
+def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> dict[str, Any]:
     """
     Centralized programmatic duration & word count calculator.
     Uses NARRATION_WORDS_PER_MINUTE (default 136 WPM) baseline for Kokoro adjusted for speed.
@@ -25,8 +26,8 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
         narration = seg.get("narration", "") if isinstance(seg, dict) else ""
         total_words += len(narration.split())
 
-    speed = kokoro_speed if kokoro_speed and kokoro_speed > 0 else 1.0
-    wpm_base = getattr(settings, "NARRATION_WORDS_PER_MINUTE", 136.0)
+    wpm_base = getattr(settings, "NARRATION_WORDS_PER_MINUTE", 136)
+    speed = float(kokoro_speed or 1.0)
     wpm_effective = wpm_base * speed
 
     # Add ~1.5s pause allowance per segment boundary
@@ -46,7 +47,7 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
     }
 
 
-def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
+def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
     """
     Calculate approximate best-effort completion time for a podcast job.
     Uses weighted RTF from recent successful Kokoro request metrics when available.
@@ -84,8 +85,13 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
                 )
                 .all()
             )
-            total_wall_ms = sum(m.duration_ms for m in recent_tts_metrics if m.duration_ms)
-            total_audio_ms = sum(job_durations[m.job_id] * 1000 for m in recent_tts_metrics if m.job_id in job_durations)
+            # Filter for metrics representing full synthesis (not cache-reuse retries)
+            valid_metrics = [
+                m for m in recent_tts_metrics
+                if m.duration_ms and (m.metadata_json is None or (m.metadata_json or {}).get("full_synthesis") is not False)
+            ]
+            total_wall_ms = sum(m.duration_ms for m in valid_metrics if m.duration_ms)
+            total_audio_ms = sum(job_durations[m.job_id] * 1000 for m in valid_metrics if m.job_id in job_durations)
 
             if total_audio_ms >= 10000 and total_wall_ms > 0:
                 realtime_factor = round(total_wall_ms / float(total_audio_ms), 3)

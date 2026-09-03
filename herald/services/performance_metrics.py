@@ -113,6 +113,14 @@ def record_stage_metric(
             )
             db.add(metric)
         else:
+            if stage == "TTS_TOTAL" and clean_meta:
+                existing_meta = metric.metadata_json or {}
+                if existing_meta.get("full_synthesis") is True and clean_meta.get("full_synthesis") is False:
+                    duration_ms = metric.duration_ms
+                    started_at = metric.started_at
+                    finished_at = metric.finished_at
+                    clean_meta["full_synthesis"] = True
+
             metric.substage = substage or metric.substage
             metric.attempt = attempt if attempt is not None else metric.attempt
             metric.sequence_index = sequence_index if sequence_index is not None else metric.sequence_index
