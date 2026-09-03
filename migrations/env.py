@@ -18,7 +18,11 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.get_database_url())
+# Set database url from settings if not overridden programmatically
+custom_url = config.get_main_option("sqlalchemy.url")
+ini_default = "postgresql://herald:herald_secure_password@postgres:5432/herald"
+if not custom_url or custom_url == ini_default:
+    config.set_main_option("sqlalchemy.url", settings.get_database_url())
 
 
 def run_migrations_offline() -> None:

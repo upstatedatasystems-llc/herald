@@ -24,14 +24,16 @@ from herald.extraction.email_parser import (
     URL_REGEX,
 )
 from herald.telegram.auth import (
+    get_effective_user_preferences,
     get_paired_owner,
     has_owner,
     is_user_authorized,
+    set_user_confirm_before_tts,
     verify_and_claim_pairing_code,
 )
 from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs
-from herald.telegram.formatters import format_help, format_quickstart
+from herald.telegram.formatters import format_help, format_quickstart, format_settings
 from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.telegram.bot")
@@ -405,15 +407,15 @@ def handle_telegram_command(
         client.send_message(chat_id=chat_id, text="\n".join(lines), reply_to_message_id=msg_id, parse_mode="HTML")
 
     elif cmd_clean == "settings":
-        settings_msg = (
-            "⚙️ <b>Instance Settings:</b>\n\n"
-            f"• <b>Default Mode:</b> <code>{html.escape(settings.get_default_mode())}</code>\n"
-            f"• <b>Default Voice:</b> <code>{html.escape(settings.KOKORO_VOICE)}</code>\n"
-            f"• <b>Default Speed:</b> <code>{settings.KOKORO_SPEED}x</code>\n"
-            f"• <b>Max Audio Upload:</b> <code>{settings.TELEGRAM_MAX_AUDIO_BYTES / (1024*1024):.0f} MB</code>\n"
-            f"• <b>AI Provider:</b> <code>{html.escape(settings.AI_PROVIDER or 'None')}</code>\n"
+        prefs = get_effective_user_preferences(db, user_id)
+        settings_text, reply_markup = format_settings(prefs, settings)
+        client.send_message(
+            chat_id=chat_id,
+            text=settings_text,
+            reply_to_message_id=msg_id,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
         )
-        client.send_message(chat_id=chat_id, text=settings_msg, reply_to_message_id=msg_id, parse_mode="HTML")
 
     elif cmd_clean == "readme":
         readme_path = Path("README.md")
@@ -575,11 +577,120 @@ def handle_telegram_content_message(
     )
 
 
+def handle_telegram_callback_query(
+    db: Session,
+    client: TelegramClient,
+    cb_query: dict[str, Any],
+) -> None:
+    """
+    Handle inline keyboard callback queries with strict private chat, authorization,
+    UTF-8 length validation, and SET-semantics idempotency.
+    """
+    cb_id = str(cb_query.get("id") or "")
+    if not cb_id:
+        return
+
+    raw_data = str(cb_query.get("data") or "")
+    # Validate UTF-8 encoded byte length <= 64 bytes
+    if len(raw_data.encode("utf-8")) > 64:
+        logger.warning(f"Rejected oversized callback data ({len(raw_data.encode('utf-8'))} bytes)")
+        client.answer_callback_query(cb_id, text="Error: Callback data too large.", show_alert=True)
+        return
+
+    from_user = cb_query.get("from") or {}
+    user_id = from_user.get("id")
+    message = cb_query.get("message") or {}
+    msg_id = message.get("message_id")
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    chat_type = chat.get("type")
+
+    if not chat_id or not user_id or not msg_id:
+        client.answer_callback_query(cb_id, text="Error: Incomplete callback context.")
+        return
+
+    # Strict private chat guard
+    if chat_type != "private":
+        client.answer_callback_query(cb_id, text="Herald operates only in private chats.", show_alert=True)
+        return
+
+    # Owner authorization guard
+    if not is_user_authorized(db, user_id=user_id, chat_id=chat_id):
+        client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+        return
+
+    # Route versioned callbacks with SET-semantics
+    if raw_data == "h2:settings:confirm:on":
+        set_user_confirm_before_tts(db, user_id=user_id, enabled=True)
+        prefs = get_effective_user_preferences(db, user_id)
+        settings_text, reply_markup = format_settings(prefs, settings)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=settings_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.debug(f"editMessageText non-fatal notice (idempotent click): {e}")
+        client.answer_callback_query(cb_id, text="Confirm Before TTS enabled.")
+        return
+
+    elif raw_data == "h2:settings:confirm:off":
+        set_user_confirm_before_tts(db, user_id=user_id, enabled=False)
+        prefs = get_effective_user_preferences(db, user_id)
+        settings_text, reply_markup = format_settings(prefs, settings)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=settings_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.debug(f"editMessageText non-fatal notice (idempotent click): {e}")
+        client.answer_callback_query(cb_id, text="Confirm Before TTS disabled.")
+        return
+
+    else:
+        # Unknown / future callback actions safely acknowledged
+        logger.info(f"Received unhandled or future callback action: {raw_data}")
+        client.answer_callback_query(cb_id, text="Action received.")
+
+
 def process_telegram_update(db: Session, client: TelegramClient, update: dict[str, Any]) -> None:
     """Route an incoming Telegram update to the appropriate handler."""
-    message = update.get("message") or update.get("channel_post")
+    if "callback_query" in update and update["callback_query"]:
+        handle_telegram_callback_query(db, client, update["callback_query"])
+        return
+
+    is_edited = "edited_message" in update and update["edited_message"] is not None
+    message = update.get("message") or update.get("edited_message") or update.get("channel_post")
     if not message:
         return
+
+    # If this is an edited message, check if a podcast job already exists for it to prevent duplicate synthesis
+    if is_edited:
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        msg_id = message.get("message_id")
+        if chat_id and msg_id:
+            existing_job = (
+                db.query(PodcastJob)
+                .filter(
+                    PodcastJob.transport == "telegram",
+                    PodcastJob.telegram_chat_id == chat_id,
+                    PodcastJob.telegram_message_id == msg_id,
+                )
+                .first()
+            )
+            if existing_job:
+                logger.info(
+                    f"Ignoring edited_message for existing job '{existing_job.id}' (chat_id={chat_id}, message_id={msg_id})"
+                )
+                return
 
     text = message.get("text") or message.get("caption") or ""
 

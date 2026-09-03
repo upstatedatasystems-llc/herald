@@ -192,3 +192,140 @@ def is_user_authorized(db: Session, user_id: int | str, chat_id: int | str | Non
             return True
 
     return False
+
+
+def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str, Any]:
+    """
+    Retrieve user preferences from database with automatic fallback to instance settings.
+    """
+    try:
+        uid_int = int(user_id)
+    except (ValueError, TypeError):
+        uid_int = None
+
+    user = None
+    if uid_int is not None:
+        user = (
+            db.query(TelegramUser)
+            .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+            .first()
+        )
+
+    confirm = bool(user.confirm_before_tts) if user and user.confirm_before_tts is not None else False
+    voice = (user.default_voice if user and user.default_voice else None) or getattr(settings, "KOKORO_VOICE", "af_heart")
+    speed = (user.default_speed if user and user.default_speed else None) or getattr(settings, "KOKORO_SPEED", 1.0)
+    mode = (user.default_mode if user and user.default_mode else None) or settings.get_default_mode()
+
+    return {
+        "confirm_before_tts": confirm,
+        "default_voice": voice,
+        "default_speed": float(speed),
+        "default_mode": mode,
+        "ai_provider": getattr(settings, "AI_PROVIDER", None) or "None (Literal only)",
+    }
+
+
+def set_user_confirm_before_tts(db: Session, user_id: int | str, enabled: bool) -> bool:
+    """Set confirm_before_tts preference for a Telegram user."""
+    try:
+        uid_int = int(user_id)
+    except (ValueError, TypeError):
+        return False
+
+    user = (
+        db.query(TelegramUser)
+        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+        .first()
+    )
+    if not user:
+        return False
+
+    user.confirm_before_tts = bool(enabled)
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    logger.info(f"Updated confirm_before_tts={enabled} for Telegram user '{uid_int}'.")
+    return True
+
+
+def set_user_default_voice(db: Session, user_id: int | str, voice: str | None) -> bool:
+    """Set default_voice preference for a Telegram user."""
+    try:
+        uid_int = int(user_id)
+    except (ValueError, TypeError):
+        return False
+
+    user = (
+        db.query(TelegramUser)
+        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+        .first()
+    )
+    if not user:
+        return False
+
+    if voice is not None:
+        allowed = settings.get_allowed_voices_list()
+        if voice.lower() not in allowed:
+            raise ValueError(f"Voice '{voice}' is not in allowed voices: {allowed}")
+        user.default_voice = voice.lower()
+    else:
+        user.default_voice = None
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    return True
+
+
+def set_user_default_speed(db: Session, user_id: int | str, speed: float | None) -> bool:
+    """Set default_speed preference for a Telegram user."""
+    try:
+        uid_int = int(user_id)
+    except (ValueError, TypeError):
+        return False
+
+    user = (
+        db.query(TelegramUser)
+        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+        .first()
+    )
+    if not user:
+        return False
+
+    if speed is not None:
+        s_float = float(speed)
+        if not (settings.MIN_SPEED <= s_float <= settings.MAX_SPEED):
+            raise ValueError(f"Speed {s_float} out of range ({settings.MIN_SPEED} to {settings.MAX_SPEED})")
+        user.default_speed = s_float
+    else:
+        user.default_speed = None
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    return True
+
+
+def set_user_default_mode(db: Session, user_id: int | str, mode: str | None) -> bool:
+    """Set default_mode preference for a Telegram user."""
+    try:
+        uid_int = int(user_id)
+    except (ValueError, TypeError):
+        return False
+
+    user = (
+        db.query(TelegramUser)
+        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+        .first()
+    )
+    if not user:
+        return False
+
+    if mode is not None:
+        m_clean = mode.lower().strip()
+        if m_clean not in ("literal", "brief", "standard", "research"):
+            raise ValueError(f"Invalid mode '{mode}'")
+        user.default_mode = m_clean
+    else:
+        user.default_mode = None
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    return True

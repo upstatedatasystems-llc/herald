@@ -51,3 +51,43 @@ def format_help() -> str:
         "/readme — Project documentation\n\n"
         "<i>Upcoming capabilities: /settings, /voices, /download, /diagnostics</i>"
     )
+
+
+def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple[str, dict]:
+    """
+    Format settings message and generate inline keyboard markup for confirmation toggle.
+    Returns:
+        (text, reply_markup_dict)
+    """
+    confirm_on = bool(user_prefs.get("confirm_before_tts", False))
+    default_voice = html.escape(str(user_prefs.get("default_voice", "af_heart")))
+    default_speed = float(user_prefs.get("default_speed", 1.0))
+    default_mode = html.escape(str(user_prefs.get("default_mode", "standard")).capitalize())
+    ai_provider = html.escape(str(user_prefs.get("ai_provider", "None (Literal only)")))
+
+    confirm_str = "🟢 On" if confirm_on else "⚪ Off"
+    button_text = "🔕 Disable Confirm Before TTS" if confirm_on else "🔔 Enable Confirm Before TTS"
+    button_callback = "h2:settings:confirm:off" if confirm_on else "h2:settings:confirm:on"
+
+    text = (
+        "⚙️ <b>Herald Preferences & Settings</b>\n\n"
+        f"• <b>Default Mode:</b> <code>{default_mode}</code>\n"
+        f"• <b>Default Voice:</b> <code>{default_voice}</code>\n"
+        f"• <b>Default Speed:</b> <code>{default_speed:.1f}x</code>\n"
+        f"• <b>Confirm Before TTS:</b> {confirm_str}\n"
+        f"• <b>AI Provider:</b> <code>{ai_provider}</code>\n\n"
+        "<i>Tap below to toggle pre-TTS approval confirmation:</i>"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": button_text,
+                    "callback_data": button_callback,
+                }
+            ]
+        ]
+    }
+
+    return text, reply_markup

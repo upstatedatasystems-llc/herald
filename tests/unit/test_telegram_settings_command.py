@@ -38,7 +38,9 @@ def test_telegram_settings_command_runs_against_real_settings():
         call_args = mock_client.send_message.call_args[1]
         text = call_args["text"]
 
-        assert "Instance Settings:" in text
+        assert "Herald Preferences & Settings" in text
         assert f"Default Voice:</b> <code>{settings.KOKORO_VOICE}</code>" in text
-        assert f"Default Speed:</b> <code>{settings.KOKORO_SPEED}x</code>" in text
-        assert f"Max Audio Upload:</b> <code>{settings.TELEGRAM_MAX_AUDIO_BYTES / (1024*1024):.0f} MB</code>" in text
+        assert f"Default Speed:</b> <code>{float(settings.KOKORO_SPEED):.1f}x</code>" in text
+        assert "Confirm Before TTS:" in text
+        assert "reply_markup" in call_args
+        assert call_args["reply_markup"] is not None

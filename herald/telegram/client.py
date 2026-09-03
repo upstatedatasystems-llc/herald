@@ -116,7 +116,7 @@ class TelegramClient:
         if allowed_updates:
             params["allowed_updates"] = allowed_updates
         else:
-            params["allowed_updates"] = ["message", "edited_message"]
+            params["allowed_updates"] = ["message", "edited_message", "callback_query"]
 
         res = self._request("POST", "getUpdates", timeout=float(timeout + 10), json=params)
         return res if isinstance(res, list) else []
@@ -127,6 +127,7 @@ class TelegramClient:
         text: str,
         reply_to_message_id: int | None = None,
         parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a text message to a Telegram chat."""
         payload: dict[str, Any] = {
@@ -137,8 +138,55 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
 
         return self._request("POST", "sendMessage", timeout=15.0, json=payload)
+
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+        timeout: float = 15.0,
+    ) -> dict[str, Any]:
+        """Edit text and reply_markup of an existing message."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+
+        return self._request("POST", "editMessageText", timeout=timeout, json=payload)
+
+    def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str | None = None,
+        show_alert: bool = False,
+        url: str | None = None,
+        cache_time: int | None = None,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Send answer to a callback query from an inline keyboard."""
+        payload: dict[str, Any] = {
+            "callback_query_id": str(callback_query_id),
+            "show_alert": show_alert,
+        }
+        if text:
+            payload["text"] = text
+        if url:
+            payload["url"] = url
+        if cache_time is not None:
+            payload["cache_time"] = cache_time
+
+        return self._request("POST", "answerCallbackQuery", timeout=timeout, json=payload)
 
     def send_chat_action(self, chat_id: int | str, action: str = "typing") -> dict[str, Any]:
         """Send chat status action (e.g. typing, upload_document, record_voice)."""
@@ -154,11 +202,11 @@ class TelegramClient:
         performer: str = "Herald",
         duration: int | None = None,
         reply_to_message_id: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Upload and send an MP3 audio file."""
+        """Upload and send an MP3 audio file or reuse an existing Telegram file_id."""
         p = Path(audio_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Audio file '{p}' does not exist.")
+        is_local_file = p.exists() and p.is_file()
 
         data: dict[str, Any] = {
             "chat_id": str(chat_id),
@@ -172,13 +220,21 @@ class TelegramClient:
             data["duration"] = str(int(duration))
         if reply_to_message_id:
             data["reply_to_message_id"] = str(reply_to_message_id)
+        if reply_markup:
+            data["reply_markup"] = reply_markup
 
         url = f"{self._base_url}/sendAudio"
         try:
-            with open(p, "rb") as f:
-                files = {"audio": (p.name, f, "audio/mpeg")}
-                with httpx.Client(timeout=120.0) as client:
-                    resp = client.post(url, data=data, files=files)
+            if is_local_file:
+                with open(p, "rb") as f:
+                    files = {"audio": (p.name, f, "audio/mpeg")}
+                    with httpx.Client(timeout=120.0) as client:
+                        resp = client.post(url, data=data, files=files)
+            else:
+                # Treat audio_path as existing Telegram file_id
+                data["audio"] = str(audio_path)
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url, json=data)
 
             res_json = resp.json()
             if not res_json.get("ok"):
@@ -197,30 +253,42 @@ class TelegramClient:
         caption: str | None = None,
         reply_to_message_id: int | None = None,
         mime_type: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Upload and send a document file with dynamic MIME resolution."""
+        """Upload and send a document file with dynamic MIME resolution or reuse existing file_id."""
         p = Path(document_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Document file '{p}' does not exist.")
-
-        if mime_type:
-            resolved_mime = mime_type
-        else:
-            ext = p.suffix.lower()
-            resolved_mime = DEFAULT_DOCUMENT_MIME_TYPES.get(ext) or mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        is_local_file = p.exists() and p.is_file()
 
         data: dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:
             data["caption"] = caption
         if reply_to_message_id:
             data["reply_to_message_id"] = str(reply_to_message_id)
+        if reply_markup:
+            data["reply_markup"] = reply_markup
 
         url = f"{self._base_url}/sendDocument"
         try:
-            with open(p, "rb") as f:
-                files = {"document": (p.name, f, resolved_mime)}
-                with httpx.Client(timeout=60.0) as client:
-                    resp = client.post(url, data=data, files=files)
+            if is_local_file:
+                if mime_type:
+                    resolved_mime = mime_type
+                else:
+                    ext = p.suffix.lower()
+                    resolved_mime = (
+                        DEFAULT_DOCUMENT_MIME_TYPES.get(ext)
+                        or mimetypes.guess_type(str(p))[0]
+                        or "application/octet-stream"
+                    )
+
+                with open(p, "rb") as f:
+                    files = {"document": (p.name, f, resolved_mime)}
+                    with httpx.Client(timeout=60.0) as client:
+                        resp = client.post(url, data=data, files=files)
+            else:
+                # Treat document_path as existing Telegram file_id
+                data["document"] = str(document_path)
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url, json=data)
 
             res_json = resp.json()
             if not res_json.get("ok"):

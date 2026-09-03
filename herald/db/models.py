@@ -245,6 +245,10 @@ class TelegramUser(Base):
     first_name = Column(String(255), nullable=True)
     role = Column(String(50), nullable=False, default="owner")
     is_active = Column(Boolean, nullable=False, default=True)
+    confirm_before_tts = Column(Boolean, nullable=False, default=False)
+    default_voice = Column(String(50), nullable=True)
+    default_speed = Column(Float, nullable=True)
+    default_mode = Column(String(20), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(
         DateTime(timezone=True),

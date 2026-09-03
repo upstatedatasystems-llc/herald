@@ -67,20 +67,22 @@ def print_startup_banner():
     print("=" * 60 + "\n")
 
 
-TELEGRAM_BOT_COMMANDS_2A = [
+TELEGRAM_BOT_COMMANDS = [
     {"command": "start", "description": "Start bot and view quick-start guide"},
     {"command": "help", "description": "View usage guide, modes, and directives"},
     {"command": "status", "description": "View system health, queue depth, and uptime"},
     {"command": "ai_check", "description": "Test AI provider connection"},
     {"command": "queue", "description": "View active podcast queue"},
+    {"command": "settings", "description": "Configure preferences and confirm before TTS"},
     {"command": "readme", "description": "Download project documentation"},
 ]
+TELEGRAM_BOT_COMMANDS_2A = [c for c in TELEGRAM_BOT_COMMANDS if c["command"] != "settings"]
 
 
 def register_bot_commands(client: TelegramClient) -> bool:
     """Register supported Telegram bot commands with setMyCommands."""
     try:
-        ok = client.set_my_commands(TELEGRAM_BOT_COMMANDS_2A)
+        ok = client.set_my_commands(TELEGRAM_BOT_COMMANDS)
         if ok:
             logger.info("Successfully registered Telegram bot commands with setMyCommands.")
         else:
