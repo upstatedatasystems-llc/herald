@@ -10,7 +10,7 @@ from threading import Semaphore
 from sqlalchemy.orm import Session
 
 from herald.audio.ffmpeg_builder import validate_audio_file
-from herald.concurrency import tts_slot_lock
+from herald.concurrency import get_tts_slot_wait_timeout_seconds, tts_slot_lock
 from herald.db.models import PodcastJob, PodcastTTSChunk
 from herald.services.performance_metrics import record_stage_metric
 from herald.tts.chunker import TTSChunk
@@ -216,7 +216,9 @@ def synthesize_single_chunk(
                         f"{len(chunk.text)} chars | timeout: {synthesis_timeout}s"
                     )
                     with tts_slot_lock(
-                        db=db, local_semaphore=global_semaphore, timeout_seconds=synthesis_timeout
+                        db=db,
+                        local_semaphore=global_semaphore,
+                        timeout_seconds=get_tts_slot_wait_timeout_seconds(),
                     ):
                         kokoro_client.synthesize_chunk(
                             text=chunk.text,

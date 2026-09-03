@@ -170,18 +170,14 @@ def test_approve_callback_transitions_exactly_once_to_queued_tts(db_session):
     job = db_session.query(PodcastJob).filter_by(id=job_id).first()
     assert job.status == JobState.QUEUED_TTS.value
     assert job.approved_at is not None
-    mock_client.answer_callback_query.assert_called_with(
-        "cb-approve-1", text="Approved! Queued for synthesis."
-    )
+    mock_client.answer_callback_query.assert_called_with("cb-approve-1", text="Approved! Queued for synthesis.")
     mock_client.edit_message_text.assert_called_once()
     assert "Podcast Queued for Synthesis" in mock_client.edit_message_text.call_args[1]["text"]
 
     # 2. Second approval is idempotent
     mock_client.reset_mock()
     handle_telegram_callback_query(db_session, mock_client, cb_query)
-    mock_client.answer_callback_query.assert_called_with(
-        "cb-approve-1", text="Job is already approved and synthesizing."
-    )
+    mock_client.answer_callback_query.assert_called_with("cb-approve-1", text="Job is already approved and synthesizing.")
     assert job.status == JobState.QUEUED_TTS.value
 
 
@@ -230,9 +226,7 @@ def test_deny_callback_cancels_job_and_subsequent_approve_rejected(db_session):
         "data": f"h2:approve:{job_id}",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_approve)
-    mock_client.answer_callback_query.assert_called_with(
-        "cb-approve-2", text="Job was already cancelled.", show_alert=True
-    )
+    mock_client.answer_callback_query.assert_called_with("cb-approve-2", text="Job was already cancelled.", show_alert=True)
     assert job.status == JobState.CANCELLED.value
 
 
@@ -275,9 +269,7 @@ def test_deny_after_approve_cannot_cancel_synthesizing_job(db_session):
         "data": f"h2:deny:{job_id}",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_deny)
-    mock_client.answer_callback_query.assert_called_with(
-        "cb-deny", text="Job is already synthesizing and cannot be cancelled.", show_alert=True
-    )
+    mock_client.answer_callback_query.assert_called_with("cb-deny", text="Job is already synthesizing and cannot be cancelled.", show_alert=True)
     assert job.status == JobState.QUEUED_TTS.value
 
 
@@ -308,9 +300,7 @@ def test_callback_unauthorized_user_or_wrong_chat_rejected(db_session):
         "data": f"h2:approve:{job_id}",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_intruder)
-    mock_client.answer_callback_query.assert_called_with(
-        "cb-int", text="Unauthorized: Access denied.", show_alert=True
-    )
+    mock_client.answer_callback_query.assert_called_with("cb-int", text="Unauthorized: Access denied.", show_alert=True)
 
     job = db_session.query(PodcastJob).filter_by(id=job_id).first()
     assert job.status == JobState.AWAITING_APPROVAL.value  # Unchanged

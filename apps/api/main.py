@@ -79,7 +79,6 @@ def verify_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")):
                 detail="X-API-Key header is missing.",
             )
         import secrets
-
         if not secrets.compare_digest(x_api_key, settings.HERALD_API_KEY):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -123,7 +122,6 @@ def normalize_gmail_timestamp(raw_val: Any) -> datetime | None:
             return datetime.fromtimestamp(val_num, tz=UTC)
 
         from email.utils import parsedate_to_datetime
-
         try:
             dt = parsedate_to_datetime(val_str)
             if dt:
@@ -146,9 +144,7 @@ class IntakeRequest(BaseModel):
     subject: str = Field(..., description="Email subject line containing Podcast: <Mode>")
     body_text: str | None = Field(None, description="Plain text email body")
     body_html: str | None = Field(None, description="HTML email body")
-    gmail_received_at: Any | None = Field(
-        None, description="Original Gmail message receipt timestamp"
-    )
+    gmail_received_at: Any | None = Field(None, description="Original Gmail message receipt timestamp")
 
 
 class IntakeResponse(BaseModel):
@@ -181,22 +177,14 @@ class GenerateScriptRequest(BaseModel):
 
 class DriveCompleteRequest(BaseModel):
     artifact_type: str = Field(default="audio", description="Artifact type: audio or details")
-    drive_file_id: str | None = Field(
-        None, description="Uploaded Google Drive file ID for audio MP3"
-    )
+    drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for audio MP3")
     drive_web_link: str | None = Field(None, description="Web link to audio Google Drive file")
-    details_drive_file_id: str | None = Field(
-        None, description="Uploaded Google Drive file ID for details Markdown"
-    )
-    details_drive_web_link: str | None = Field(
-        None, description="Web link to details Markdown Google Drive file"
-    )
+    details_drive_file_id: str | None = Field(None, description="Uploaded Google Drive file ID for details Markdown")
+    details_drive_web_link: str | None = Field(None, description="Web link to details Markdown Google Drive file")
     started_at: Any | None = Field(None, description="Drive upload start timestamp")
     finished_at: Any | None = Field(None, description="Drive upload finish timestamp")
     duration_ms: int | None = Field(None, description="Drive upload duration in milliseconds")
-    drive_job_key: str | None = Field(
-        None, description="Herald job key stored in Drive appProperties"
-    )
+    drive_job_key: str | None = Field(None, description="Herald job key stored in Drive appProperties")
 
     # Legacy fields preserved for schema compatibility
     source_drive_file_id: str | None = None
@@ -279,6 +267,7 @@ class JobStatusResponse(BaseModel):
     completed_at: str | None = None
 
 
+
 @app.get("/health", tags=["Health"])
 @app.get("/live", tags=["Health"])
 def health_check():
@@ -322,36 +311,22 @@ def readiness_check(db: Session = Depends(get_db)):
         if not current_revision:
             reasons.append("Database schema missing alembic_version revision")
         elif current_revision != head_revision:
-            reasons.append(
-                f"Database revision ({current_revision}) does not match expected head ({head_revision})"
-            )
+            reasons.append(f"Database revision ({current_revision}) does not match expected head ({head_revision})")
     except Exception as e:
         reasons.append(f"Alembic version check failed: {e}")
 
     # 3. Production security check
     if settings.HERALD_ENV.lower() == "production":
-        is_email_active = bool(
-            settings.ENABLE_EMAIL_TRANSPORT
-            or settings.EMAIL_ALLOWED_SENDERS.strip()
-            or settings.GOOGLE_DRIVE_FOLDER_ID.strip()
-        )
+        is_email_active = bool(settings.ENABLE_EMAIL_TRANSPORT or settings.EMAIL_ALLOWED_SENDERS.strip() or settings.GOOGLE_DRIVE_FOLDER_ID.strip())
         if is_email_active:
             if not settings.HERALD_API_KEY or settings.HERALD_API_KEY == "default-insecure-api-key":
-                reasons.append(
-                    "Production HERALD_API_KEY is not configured securely for active Email/API transport"
-                )
+                reasons.append("Production HERALD_API_KEY is not configured securely for active Email/API transport")
             if not settings.EMAIL_ALLOWED_SENDERS.strip():
-                reasons.append(
-                    "Production EMAIL_ALLOWED_SENDERS is empty for active Email transport (fail-closed rule)"
-                )
+                reasons.append("Production EMAIL_ALLOWED_SENDERS is empty for active Email transport (fail-closed rule)")
             if not settings.GOOGLE_DRIVE_FOLDER_ID.strip():
-                reasons.append(
-                    "Production GOOGLE_DRIVE_FOLDER_ID is empty for active Drive transport"
-                )
+                reasons.append("Production GOOGLE_DRIVE_FOLDER_ID is empty for active Drive transport")
         elif not settings.TELEGRAM_BOT_TOKEN:
-            reasons.append(
-                "No active transport configured (neither Telegram nor Email/Drive configured)"
-            )
+            reasons.append("No active transport configured (neither Telegram nor Email/Drive configured)")
 
     # 4. Work directory writability check
     work_dir = Path(settings.HERALD_WORK_DIR)
@@ -367,9 +342,7 @@ def readiness_check(db: Session = Depends(get_db)):
     try:
         free_mb = check_free_disk_mb(work_dir)
         if free_mb < settings.HERALD_MIN_DISK_MB:
-            reasons.append(
-                f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)"
-            )
+            reasons.append(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)")
     except Exception as e:
         free_mb = 0.0
         reasons.append(f"Disk space inspection failed: {e}")
@@ -379,17 +352,11 @@ def readiness_check(db: Session = Depends(get_db)):
         kokoro_client = KokoroClient()
         kokoro_res = kokoro_client.health_check()
         kokoro_healthy = bool(isinstance(kokoro_res, dict) and kokoro_res.get("healthy"))
-        if not kokoro_healthy and (
-            settings.HERALD_ENV.lower() == "production"
-            or os.environ.get("HERALD_REQUIRE_KOKORO") == "1"
-        ):
+        if not kokoro_healthy and (settings.HERALD_ENV.lower() == "production" or os.environ.get("HERALD_REQUIRE_KOKORO") == "1"):
             reasons.append("Kokoro TTS service reachable check failed")
     except Exception as e:
         kokoro_healthy = False
-        if (
-            settings.HERALD_ENV.lower() == "production"
-            or os.environ.get("HERALD_REQUIRE_KOKORO") == "1"
-        ):
+        if settings.HERALD_ENV.lower() == "production" or os.environ.get("HERALD_REQUIRE_KOKORO") == "1":
             reasons.append(f"Kokoro health check exception: {e}")
 
     if reasons:
@@ -414,6 +381,7 @@ def readiness_check(db: Session = Depends(get_db)):
             "ffmpeg_concurrency": c_cfg.ffmpeg_concurrency,
         },
     }
+
 
 
 @app.post(
@@ -441,7 +409,9 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         )
 
     existing_message_job = (
-        db.query(PodcastJob).filter(PodcastJob.gmail_message_id == req.gmail_message_id).first()
+        db.query(PodcastJob)
+        .filter(PodcastJob.gmail_message_id == req.gmail_message_id)
+        .first()
     )
     if existing_message_job:
         return IntakeResponse(
@@ -499,11 +469,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
         c_mode = c_job.request_mode
         c_depth = (c_job.research_depth or "").lower().strip()
         c_voice = (c_job.custom_voice or c_job.kokoro_voice or "").strip()
-        c_speed = (
-            round(float(c_job.custom_speed or c_job.kokoro_speed), 2)
-            if (c_job.custom_speed or c_job.kokoro_speed) is not None
-            else None
-        )
+        c_speed = round(float(c_job.custom_speed or c_job.kokoro_speed), 2) if (c_job.custom_speed or c_job.kokoro_speed) is not None else None
         c_title = (c_job.custom_title or "").strip()
         c_chunk = c_job.tts_chunk_chars if c_job.tts_chunk_chars is not None else 500
         c_verify = bool(c_job.verify_final_script)
@@ -593,9 +559,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
     )
 
     if parsed_gmail_received:
-        wait_ms = max(
-            0, int((t_intake_start - ensure_utc(parsed_gmail_received)).total_seconds() * 1000)
-        )
+        wait_ms = max(0, int((t_intake_start - ensure_utc(parsed_gmail_received)).total_seconds() * 1000))
         record_stage_metric(
             job_id=job.id,
             stage="EMAIL_DETECTION_WAIT",
@@ -666,12 +630,7 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
                 metadata_json={"error": str(sbe), "category": "SOURCE_ACCESS_BLOCKED"},
             )
             transition_job_state(
-                db,
-                job,
-                JobState.FAILED_FINAL.value,
-                component="herald-api",
-                message=str(sbe),
-                error_category="SOURCE_ACCESS_BLOCKED",
+                db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(sbe), error_category="SOURCE_ACCESS_BLOCKED"
             )
             fail_email = format_failure_email(job.id, source_url, "SOURCE_ACCESS_BLOCKED", str(sbe))
             return IntakeResponse(
@@ -695,16 +654,9 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
                 metadata_json={"error": str(e)},
             )
             transition_job_state(
-                db,
-                job,
-                JobState.FAILED_FINAL.value,
-                component="herald-api",
-                message=str(e),
-                error_category="ARTICLE_EXTRACTION_FAILURE",
+                db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(e), error_category="ARTICLE_EXTRACTION_FAILURE"
             )
-            fail_email = format_failure_email(
-                job.id, source_url, "ARTICLE_EXTRACTION_FAILURE", str(e)
-            )
+            fail_email = format_failure_email(job.id, source_url, "ARTICLE_EXTRACTION_FAILURE", str(e))
             return IntakeResponse(
                 job_id=job.id,
                 status=job.status,
@@ -754,9 +706,13 @@ def extract_url(req: ExtractUrlRequest):
             title=title, extracted_text=extracted_text, canonical_url=canonical_url
         )
     except SSRFVulnerabilityError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"SSRF Protection: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=f"SSRF Protection: {e}"
+        )
     except ArticleExtractionError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        )
 
 
 @app.post(
@@ -810,9 +766,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         elif req_mode == "research":
             # Stage 1a: Grounded Research Call using GEMINI_RESEARCH_MODEL
             if not job.research_grounding_json:
-                logger.info(
-                    f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})"
-                )
+                logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")
 
                 t0 = datetime.now(UTC)
                 grounded_data = generate_grounded_research(
@@ -831,10 +785,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     finished_at=t1,
                     status="success",
                     input_chars=len(job.source_text or ""),
-                    metadata_json={
-                        "search_count": job.research_search_count,
-                        "source_count": job.research_source_count,
-                    },
+                    metadata_json={"search_count": job.research_search_count, "source_count": job.research_source_count},
                 )
 
             # Stage 1b: Normalize Research Dossier using GEMINI_MODEL
@@ -944,9 +895,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 )
 
                 if v_audit.has_material_issues and job.verify_repair_count == 0:
-                    logger.info(
-                        f"Executing Optional Final VERIFY Repair for Research job '{job.id}'"
-                    )
+                    logger.info(f"Executing Optional Final VERIFY Repair for Research job '{job.id}'")
                     t0 = datetime.now(UTC)
                     repaired_script = repair_research_script(
                         source_text=job.source_text,
@@ -1052,12 +1001,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         }
     except GeminiError as e:
         transition_job_state(
-            db,
-            job,
-            JobState.FAILED_RETRYABLE.value,
-            component="herald-api",
-            message=str(e),
-            error_category="GEMINI_SCRIPT_FAILURE",
+            db, job, JobState.FAILED_RETRYABLE.value, component="herald-api", message=str(e), error_category="GEMINI_SCRIPT_FAILURE"
         )
         raise HTTPException(status_code=500, detail=f"Gemini scripting failed: {e}")
 
@@ -1092,16 +1036,12 @@ def claim_delivery_job(db: Session = Depends(get_db)):
         PodcastJob.status == JobState.AUDIO_READY.value,
         and_(
             PodcastJob.status.in_([JobState.UPLOADING.value, JobState.DELIVERING.value]),
-            or_(
-                PodcastJob.last_heartbeat_at.is_(None), PodcastJob.last_heartbeat_at <= stale_cutoff
-            ),
+            or_(PodcastJob.last_heartbeat_at.is_(None), PodcastJob.last_heartbeat_at <= stale_cutoff),
             or_(PodcastJob.claimed_at.is_(None), PodcastJob.claimed_at <= stale_cutoff),
         ),
         and_(
             PodcastJob.status == JobState.FAILED_RETRYABLE.value,
-            PodcastJob.failed_stage.notin_(
-                ["INTAKE", "VALIDATING", "EXTRACTING", "SCRIPTING", "SYNTHESIZING", "ENCODING"]
-            ),
+            PodcastJob.failed_stage.notin_(["INTAKE", "VALIDATING", "EXTRACTING", "SCRIPTING", "SYNTHESIZING", "ENCODING"]),
             or_(PodcastJob.next_retry_at.is_(None), PodcastJob.next_retry_at <= now),
         ),
     )
@@ -1141,12 +1081,8 @@ def claim_delivery_job(db: Session = Depends(get_db)):
     local_details_path = str(output_dir / names["details_filename"])
 
     ep_title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
-    audio_drive_filename = build_user_facing_drive_filename(
-        ep_title, job.created_at, job.request_mode, "mp3"
-    )
-    details_drive_filename = build_user_facing_drive_filename(
-        ep_title, job.created_at, job.request_mode, "md"
-    )
+    audio_drive_filename = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "mp3")
+    details_drive_filename = build_user_facing_drive_filename(ep_title, job.created_at, job.request_mode, "md")
 
     needs_audio_upload = not bool(job.drive_file_id and job.drive_web_link)
     needs_details_upload = not bool(job.details_drive_file_id and job.details_drive_web_link)
@@ -1313,18 +1249,17 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
     dependencies=[Depends(verify_api_key)],
     tags=["Delivery"],
 )
-def update_drive_complete(job_id: str, req: DriveCompleteRequest, db: Session = Depends(get_db)):
+def update_drive_complete(
+    job_id: str, req: DriveCompleteRequest, db: Session = Depends(get_db)
+):
     """Record Google Drive file IDs and web links independently and idempotently."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job.status == JobState.COMPLETE.value:
-        if (req.drive_file_id and job.drive_file_id and job.drive_file_id != req.drive_file_id) or (
-            req.details_drive_file_id
-            and job.details_drive_file_id
-            and job.details_drive_file_id != req.details_drive_file_id
-        ):
+        if (req.drive_file_id and job.drive_file_id and job.drive_file_id != req.drive_file_id) or \
+           (req.details_drive_file_id and job.details_drive_file_id and job.details_drive_file_id != req.details_drive_file_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Conflicting Drive file ID on COMPLETE job: existing vs new",
@@ -1405,10 +1340,10 @@ def update_drive_complete(job_id: str, req: DriveCompleteRequest, db: Session = 
     if updated_any:
         job.drive_uploaded_at = datetime.now(UTC)
 
-    if job.status != JobState.DELIVERING.value and (job.drive_file_id or job.details_drive_file_id):
-        transition_job_state(
-            db, job, JobState.DELIVERING.value, component="n8n-drive-complete", commit=False
-        )
+    if job.status != JobState.DELIVERING.value and (
+        job.drive_file_id or job.details_drive_file_id
+    ):
+        transition_job_state(db, job, JobState.DELIVERING.value, component="n8n-drive-complete", commit=False)
 
     db.commit()
     db.refresh(job)
@@ -1569,12 +1504,8 @@ def update_delivery_complete(
 
 
 class DetailsFinalizedRequest(BaseModel):
-    details_drive_file_id: str | None = Field(
-        None, description="Final Drive file ID for updated Details Markdown"
-    )
-    details_drive_web_link: str | None = Field(
-        None, description="Final Drive web link for updated Details Markdown"
-    )
+    details_drive_file_id: str | None = Field(None, description="Final Drive file ID for updated Details Markdown")
+    details_drive_web_link: str | None = Field(None, description="Final Drive web link for updated Details Markdown")
     started_at: Any | None = Field(None, description="Details finalize start timestamp")
     finished_at: Any | None = Field(None, description="Details finalize finish timestamp")
     duration_ms: int | None = Field(None, description="Details finalize duration in milliseconds")
@@ -1625,9 +1556,7 @@ def update_details_finalized(
         "status": job.status,
         "details_drive_file_id": job.details_drive_file_id,
         "details_drive_web_link": job.details_drive_web_link,
-        "details_finalized_at": job.details_finalized_at.isoformat()
-        if job.details_finalized_at
-        else None,
+        "details_finalized_at": job.details_finalized_at.isoformat() if job.details_finalized_at else None,
     }
 
 
@@ -1650,9 +1579,7 @@ def delivery_nudge_endpoint(req: DeliveryNudgeRequest, db: Session = Depends(get
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    nudge_url = getattr(
-        settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready"
-    )
+    nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
     nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
     nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
 
@@ -1663,16 +1590,10 @@ def delivery_nudge_endpoint(req: DeliveryNudgeRequest, db: Session = Depends(get
             headers["X-API-Key"] = nudge_secret
             headers["X-Herald-Delivery-Token"] = nudge_secret
         with httpx.Client(timeout=nudge_timeout) as client:
-            client.post(
-                nudge_url,
-                json={"job_id": job.id, "event": req.event or "AUDIO_READY"},
-                headers=headers,
-            )
+            client.post(nudge_url, json={"job_id": job.id, "event": req.event or "AUDIO_READY"}, headers=headers)
         webhook_dispatched = True
     except Exception as ne:
-        logger.warning(
-            f"Delivery nudge proxy for job '{job.id}' to n8n webhook failed non-fatally: {ne}"
-        )
+        logger.warning(f"Delivery nudge proxy for job '{job.id}' to n8n webhook failed non-fatally: {ne}")
 
     return {
         "nudged": True,
@@ -1683,21 +1604,22 @@ def delivery_nudge_endpoint(req: DeliveryNudgeRequest, db: Session = Depends(get
     }
 
 
+
 @app.post(
     "/api/v1/jobs/{job_id}/delivery-failed",
     dependencies=[Depends(verify_api_key)],
     tags=["Delivery"],
 )
-def update_delivery_failed(job_id: str, req: DeliveryFailedRequest, db: Session = Depends(get_db)):
+def update_delivery_failed(
+    job_id: str, req: DeliveryFailedRequest, db: Session = Depends(get_db)
+):
     """Record delivery failure with bounded backoff and transition to FAILED_RETRYABLE or FAILED_FINAL."""
     job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job.status == JobState.COMPLETE.value:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job cannot be set to failed."
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="COMPLETE job cannot be set to failed.")
 
     job.delivery_attempt_count += 1
     job.attempt_count += 1
@@ -1706,9 +1628,7 @@ def update_delivery_failed(job_id: str, req: DeliveryFailedRequest, db: Session 
     job.next_retry_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
 
     target_failed_state = (
-        JobState.FAILED_FINAL.value
-        if job.delivery_attempt_count >= 3
-        else JobState.FAILED_RETRYABLE.value
+        JobState.FAILED_FINAL.value if job.delivery_attempt_count >= 3 else JobState.FAILED_RETRYABLE.value
     )
 
     transition_job_state(
@@ -1854,9 +1774,7 @@ def get_job_performance(job_id: str, db: Session = Depends(get_db)):
 
     end_to_end_ms = stage_totals.get("END_TO_END")
     if end_to_end_ms is None and job.created_at and job.completed_at:
-        end_to_end_ms = int(
-            (ensure_utc(job.completed_at) - ensure_utc(job.created_at)).total_seconds() * 1000
-        )
+        end_to_end_ms = int((ensure_utc(job.completed_at) - ensure_utc(job.created_at)).total_seconds() * 1000)
 
     return {
         "job_id": job.id,
@@ -1885,15 +1803,7 @@ def get_job_performance(job_id: str, db: Session = Depends(get_db)):
 def _calculate_series_stats(values: list[float | int]) -> dict[str, Any]:
     """Calculate count, mean, median, p90, p95, min, max without external dependencies."""
     if not values:
-        return {
-            "count": 0,
-            "mean": None,
-            "median": None,
-            "p90": None,
-            "p95": None,
-            "min": None,
-            "max": None,
-        }
+        return {"count": 0, "mean": None, "median": None, "p90": None, "p95": None, "min": None, "max": None}
 
     s_vals = sorted(values)
     n = len(s_vals)
@@ -1931,7 +1841,12 @@ def _calculate_series_stats(values: list[float | int]) -> dict[str, Any]:
 )
 def get_ops_performance(limit: int = 50, db: Session = Depends(get_db)):
     """Return aggregate performance statistics across recent completed podcast jobs."""
-    recent_jobs = db.query(PodcastJob).order_by(PodcastJob.created_at.desc()).limit(limit).all()
+    recent_jobs = (
+        db.query(PodcastJob)
+        .order_by(PodcastJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
 
     job_ids = [j.id for j in recent_jobs]
     if not job_ids:
@@ -1943,7 +1858,11 @@ def get_ops_performance(limit: int = 50, db: Session = Depends(get_db)):
             "by_request_mode": {},
         }
 
-    metrics = db.query(JobProcessingMetric).filter(JobProcessingMetric.job_id.in_(job_ids)).all()
+    metrics = (
+        db.query(JobProcessingMetric)
+        .filter(JobProcessingMetric.job_id.in_(job_ids))
+        .all()
+    )
 
     # Group metrics by stage and by job
     stage_durations: dict[str, list[int]] = {}
@@ -1992,6 +1911,7 @@ def get_ops_performance(limit: int = 50, db: Session = Depends(get_db)):
     }
 
 
+
 @app.post(
     "/api/v1/jobs/{job_id}/retry",
     dependencies=[Depends(verify_api_key)],
@@ -2018,9 +1938,7 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
             message="Maximum retry attempt limit reached",
             commit=True,
         )
-        raise HTTPException(
-            status_code=400, detail="Job has reached maximum retry attempt limit (FAILED_FINAL)."
-        )
+        raise HTTPException(status_code=400, detail="Job has reached maximum retry attempt limit (FAILED_FINAL).")
 
     failed_stage = job.failed_stage or "QUEUED_TTS"
 
@@ -2028,18 +1946,10 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
         target_state = JobState.EXTRACTING.value
     elif failed_stage == JobState.SCRIPTING.value:
         target_state = JobState.SCRIPTING.value
-    elif failed_stage in (
-        JobState.SYNTHESIZING.value,
-        JobState.ENCODING.value,
-        JobState.QUEUED_TTS.value,
-    ):
+    elif failed_stage in (JobState.SYNTHESIZING.value, JobState.ENCODING.value, JobState.QUEUED_TTS.value):
         target_state = JobState.QUEUED_TTS.value
     elif failed_stage == JobState.UPLOADING.value:
-        target_state = (
-            JobState.DELIVERING.value
-            if (job.drive_file_id and job.drive_web_link)
-            else JobState.UPLOADING.value
-        )
+        target_state = JobState.DELIVERING.value if (job.drive_file_id and job.drive_web_link) else JobState.UPLOADING.value
     elif failed_stage == JobState.DELIVERING.value:
         target_state = JobState.DELIVERING.value
     else:
@@ -2052,12 +1962,7 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     transition_job_state(
-        db,
-        job,
-        target_state,
-        component="herald-api-retry",
-        message=f"Resuming retry from failed stage '{failed_stage}' to '{target_state}'",
-        force=False,
+        db, job, target_state, component="herald-api-retry", message=f"Resuming retry from failed stage '{failed_stage}' to '{target_state}'", force=False
     )
     return {
         "job_id": job.id,
@@ -2071,7 +1976,6 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
 # =====================================================================
 # Operations API Endpoints (called by n8n operational workflows)
 # =====================================================================
-
 
 @app.post(
     "/api/v1/ops/cleanup",
@@ -2109,14 +2013,7 @@ def ops_daily_cleanup(db: Session = Depends(get_db)):
             cleaned_count += 1
 
         output_dir = work_dir / "output"
-        for k in (
-            "details_filename",
-            "source_filename",
-            "script_filename",
-            "diagnostics_filename",
-            "research_filename",
-            "research_notes_filename",
-        ):
+        for k in ("details_filename", "source_filename", "script_filename", "diagnostics_filename", "research_filename", "research_notes_filename"):
             fname = names.get(k)
             if fname:
                 art_p = output_dir / fname
@@ -2220,11 +2117,7 @@ def ops_daily_health(db: Session = Depends(get_db)):
 
     oldest_pending = (
         db.query(PodcastJob)
-        .filter(
-            PodcastJob.status.notin_(
-                [JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value]
-            )
-        )
+        .filter(PodcastJob.status.notin_([JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value]))
         .order_by(PodcastJob.created_at.asc())
         .first()
     )
@@ -2235,16 +2128,18 @@ def ops_daily_health(db: Session = Depends(get_db)):
     except Exception:
         free_mb = 0.0
 
-    completed_uploads = db.query(PodcastJob).filter(PodcastJob.drive_file_id.isnot(None)).count()
+    completed_uploads = (
+        db.query(PodcastJob)
+        .filter(PodcastJob.drive_file_id.isnot(None))
+        .count()
+    )
 
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         "queue_counts": counts,
         "failures_past_24h": failures_24h,
         "oldest_pending_job_id": oldest_pending.id if oldest_pending else None,
-        "oldest_pending_created_at": oldest_pending.created_at.isoformat()
-        if oldest_pending
-        else None,
+        "oldest_pending_created_at": oldest_pending.created_at.isoformat() if oldest_pending else None,
         "free_disk_mb": free_mb,
         "completed_uploads_total": completed_uploads,
         "readiness_status": "OK" if free_mb >= settings.HERALD_MIN_DISK_MB else "DEGRADED",

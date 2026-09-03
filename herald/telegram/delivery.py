@@ -132,23 +132,11 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
 
     # Authoritative active processing time calculation as-of delivery timestamp
     active_sec = None
-    c_at = (
-        job.created_at.replace(tzinfo=UTC)
-        if (job.created_at and job.created_at.tzinfo is None)
-        else job.created_at
-    )
+    c_at = job.created_at.replace(tzinfo=UTC) if (job.created_at and job.created_at.tzinfo is None) else job.created_at
     if c_at:
         total_sec = (t0 - c_at).total_seconds()
-        app_at = (
-            job.approved_at.replace(tzinfo=UTC)
-            if (job.approved_at and job.approved_at.tzinfo is None)
-            else job.approved_at
-        )
-        req_at = (
-            job.approval_requested_at.replace(tzinfo=UTC)
-            if (job.approval_requested_at and job.approval_requested_at.tzinfo is None)
-            else job.approval_requested_at
-        )
+        app_at = job.approved_at.replace(tzinfo=UTC) if (job.approved_at and job.approved_at.tzinfo is None) else job.approved_at
+        req_at = job.approval_requested_at.replace(tzinfo=UTC) if (job.approval_requested_at and job.approval_requested_at.tzinfo is None) else job.approval_requested_at
         if app_at and req_at:
             hold_sec = (app_at - req_at).total_seconds()
             active_sec = max(1, int(total_sec - hold_sec))
@@ -303,11 +291,7 @@ def deliver_job_download(
     caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
 
     # Priority 1: Retained local MP3 on disk
-    if (
-        job.local_audio_path
-        and os.path.exists(job.local_audio_path)
-        and os.path.getsize(job.local_audio_path) > 0
-    ):
+    if job.local_audio_path and os.path.exists(job.local_audio_path) and os.path.getsize(job.local_audio_path) > 0:
         try:
             res = client.send_document(
                 chat_id=chat_id,
@@ -338,9 +322,7 @@ def deliver_job_download(
             )
             return True
         except Exception as e:
-            logger.warning(
-                f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}"
-            )
+            logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
 
     # Priority 3: Fallback to telegram_audio_file_id via sendAudio
     if job.telegram_audio_file_id:

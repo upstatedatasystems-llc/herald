@@ -74,9 +74,7 @@ class WorkerLeaseHeartbeat:
     heartbeat fields in a separate SQLAlchemy session during SYNTHESIZING + ENCODING stages.
     """
 
-    def __init__(
-        self, job_id: str, worker_id: str, lease_seconds: int = 300, interval_seconds: int = 30
-    ):
+    def __init__(self, job_id: str, worker_id: str, lease_seconds: int = 300, interval_seconds: int = 30):
         self.job_id = job_id
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
@@ -104,9 +102,7 @@ class WorkerLeaseHeartbeat:
                 try:
                     if db.bind and db.bind.dialect.name == "sqlite":
                         break
-                    success = renew_worker_lease(
-                        db, self.job_id, self.worker_id, self.lease_seconds
-                    )
+                    success = renew_worker_lease(db, self.job_id, self.worker_id, self.lease_seconds)
                     if not success:
                         break
                 finally:
@@ -137,9 +133,7 @@ def send_delivery_nudge(job: PodcastJob) -> bool:
     if not should_send_delivery_nudge(job):
         return False
 
-    nudge_url = getattr(
-        settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready"
-    )
+    nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
     nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
     nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
     try:
@@ -151,9 +145,7 @@ def send_delivery_nudge(job: PodcastJob) -> bool:
             headers["X-API-Key"] = nudge_secret
             headers["X-Herald-Delivery-Token"] = nudge_secret
         with httpx.Client(timeout=nudge_timeout) as client:
-            resp = client.post(
-                nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers
-            )
+            resp = client.post(nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers)
             return resp.status_code < 400
     except Exception as ne:
         logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}).")
@@ -192,9 +184,7 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
             is_expired = last_active is not None and last_active < cutoff
 
         if is_expired:
-            logger.warning(
-                f"Recovering stale worker claim for job '{job.id}' (last active: {last_active}, lease: {lease_exp})"
-            )
+            logger.warning(f"Recovering stale worker claim for job '{job.id}' (last active: {last_active}, lease: {lease_exp})")
             pre_recovery_status = job.status
             job.claimed_at = None
             job.claim_owner = None
@@ -204,9 +194,7 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
             job.heartbeat_at = None
 
             target_state = (
-                JobState.FAILED_FINAL.value
-                if (job.synthesis_attempt_count or 0) >= 3
-                else JobState.QUEUED_TTS.value
+                JobState.FAILED_FINAL.value if (job.synthesis_attempt_count or 0) >= 3 else JobState.QUEUED_TTS.value
             )
             transition_job_state(
                 db,
@@ -225,10 +213,7 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 started_at=last_active or now,
                 finished_at=now,
                 status="recovered",
-                metadata_json={
-                    "recovered_from": pre_recovery_status,
-                    "attempts": job.synthesis_attempt_count,
-                },
+                metadata_json={"recovered_from": pre_recovery_status, "attempts": job.synthesis_attempt_count},
                 is_attempt_metric=True,
             )
 
@@ -243,9 +228,7 @@ def requeue_due_tts_retries(db: Session):
         db.query(PodcastJob)
         .filter(
             PodcastJob.status == JobState.FAILED_RETRYABLE.value,
-            PodcastJob.failed_stage.in_(
-                ["QUEUED_TTS", JobState.SYNTHESIZING.value, JobState.ENCODING.value]
-            ),
+            PodcastJob.failed_stage.in_(["QUEUED_TTS", JobState.SYNTHESIZING.value, JobState.ENCODING.value]),
             or_(PodcastJob.next_retry_at.is_(None), PodcastJob.next_retry_at <= now),
         )
         .order_by(PodcastJob.created_at.asc())
@@ -267,9 +250,7 @@ def requeue_due_tts_retries(db: Session):
         db.commit()
 
 
-def claim_next_job(
-    db: Session, worker_id: str = "herald-worker", lease_seconds: int = 300
-) -> PodcastJob | None:
+def claim_next_job(db: Session, worker_id: str = "herald-worker", lease_seconds: int = 300) -> PodcastJob | None:
     """
     Claim 1 pending QUEUED_TTS job atomically using SELECT ... FOR UPDATE SKIP LOCKED.
     """
@@ -291,9 +272,7 @@ def claim_next_job(
 
     job.synthesis_attempt_count = (job.synthesis_attempt_count or 0) + 1
     if job.synthesis_attempt_count > 3:
-        logger.error(
-            f"Job '{job.id}' exceeded max synthesis attempts ({job.synthesis_attempt_count})."
-        )
+        logger.error(f"Job '{job.id}' exceeded max synthesis attempts ({job.synthesis_attempt_count}).")
         job.error_code = "KOKORO_MAX_ATTEMPTS_EXCEEDED"
         job.error_detail = f"Exceeded maximum synthesis attempts ({job.synthesis_attempt_count})"
         transition_job_state(
@@ -326,9 +305,7 @@ def claim_next_job(
     return job
 
 
-def process_next_job(
-    db: Session, kokoro_client: KokoroClient, worker_id: str = "herald-worker"
-) -> bool:
+def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = "herald-worker") -> bool:
     """
     Acquire 1 QUEUED_TTS job atomically, synthesize TTS chunks concurrently,
     assemble with FFmpeg, and transition status to AUDIO_READY.
@@ -345,16 +322,11 @@ def process_next_job(
 
         q_trans = (
             db.query(JobStateTransition)
-            .filter(
-                JobStateTransition.job_id == job.id,
-                JobStateTransition.to_state == JobState.QUEUED_TTS.value,
-            )
+            .filter(JobStateTransition.job_id == job.id, JobStateTransition.to_state == JobState.QUEUED_TTS.value)
             .order_by(JobStateTransition.created_at.desc())
             .first()
         )
-        queue_start = (
-            q_trans.created_at if (q_trans and q_trans.created_at) else (job.updated_at or now)
-        )
+        queue_start = q_trans.created_at if (q_trans and q_trans.created_at) else (job.updated_at or now)
         if queue_start and queue_start.tzinfo is None:
             queue_start = queue_start.replace(tzinfo=UTC)
         wait_ms = max(0, int((now - queue_start).total_seconds() * 1000))
@@ -387,9 +359,7 @@ def process_next_job(
             # Check free disk space before synthesis begins
             free_mb = check_free_disk_mb(work_dir)
             if free_mb < settings.HERALD_MIN_DISK_MB:
-                raise KokoroTTSError(
-                    f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)."
-                )
+                raise KokoroTTSError(f"Low free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
 
             script = job.script_json or {}
             segments = script.get("segments", [])
@@ -404,9 +374,7 @@ def process_next_job(
                 raise ValueError("Job script_json contains no segments to synthesize.")
 
             t_chunking_start = datetime.now(UTC)
-            target_chunk_chars = job.tts_chunk_chars or getattr(
-                settings, "TTS_CHUNK_DEFAULT_CHARS", 500
-            )
+            target_chunk_chars = job.tts_chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)
             chunks = chunk_podcast_script(segments, max_chars=target_chunk_chars)
             t_chunking_finish = datetime.now(UTC)
 
@@ -460,9 +428,7 @@ def process_next_job(
 
                     total_completed = (
                         db.query(PodcastTTSChunk)
-                        .filter(
-                            PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED"
-                        )
+                        .filter(PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED")
                         .count()
                     )
                     if total_completed > 0:
@@ -500,9 +466,7 @@ def process_next_job(
             # Execute FFmpeg join (concurrency protected internally within join_and_normalize_audio)
             for ffmpeg_attempt in range(1, 3):
                 try:
-                    logger.info(
-                        f"Worker '{worker_id}' assembling audio with FFmpeg for job '{job.id}' (Attempt {ffmpeg_attempt})..."
-                    )
+                    logger.info(f"Worker '{worker_id}' assembling audio with FFmpeg for job '{job.id}' (Attempt {ffmpeg_attempt})...")
                     audio_info = join_and_normalize_audio(
                         chunk_paths=generated_chunk_paths,
                         output_mp3_path=output_mp3_path,
@@ -519,9 +483,7 @@ def process_next_job(
                         finished_at=datetime.now(UTC),
                         status="success",
                         output_bytes=audio_info["file_bytes"],
-                        audio_duration_ms=audio_info["duration_seconds"] * 1000
-                        if audio_info.get("duration_seconds")
-                        else None,
+                        audio_duration_ms=audio_info["duration_seconds"] * 1000 if audio_info.get("duration_seconds") else None,
                         attempt=ffmpeg_attempt,
                         metadata_json={"worker_id": worker_id},
                     )
@@ -549,11 +511,7 @@ def process_next_job(
             job.audio_sha256 = audio_info["sha256"]
             job.audio_ready_at = datetime.now(UTC)
             if job.request_mode != RequestMode.LITERAL.value and not job.gemini_model:
-                job.gemini_model = (
-                    settings.GEMINI_MODEL
-                    if job.request_mode != RequestMode.RESEARCH.value
-                    else None
-                )
+                job.gemini_model = settings.GEMINI_MODEL if job.request_mode != RequestMode.RESEARCH.value else None
 
             # Clear claim fields on successful completion
             job.claimed_at = None
@@ -573,9 +531,7 @@ def process_next_job(
                 logger.warning(f"Artifact creation warning for job '{job.id}': {se}")
 
             transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
-            logger.info(
-                f"Worker '{worker_id}' successfully rendered audio for job '{job.id}': {output_mp3_path}"
-            )
+            logger.info(f"Worker '{worker_id}' successfully rendered audio for job '{job.id}': {output_mp3_path}")
 
             # Post-commit delivery nudge (only for non-Telegram jobs, e.g. legacy email/n8n)
             send_delivery_nudge(job)
@@ -630,9 +586,7 @@ def process_next_job(
             job.heartbeat_at = None
 
             target_failed_state = (
-                JobState.FAILED_FINAL.value
-                if job.synthesis_attempt_count >= 3
-                else JobState.FAILED_RETRYABLE.value
+                JobState.FAILED_FINAL.value if job.synthesis_attempt_count >= 3 else JobState.FAILED_RETRYABLE.value
             )
             transition_job_state(
                 db,
@@ -687,11 +641,9 @@ def run_worker_loop():
         run_single_worker_loop("herald-worker")
     else:
         logger.info(f"Launching {w_count} parallel episode worker threads...")
-        with ThreadPoolExecutor(
-            max_workers=w_count, thread_name_prefix="herald-worker"
-        ) as executor:
+        with ThreadPoolExecutor(max_workers=w_count, thread_name_prefix="herald-worker") as executor:
             futures = [
-                executor.submit(run_single_worker_loop, f"herald-worker-{i + 1}")
+                executor.submit(run_single_worker_loop, f"herald-worker-{i+1}")
                 for i in range(w_count)
             ]
             for fut in futures:

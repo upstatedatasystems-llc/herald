@@ -24,9 +24,7 @@ def test_get_required_artifact_types():
     job_brief = PodcastJob(request_mode=RequestMode.BRIEF.value, script_json={"segments": []})
     assert get_required_artifact_types(job_brief) == ["audio", "details"]
 
-    job_research = PodcastJob(
-        request_mode=RequestMode.RESEARCH.value, research_json={"source_summary": "Summary"}
-    )
+    job_research = PodcastJob(request_mode=RequestMode.RESEARCH.value, research_json={"source_summary": "Summary"})
     assert get_required_artifact_types(job_research) == ["audio", "details"]
 
 
@@ -88,9 +86,7 @@ def test_details_artifact_completeness_and_secrets_exclusion(tmp_path):
         script_json={
             "episode_title": "Diag Test Title",
             "episode_description": "Episode description text.",
-            "segments": [
-                {"order": 1, "heading": "Introduction", "narration": "Hello world narration."}
-            ],
+            "segments": [{"order": 1, "heading": "Introduction", "narration": "Hello world narration."}],
             "warnings": [],
         },
     )

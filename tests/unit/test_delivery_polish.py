@@ -45,7 +45,7 @@ def test_intake_acknowledgment_formatting():
     Job Started timestamp in local timezone, Job ID, and Research Depth (for Research mode).
     """
     now_iso = "2026-08-11T14:30:00Z"
-
+    
     # 1. Standard mode
     ack_std = format_acknowledgment_email(
         job_id="test-job-std-123",
@@ -169,24 +169,15 @@ def test_drive_filename_sanitization_and_construction():
     assert "AI & Future- What's Next- -Test- -Special-" in sanitized or "AI & Future" in sanitized
 
     dt = datetime(2026, 8, 11, 14, 0, 0, tzinfo=UTC)
-    audio_fn = build_user_facing_drive_filename(
-        "Quantum Computing Breakthroughs!", dt, "Standard", "mp3"
-    )
-    details_fn = build_user_facing_drive_filename(
-        "Quantum Computing Breakthroughs!", dt, "Standard", "md"
-    )
+    audio_fn = build_user_facing_drive_filename("Quantum Computing Breakthroughs!", dt, "Standard", "mp3")
+    details_fn = build_user_facing_drive_filename("Quantum Computing Breakthroughs!", dt, "Standard", "md")
 
-    assert (
-        audio_fn == "Quantum Computing Breakthroughs- 8-11-26 Standard.mp3"
-        or "Quantum Computing Breakthroughs" in audio_fn
-    )
+    assert audio_fn == "Quantum Computing Breakthroughs- 8-11-26 Standard.mp3" or "Quantum Computing Breakthroughs" in audio_fn
     assert audio_fn.endswith("8-11-26 Standard.mp3")
     assert details_fn.endswith("8-11-26 Standard.md")
 
 
-def test_delivery_claim_returns_readable_drive_filenames_and_uuid_local_paths(
-    api_client, db_session: Session
-):
+def test_delivery_claim_returns_readable_drive_filenames_and_uuid_local_paths(api_client, db_session: Session):
     """
     Verify /api/v1/delivery/claim returns separate readable audio_drive_filename and details_drive_filename,
     while preserving UUID-based local audio_filename, details_filename, and local paths.
@@ -264,7 +255,9 @@ def test_deployment_rehydration_replaces_placeholder_credentials_and_error_workf
         "nodes": [
             {
                 "name": "Gmail Trigger",
-                "credentials": {"gmailOAuth2": {"id": "1", "name": "Herald Gmail Account"}},
+                "credentials": {
+                    "gmailOAuth2": {"id": "1", "name": "Herald Gmail Account"}
+                },
             },
             {
                 "name": "Drive Upload",
@@ -273,7 +266,9 @@ def test_deployment_rehydration_replaces_placeholder_credentials_and_error_workf
                 },
             },
         ],
-        "settings": {"errorWorkflow": "Herald - System Error Handler"},
+        "settings": {
+            "errorWorkflow": "Herald - System Error Handler"
+        },
     }
 
     installed_creds = {
@@ -281,15 +276,15 @@ def test_deployment_rehydration_replaces_placeholder_credentials_and_error_workf
         "googleDriveOAuth2Api": {"id": "real-drive-cred-888", "name": "Production Drive"},
     }
 
-    wf_map = {"Herald - System Error Handler": "fOw3dnjtBK04avEI"}
+    wf_map = {
+        "Herald - System Error Handler": "fOw3dnjtBK04avEI"
+    }
 
     rehydrated = rehydrate_workflow_credentials(raw_wf, installed_creds, wf_map)
 
     # 1. Credentials rehydrated
     assert rehydrated["nodes"][0]["credentials"]["gmailOAuth2"]["id"] == "real-gmail-cred-999"
-    assert (
-        rehydrated["nodes"][1]["credentials"]["googleDriveOAuth2Api"]["id"] == "real-drive-cred-888"
-    )
+    assert rehydrated["nodes"][1]["credentials"]["googleDriveOAuth2Api"]["id"] == "real-drive-cred-888"
 
     # 2. errorWorkflow resolved to ID
     assert rehydrated["settings"]["errorWorkflow"] == "fOw3dnjtBK04avEI"
@@ -305,7 +300,9 @@ def test_deployment_rejects_unresolved_placeholder_credentials():
         "nodes": [
             {
                 "name": "Gmail Node",
-                "credentials": {"gmailOAuth2": {"id": "1", "name": "Placeholder Gmail"}},
+                "credentials": {
+                    "gmailOAuth2": {"id": "1", "name": "Placeholder Gmail"}
+                },
             }
         ],
     }
@@ -323,16 +320,15 @@ def test_error_workflow_is_workflow_id_not_name():
     wf_with_raw_error_name = {
         "name": "Test Intake",
         "nodes": [],
-        "settings": {"errorWorkflow": "Herald - System Error Handler"},
+        "settings": {
+            "errorWorkflow": "Herald - System Error Handler"
+        },
     }
 
     with pytest.raises(ValueError) as exc_info:
         validate_workflow_for_deployment(wf_with_raw_error_name)
 
-    assert (
-        "settings.errorWorkflow contains unresolved workflow name 'Herald - System Error Handler' instead of an installed workflow ID"
-        in str(exc_info.value)
-    )
+    assert "settings.errorWorkflow contains unresolved workflow name 'Herald - System Error Handler' instead of an installed workflow ID" in str(exc_info.value)
 
 
 def test_global_error_handler_sends_admin_notification():
@@ -403,9 +399,7 @@ def test_source_access_blocked_and_requester_failure_email():
 
     assert "PROCESSING COULD NOT BE COMPLETED" in fail["text"]
     assert "blocked automated retrieval" in fail["text"]
-    assert (
-        "Please copy and paste the full article text directly into your email body" in fail["text"]
-    )
+    assert "Please copy and paste the full article text directly into your email body" in fail["text"]
     assert "SOURCE_ACCESS_BLOCKED" in fail["text"]
     assert "fail-job-999" in fail["text"]
     assert "<html" in fail["html"].lower()
@@ -469,11 +463,15 @@ def test_credential_rehydration_and_validation():
         "nodes": [
             {
                 "name": "Gmail Node",
-                "credentials": {"gmailOAuth2": {"id": "default-id", "name": "Herald Gmail"}},
+                "credentials": {
+                    "gmailOAuth2": {"id": "default-id", "name": "Herald Gmail"}
+                },
             },
             {
                 "name": "Drive Node",
-                "credentials": {"googleDriveOAuth2": {"id": "default-id", "name": "Herald Drive"}},
+                "credentials": {
+                    "googleDriveOAuth2": {"id": "default-id", "name": "Herald Drive"}
+                },
             },
         ],
     }
@@ -486,9 +484,7 @@ def test_credential_rehydration_and_validation():
     rehydrated = rehydrate_workflow_credentials(sample_wf, installed)
 
     assert rehydrated["nodes"][0]["credentials"]["gmailOAuth2"]["id"] == "prod-gmail-cred-id-999"
-    assert (
-        rehydrated["nodes"][1]["credentials"]["googleDriveOAuth2"]["id"] == "prod-drive-cred-id-888"
-    )
+    assert rehydrated["nodes"][1]["credentials"]["googleDriveOAuth2"]["id"] == "prod-drive-cred-id-888"
     assert validate_workflow_credentials(rehydrated) is True
 
 
@@ -496,11 +492,10 @@ def test_production_google_drive_folder_id_enforcement():
     """
     Verify is_production_valid() fails if GOOGLE_DRIVE_FOLDER_ID is empty in production environment.
     """
-    with (
-        patch.object(settings, "HERALD_ENV", "production"),
-        patch.object(settings, "HERALD_API_KEY", "valid-key-12345"),
-        patch.object(settings, "EMAIL_ALLOWED_SENDERS", "user@example.com"),
-    ):
+    with patch.object(settings, "HERALD_ENV", "production"), \
+         patch.object(settings, "HERALD_API_KEY", "valid-key-12345"), \
+         patch.object(settings, "EMAIL_ALLOWED_SENDERS", "user@example.com"):
+
         with patch.object(settings, "GOOGLE_DRIVE_FOLDER_ID", ""):
             assert settings.is_production_valid() is False
 

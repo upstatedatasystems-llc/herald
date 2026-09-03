@@ -24,11 +24,7 @@ def get_pairing_status(expires_in_minutes: int = 30) -> str:
         record = get_or_create_active_pairing_record(db, expires_in_minutes=expires_in_minutes)
         if record:
             now = datetime.now(UTC)
-            expires_at = (
-                record.expires_at
-                if record.expires_at.tzinfo
-                else record.expires_at.replace(tzinfo=UTC)
-            )
+            expires_at = record.expires_at if record.expires_at.tzinfo else record.expires_at.replace(tzinfo=UTC)
             remaining_secs = (expires_at - now).total_seconds()
             remaining_mins = max(1, int(round(remaining_secs / 60.0)))
             return f"UNPAIRED:{record.code}:{remaining_mins}"

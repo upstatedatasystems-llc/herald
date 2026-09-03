@@ -114,9 +114,7 @@ def test_lease_heartbeat_renewal(db_session):
     db_session.commit()
 
     # Mismatched worker cannot renew lease
-    res_mismatch = renew_worker_lease(
-        db_session, "job-hb-test-01", "worker-other", lease_seconds=300
-    )
+    res_mismatch = renew_worker_lease(db_session, "job-hb-test-01", "worker-other", lease_seconds=300)
     assert res_mismatch is False
 
     # Matching worker successfully renews lease
@@ -124,16 +122,8 @@ def test_lease_heartbeat_renewal(db_session):
     assert res_success is True
 
     db_session.refresh(job)
-    hb_at = (
-        job.heartbeat_at.replace(tzinfo=UTC)
-        if job.heartbeat_at.tzinfo is None
-        else job.heartbeat_at
-    )
-    exp_at = (
-        job.lease_expires_at.replace(tzinfo=UTC)
-        if job.lease_expires_at.tzinfo is None
-        else job.lease_expires_at
-    )
+    hb_at = job.heartbeat_at.replace(tzinfo=UTC) if job.heartbeat_at.tzinfo is None else job.heartbeat_at
+    exp_at = job.lease_expires_at.replace(tzinfo=UTC) if job.lease_expires_at.tzinfo is None else job.lease_expires_at
     assert hb_at > t0
     assert exp_at > t0 + timedelta(seconds=10)
 
@@ -247,10 +237,7 @@ def test_cpu_detection_conservative_combinations(monkeypatch, tmp_path):
     # 1. cgroup quota=1.5 CPUs -> floor -> 1
     cgroup2_file = tmp_path / "cpu.max"
     cgroup2_file.write_text("150000 100000")
-    monkeypatch.setattr(
-        "herald.concurrency.Path",
-        lambda p: cgroup2_file if "cpu.max" in str(p) else tmp_path / "missing",
-    )
+    monkeypatch.setattr("herald.concurrency.Path", lambda p: cgroup2_file if "cpu.max" in str(p) else tmp_path / "missing")
     assert detect_cpus() == 1
 
     # 2. cgroup quota=0.75 CPUs -> floor -> 1

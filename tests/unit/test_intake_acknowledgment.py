@@ -37,24 +37,16 @@ def test_intake_produces_immediate_receipt_acknowledgment(api_client, db_session
     assert data["acknowledgment_email_html"] is not None
 
     assert "HERALD — REQUEST RECEIVED" in data["acknowledgment_email_text"]
-    assert (
-        "Your podcast request has been received and processing has begun."
-        in data["acknowledgment_email_text"]
-    )
+    assert "Your podcast request has been received and processing has begun." in data["acknowledgment_email_text"]
     assert "Requested Format: Standard" in data["acknowledgment_email_text"]
     assert f"Job ID: {data['job_id']}" in data["acknowledgment_email_text"]
-    assert (
-        "You will receive another email with your private Google Drive link when the episode is complete."
-        in data["acknowledgment_email_text"]
-    )
+    assert "You will receive another email with your private Google Drive link when the episode is complete." in data["acknowledgment_email_text"]
 
     assert "<html" in data["acknowledgment_email_html"].lower()
     assert "Your podcast request has been received" in data["acknowledgment_email_html"]
 
 
-def test_duplicate_intake_does_not_produce_duplicate_acknowledgment(
-    api_client, db_session: Session
-):
+def test_duplicate_intake_does_not_produce_duplicate_acknowledgment(api_client, db_session: Session):
     """
     Prove that duplicate/replayed intake calls return is_duplicate=True
     and do NOT generate duplicate acknowledgment emails (acknowledgment_email_html is None).
@@ -117,10 +109,9 @@ def test_standard_verify_processing_order_preserved(api_client, db_session: Sess
         execution_order.append("VERIFY_AUDIT")
         return mock_audit
 
-    with (
-        patch("apps.api.main.generate_podcast_script", side_effect=mock_gen_script),
-        patch("apps.api.main.audit_script_fidelity", side_effect=mock_audit_script),
-    ):
+    with patch("apps.api.main.generate_podcast_script", side_effect=mock_gen_script), \
+         patch("apps.api.main.audit_script_fidelity", side_effect=mock_audit_script):
+
         r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
         assert r2.status_code == 200, f"Script generation failed: {r2.text}"
         gen_data = r2.json()
@@ -239,9 +230,7 @@ def test_replay_when_queued_tts_does_not_regenerate_script(api_client, db_sessio
         assert mock_gen_2.call_count == 0
 
 
-def test_replay_when_scripting_synthesizing_later_states_does_not_regenerate_or_acknowledge(
-    api_client, db_session: Session
-):
+def test_replay_when_scripting_synthesizing_later_states_does_not_regenerate_or_acknowledge(api_client, db_session: Session):
     """
     Prove that replaying intake or script generation for jobs in SCRIPTING, SYNTHESIZING,
     ENCODING, or COMPLETE states does NOT generate a new acknowledgment email and does NOT regenerate script.
@@ -257,12 +246,7 @@ def test_replay_when_scripting_synthesizing_later_states_does_not_regenerate_or_
     job_id = r1.json()["job_id"]
     job = db_session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
 
-    for state in (
-        JobState.SCRIPTING.value,
-        JobState.SYNTHESIZING.value,
-        JobState.ENCODING.value,
-        JobState.COMPLETE.value,
-    ):
+    for state in (JobState.SCRIPTING.value, JobState.SYNTHESIZING.value, JobState.ENCODING.value, JobState.COMPLETE.value):
         job.status = state
         job.script_json = {"episode_title": "Test", "segments": []}
         db_session.commit()

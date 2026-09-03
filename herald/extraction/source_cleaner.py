@@ -2,26 +2,15 @@ import re
 import unicodedata
 
 PAGE_JUNK_PATTERNS = [
-    re.compile(
-        r"^\s*(?:Printable Version|Print this article|Download PDF|Share this story)\s*$",
-        re.IGNORECASE | re.MULTILINE,
-    ),
-    re.compile(
-        r".*?(?:Cookie Policy|Privacy Policy|Terms of Service|All rights reserved\.?).*",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:Skip to content|Skip to main content|Toggle navigation|Menu)\s*$",
-        re.IGNORECASE | re.MULTILINE,
-    ),
+    re.compile(r"^\s*(?:Printable Version|Print this article|Download PDF|Share this story)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r".*?(?:Cookie Policy|Privacy Policy|Terms of Service|All rights reserved\.?).*", re.IGNORECASE),
+    re.compile(r"^\s*(?:Skip to content|Skip to main content|Toggle navigation|Menu)\s*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r".*?(?:Menu|Subscribe|Sign In)\s*\|\s*(?:Menu|Subscribe|Sign In).*", re.IGNORECASE),
 ]
 
 IMAGE_ALT_PATTERN = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
 LATEX_WRAPPER_PATTERN = re.compile(r"\[latex\](.*?)\[/latex\]", re.IGNORECASE | re.DOTALL)
-TRACKING_URL_PARAM_PATTERN = re.compile(
-    r"([?&])(?:utm_[a-z]+|ref|source|tracking_id|fbclid|gclid)=[^&\s]+", re.IGNORECASE
-)
+TRACKING_URL_PARAM_PATTERN = re.compile(r"([?&])(?:utm_[a-z]+|ref|source|tracking_id|fbclid|gclid)=[^&\s]+", re.IGNORECASE)
 
 
 def sanitize_unicode(text: str) -> str:

@@ -235,6 +235,18 @@ def get_effective_tts_global_slots() -> int:
     return max(1, config.tts_global_slots)
 
 
+def get_tts_slot_wait_timeout_seconds() -> float:
+    """
+    Return authoritative bounded timeout for waiting to acquire a global TTS slot
+    before starting Kokoro inference.
+    Derived as max(180.0, KOKORO_SYNTHESIS_TIMEOUT_SECONDS * 1.5).
+    """
+    from herald.config import settings
+
+    synth_timeout = float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0))
+    return max(180.0, synth_timeout * 1.5)
+
+
 TTS_ADVISORY_SLOT_BASE: int = 920000
 
 
@@ -247,12 +259,8 @@ def tts_slot_lock(
     On PostgreSQL, uses an advisory lock slot pool across all containers/processes.
     On SQLite/test environments, uses the in-process global TTS semaphore (or supplied local_semaphore).
     """
-    from herald.config import settings
-
     if timeout_seconds is None:
-        timeout_seconds = max(
-            180.0, float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180)) * 1.5
-        )
+        timeout_seconds = get_tts_slot_wait_timeout_seconds()
 
     is_postgres = False
     if db is not None:
@@ -265,6 +273,8 @@ def tts_slot_lock(
 
     if is_postgres and db is not None:
         from sqlalchemy import text as sa_text
+
+        from herald.config import settings
 
         base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", TTS_ADVISORY_SLOT_BASE)
         num_slots = get_effective_tts_global_slots()

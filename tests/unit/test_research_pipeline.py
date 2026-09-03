@@ -31,23 +31,10 @@ def test_canonical_source_id_registry_creation(monkeypatch):
                     "parts": [{"text": "Grounded search response text referencing S1 and S2."}]
                 },
                 "groundingMetadata": {
-                    "webSearchQueries": [
-                        "quantum coherence testing 2026",
-                        "superconducting qubits benchmark",
-                    ],
+                    "webSearchQueries": ["quantum coherence testing 2026", "superconducting qubits benchmark"],
                     "groundingChunks": [
-                        {
-                            "web": {
-                                "uri": "https://nature.com/articles/quantum1",
-                                "title": "Nature Quantum Benchmark",
-                            }
-                        },
-                        {
-                            "web": {
-                                "uri": "https://arxiv.org/abs/2608.12345",
-                                "title": "arXiv Quantum Paper",
-                            }
-                        },
+                        {"web": {"uri": "https://nature.com/articles/quantum1", "title": "Nature Quantum Benchmark"}},
+                        {"web": {"uri": "https://arxiv.org/abs/2608.12345", "title": "arXiv Quantum Paper"}},
                     ],
                 },
             }
@@ -56,20 +43,16 @@ def test_canonical_source_id_registry_creation(monkeypatch):
 
     class MockResponse:
         status_code = 200
-
         def json(self):
             return fake_resp
 
     class MockClient:
         def __init__(self, *args, **kwargs):
             pass
-
         def __enter__(self):
             return self
-
         def __exit__(self, *args):
             pass
-
         def post(self, url, json=None, **kwargs):
             return MockResponse()
 
@@ -111,22 +94,20 @@ def test_dossier_normalization_rejects_invented_source_ids(monkeypatch):
                 "content": {
                     "parts": [
                         {
-                            "text": json.dumps(
-                                {
-                                    "source_summary": "Summary",
-                                    "verification": [
-                                        {
-                                            "source_claim": "Claim 1",
-                                            "status": "supported",
-                                            "notes": "Verified",
-                                            "source_ids": ["S99"],  # Invalid invented ID!
-                                        }
-                                    ],
-                                    "useful_context": [],
-                                    "outdated_or_uncertain": [],
-                                    "research_sources": grounded_data["research_sources"],
-                                }
-                            )
+                            "text": json.dumps({
+                                "source_summary": "Summary",
+                                "verification": [
+                                    {
+                                        "source_claim": "Claim 1",
+                                        "status": "supported",
+                                        "notes": "Verified",
+                                        "source_ids": ["S99"],  # Invalid invented ID!
+                                    }
+                                ],
+                                "useful_context": [],
+                                "outdated_or_uncertain": [],
+                                "research_sources": grounded_data["research_sources"],
+                            })
                         }
                     ]
                 }
@@ -136,20 +117,16 @@ def test_dossier_normalization_rejects_invented_source_ids(monkeypatch):
 
     class MockResponse:
         status_code = 200
-
         def json(self):
             return fake_resp
 
     class MockClient:
         def __init__(self, *args, **kwargs):
             pass
-
         def __enter__(self):
             return self
-
         def __exit__(self, *args):
             pass
-
         def post(self, url, json=None, **kwargs):
             return MockResponse()
 
@@ -220,7 +197,6 @@ def test_research_artifacts_generation(tmp_path):
     )
 
     from herald.audio.artifact_generator import ensure_details_artifact
-
     p_details = ensure_details_artifact(job, tmp_path)
 
     assert p_details.exists()
@@ -332,3 +308,4 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
     assert updated_job.research_json is not None
     assert updated_job.script_json is not None
     assert updated_job.research_audit_json is not None
+

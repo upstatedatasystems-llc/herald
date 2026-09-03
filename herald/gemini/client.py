@@ -91,21 +91,14 @@ Report your comprehensive grounded findings in detail.
 
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info(
-                f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{max_attempts}"
-            )
+            logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{max_attempts}")
             from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-            with (
-                get_semaphores().script,
-                httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client,
-            ):
                 resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code in (401, 403):
-                raise GeminiAuthError(
-                    f"Gemini API authentication failed ({resp.status_code}): {resp.text}"
-                )
+                raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
             elif resp.status_code == 429:
                 if attempt < max_attempts:
                     time.sleep(backoff)
@@ -122,25 +115,15 @@ Report your comprehensive grounded findings in detail.
             result_json = resp.json()
             candidates = result_json.get("candidates", [])
             if not candidates:
-                raise GeminiValidationError(
-                    "Gemini API returned no response candidates for grounded research."
-                )
+                raise GeminiValidationError("Gemini API returned no response candidates for grounded research.")
 
             candidate = candidates[0]
             parts = candidate.get("content", {}).get("parts", [])
             raw_text = "".join(p.get("text", "") for p in parts if "text" in p)
 
-            grounding_meta = (
-                candidate.get("groundingMetadata") or candidate.get("grounding_metadata") or {}
-            )
-            web_queries = (
-                grounding_meta.get("webSearchQueries") or grounding_meta.get("search_queries") or []
-            )
-            grounding_chunks = (
-                grounding_meta.get("groundingChunks")
-                or grounding_meta.get("grounding_chunks")
-                or []
-            )
+            grounding_meta = candidate.get("groundingMetadata") or candidate.get("grounding_metadata") or {}
+            web_queries = grounding_meta.get("webSearchQueries") or grounding_meta.get("search_queries") or []
+            grounding_chunks = grounding_meta.get("groundingChunks") or grounding_meta.get("grounding_chunks") or []
 
             # Enforce strict grounding requirement: if no metadata returned, raise failure rather than silently degrading
             if not grounding_meta and not web_queries and not grounding_chunks:
@@ -235,7 +218,7 @@ You are a research analyst normalizing grounded evidence into a structured Resea
 </PRIMARY_SOURCE>
 
 <GROUNDED_RESEARCH_EVIDENCE>
-{grounded_research_data.get("raw_text", "")}
+{grounded_research_data.get('raw_text', '')}
 </GROUNDED_RESEARCH_EVIDENCE>
 
 <CANONICAL_SOURCE_REGISTRY>
@@ -294,24 +277,11 @@ Requirements:
                         "retrieved_at": {"type": "STRING"},
                         "search_query": {"type": "STRING"},
                     },
-                    "required": [
-                        "source_id",
-                        "title",
-                        "url",
-                        "domain",
-                        "retrieved_at",
-                        "search_query",
-                    ],
+                    "required": ["source_id", "title", "url", "domain", "retrieved_at", "search_query"],
                 },
             },
         },
-        "required": [
-            "source_summary",
-            "verification",
-            "useful_context",
-            "outdated_or_uncertain",
-            "research_sources",
-        ],
+        "required": ["source_summary", "verification", "useful_context", "outdated_or_uncertain", "research_sources"],
     }
 
     max_attempts = settings.GEMINI_RETRY_COUNT
@@ -319,9 +289,7 @@ Requirements:
 
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info(
-                f"Sending dossier normalization request to Gemini ({model}), attempt {attempt}/{max_attempts}"
-            )
+            logger.info(f"Sending dossier normalization request to Gemini ({model}), attempt {attempt}/{max_attempts}")
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {
@@ -333,11 +301,8 @@ Requirements:
             }
 
             from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-            with (
-                get_semaphores().script,
-                httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client,
-            ):
                 resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code != 200:
@@ -355,16 +320,12 @@ Requirements:
             for v in data.get("verification", []):
                 for sid in v.get("source_ids", []):
                     if valid_source_ids and sid not in valid_source_ids:
-                        raise GeminiValidationError(
-                            f"Dossier referenced invalid source ID '{sid}' not in registry."
-                        )
+                        raise GeminiValidationError(f"Dossier referenced invalid source ID '{sid}' not in registry.")
 
             for c in data.get("useful_context", []):
                 for sid in c.get("source_ids", []):
                     if valid_source_ids and sid not in valid_source_ids:
-                        raise GeminiValidationError(
-                            f"Dossier referenced invalid source ID '{sid}' not in registry."
-                        )
+                        raise GeminiValidationError(f"Dossier referenced invalid source ID '{sid}' not in registry.")
 
             # Ensure research_sources contains the canonical registry
             if not data.get("research_sources") and sources_registry:
@@ -423,7 +384,7 @@ def generate_podcast_script(
 
     user_prompt = f"""
 REQUESTED MODE: {mode_clean.upper()}
-SOURCE TITLE: {source_title or "N/A"}
+SOURCE TITLE: {source_title or 'N/A'}
 
 {input_context}
 
@@ -471,9 +432,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
 
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info(
-                f"Sending script request to Gemini ({model}), mode={mode_clean}, attempt {attempt}/{max_attempts}"
-            )
+            logger.info(f"Sending script request to Gemini ({model}), mode={mode_clean}, attempt {attempt}/{max_attempts}")
             prompt_content = f"{system_prompt}\n\n{user_prompt}"
             if attempt == 2 and last_error:
                 prompt_content += f"\n\nNOTE: Previous attempt failed validation: '{last_error}'. Strictly conform to required fields."
@@ -489,17 +448,12 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             }
 
             from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
 
-            with (
-                get_semaphores().script,
-                httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client,
-            ):
                 resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code in (401, 403):
-                raise GeminiAuthError(
-                    f"Gemini API authentication failed ({resp.status_code}): {resp.text}"
-                )
+                raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
             elif resp.status_code == 429:
                 if attempt < max_attempts:
                     time.sleep(backoff)
@@ -529,9 +483,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
 
         except (json.JSONDecodeError, GeminiValidationError) as e:
             last_error = str(e)
-            logger.error(
-                f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}"
-            )
+            logger.error(f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}")
             if attempt == max_attempts:
                 raise GeminiValidationError(f"Invalid JSON/schema returned by Gemini: {e}")
         except Exception as e:
@@ -603,10 +555,7 @@ If has_material_issues is true, provide concrete repair_instructions.
             "misrepresented_source_claims": {"type": "ARRAY", "items": {"type": "STRING"}},
             "research_claims_without_evidence": {"type": "ARRAY", "items": {"type": "STRING"}},
             "contradictions_not_disclosed": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "important_verified_information_omitted": {
-                "type": "ARRAY",
-                "items": {"type": "STRING"},
-            },
+            "important_verified_information_omitted": {"type": "ARRAY", "items": {"type": "STRING"}},
             "changed_numbers_or_units": {"type": "ARRAY", "items": {"type": "STRING"}},
             "citation_mapping_failures": {"type": "ARRAY", "items": {"type": "STRING"}},
             "has_material_issues": {"type": "BOOLEAN"},
@@ -895,3 +844,4 @@ Return the corrected PodcastScriptResponse JSON now.
         return PodcastScriptResponse(**json.loads(raw_text))
 
     raise GeminiError("Failed to repair script fidelity.")
+

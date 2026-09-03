@@ -20,21 +20,12 @@ def load_installed_credentials_from_env() -> dict[str, dict[str, str]]:
     creds = {}
     gmail_id = os.getenv("GMAIL_CREDENTIAL_ID")
     if gmail_id:
-        creds["gmailOAuth2"] = {
-            "id": gmail_id,
-            "name": os.getenv("GMAIL_CREDENTIAL_NAME", "Herald Gmail Account"),
-        }
+        creds["gmailOAuth2"] = {"id": gmail_id, "name": os.getenv("GMAIL_CREDENTIAL_NAME", "Herald Gmail Account")}
 
     drive_id = os.getenv("GOOGLE_DRIVE_CREDENTIAL_ID")
     if drive_id:
-        creds["googleDriveOAuth2Api"] = {
-            "id": drive_id,
-            "name": os.getenv("GOOGLE_DRIVE_CREDENTIAL_NAME", "Herald Google Drive Account"),
-        }
-        creds["googleDriveOAuth2"] = {
-            "id": drive_id,
-            "name": os.getenv("GOOGLE_DRIVE_CREDENTIAL_NAME", "Herald Google Drive Account"),
-        }
+        creds["googleDriveOAuth2Api"] = {"id": drive_id, "name": os.getenv("GOOGLE_DRIVE_CREDENTIAL_NAME", "Herald Google Drive Account")}
+        creds["googleDriveOAuth2"] = {"id": drive_id, "name": os.getenv("GOOGLE_DRIVE_CREDENTIAL_NAME", "Herald Google Drive Account")}
 
     return creds
 
@@ -69,7 +60,7 @@ def prepare_deployment_workflows(
             raw_wf = json.load(f)
 
         rehydrated = rehydrate_workflow_credentials(raw_wf, installed_credentials, workflow_id_map)
-
+        
         # Validate rehydrated workflow - raises ValueError if invalid
         validate_workflow_for_deployment(rehydrated)
 
@@ -84,25 +75,11 @@ def prepare_deployment_workflows(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Herald n8n Workflow Deployment & Credential Rehydrator"
-    )
-    parser.add_argument(
-        "--workflows-dir",
-        default="n8n/workflows",
-        help="Directory containing raw repo workflow JSONs",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="n8n/build",
-        help="Directory to output import-ready rehydrated JSONs",
-    )
-    parser.add_argument(
-        "--credentials-json", help="Path to JSON file containing installed credentials mapping"
-    )
-    parser.add_argument(
-        "--error-handler-id", help="Installed workflow ID for Herald - System Error Handler"
-    )
+    parser = argparse.ArgumentParser(description="Herald n8n Workflow Deployment & Credential Rehydrator")
+    parser.add_argument("--workflows-dir", default="n8n/workflows", help="Directory containing raw repo workflow JSONs")
+    parser.add_argument("--output-dir", default="n8n/build", help="Directory to output import-ready rehydrated JSONs")
+    parser.add_argument("--credentials-json", help="Path to JSON file containing installed credentials mapping")
+    parser.add_argument("--error-handler-id", help="Installed workflow ID for Herald - System Error Handler")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -120,12 +97,8 @@ def main():
         wf_map["Herald - System Error Handler"] = err_id
 
     try:
-        files = prepare_deployment_workflows(
-            args.workflows_dir, args.output_dir, installed_creds, wf_map
-        )
-        print(
-            f"Deployment preparation succeeded. {len(files)} import-ready workflow(s) written to '{args.output_dir}'."
-        )
+        files = prepare_deployment_workflows(args.workflows_dir, args.output_dir, installed_creds, wf_map)
+        print(f"Deployment preparation succeeded. {len(files)} import-ready workflow(s) written to '{args.output_dir}'.")
     except Exception as e:
         print(f"DEPLOYMENT PREPARATION FAILED: {e}", file=sys.stderr)
         sys.exit(1)

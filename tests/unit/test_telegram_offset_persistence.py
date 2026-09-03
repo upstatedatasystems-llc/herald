@@ -19,7 +19,6 @@ def test_telegram_offset_persistence_and_poison_update_quarantine(monkeypatch):
     TestingSession = sessionmaker(bind=engine)
 
     import herald.telegram.bot as bot_mod
-
     monkeypatch.setattr(bot_mod, "SessionLocal", TestingSession)
 
     mock_client = MagicMock()
@@ -27,38 +26,13 @@ def test_telegram_offset_persistence_and_poison_update_quarantine(monkeypatch):
 
     # Prepare 3 updates: Update 10 (good), Update 11 (poison), Update 12 (good)
     updates_batch_1 = [
-        {
-            "update_id": 10,
-            "message": {
-                "chat": {"id": 12345, "type": "private"},
-                "from": {"id": 999},
-                "text": "/help",
-                "message_id": 1,
-            },
-        },
-        {
-            "update_id": 11,
-            "message": {
-                "chat": {"id": 12345, "type": "private"},
-                "from": {"id": 999},
-                "text": "/broken",
-                "message_id": 2,
-            },
-        },
-        {
-            "update_id": 12,
-            "message": {
-                "chat": {"id": 12345, "type": "private"},
-                "from": {"id": 999},
-                "text": "/help",
-                "message_id": 3,
-            },
-        },
+        {"update_id": 10, "message": {"chat": {"id": 12345, "type": "private"}, "from": {"id": 999}, "text": "/help", "message_id": 1}},
+        {"update_id": 11, "message": {"chat": {"id": 12345, "type": "private"}, "from": {"id": 999}, "text": "/broken", "message_id": 2}},
+        {"update_id": 12, "message": {"chat": {"id": 12345, "type": "private"}, "from": {"id": 999}, "text": "/help", "message_id": 3}},
     ]
 
     # Mock client.get_updates to return batch
     call_count = 0
-
     def mock_get_updates(offset, limit=50, timeout=10):
         nonlocal call_count
         call_count += 1

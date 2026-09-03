@@ -12,11 +12,7 @@ def test_valid_appendix_c_podcast_script_response():
         "source_title": "Tech News Today",
         "segments": [
             {"order": 1, "heading": "Introduction", "narration": "Welcome to today's breakdown."},
-            {
-                "order": 2,
-                "heading": "Main Developments",
-                "narration": "Here are the key announcements.",
-            },
+            {"order": 2, "heading": "Main Developments", "narration": "Here are the key announcements."},
         ],
         "warnings": [],
     }

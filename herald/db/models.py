@@ -170,12 +170,8 @@ class PodcastJob(Base):
     )
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
-    transitions = relationship(
-        "JobStateTransition", back_populates="job", cascade="all, delete-orphan"
-    )
-    metrics = relationship(
-        "JobProcessingMetric", back_populates="job", cascade="all, delete-orphan"
-    )
+    transitions = relationship("JobStateTransition", back_populates="job", cascade="all, delete-orphan")
+    metrics = relationship("JobProcessingMetric", back_populates="job", cascade="all, delete-orphan")
     tts_chunks = relationship("PodcastTTSChunk", back_populates="job", cascade="all, delete-orphan")
 
 
@@ -187,9 +183,7 @@ class PodcastTTSChunk(Base):
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    job_id = Column(
-        String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     chunk_index = Column(Integer, nullable=False)
     text_hash = Column(String(64), nullable=False)
     status = Column(String(50), nullable=False, default="PENDING", index=True)
@@ -212,12 +206,11 @@ class PodcastTTSChunk(Base):
 
 
 class JobStateTransition(Base):
+
     __tablename__ = "job_state_transitions"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    job_id = Column(
-        String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     from_state = Column(String(50), nullable=True)
     to_state = Column(String(50), nullable=False)
     component = Column(String(50), nullable=False)
@@ -232,9 +225,7 @@ class JobProcessingMetric(Base):
     __tablename__ = "job_processing_metrics"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    job_id = Column(
-        String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     stage = Column(String(50), nullable=False)
     substage = Column(String(50), nullable=True)
     attempt = Column(Integer, nullable=True)
@@ -320,21 +311,10 @@ class TelegramUpdateFailure(Base):
 
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
 Index("idx_podcast_jobs_claim", PodcastJob.status, PodcastJob.claimed_at)
-Index(
-    "uq_podcast_jobs_telegram",
-    PodcastJob.transport,
-    PodcastJob.telegram_chat_id,
-    PodcastJob.telegram_message_id,
-    unique=True,
-)
+Index("uq_podcast_jobs_telegram", PodcastJob.transport, PodcastJob.telegram_chat_id, PodcastJob.telegram_message_id, unique=True)
 Index("idx_job_processing_metrics_job_stage", JobProcessingMetric.job_id, JobProcessingMetric.stage)
-Index(
-    "idx_job_processing_metrics_stage_created",
-    JobProcessingMetric.stage,
-    JobProcessingMetric.created_at,
-)
-Index(
-    "idx_job_processing_metrics_job_seq",
-    JobProcessingMetric.job_id,
-    JobProcessingMetric.sequence_index,
-)
+Index("idx_job_processing_metrics_stage_created", JobProcessingMetric.stage, JobProcessingMetric.created_at)
+Index("idx_job_processing_metrics_job_seq", JobProcessingMetric.job_id, JobProcessingMetric.sequence_index)
+
+
+

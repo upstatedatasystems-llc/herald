@@ -65,7 +65,6 @@ def test_invalid_audio_rejection(tmp_path):
 
 def test_mocked_extract_article_ssrf(monkeypatch):
     """Verify extract_article_from_url uses mocked DNS and MockTransport with no live network calls."""
-
     def mock_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
@@ -76,9 +75,7 @@ def test_mocked_extract_article_ssrf(monkeypatch):
         return httpx.Response(200, text=html, headers={"Content-Type": "text/html"})
 
     transport = httpx.MockTransport(handler)
-    title, text, canonical_url = extract_article_from_url(
-        "https://public-test.example.com/news", transport=transport
-    )
+    title, text, canonical_url = extract_article_from_url("https://public-test.example.com/news", transport=transport)
 
     assert title == "Test Article"
     assert "mock article text" in text

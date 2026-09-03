@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from herald.concurrency import (
     get_effective_tts_global_slots,
     get_semaphores,
+    get_tts_slot_wait_timeout_seconds,
     initialize_semaphores,
     reset_semaphores_for_tests,
     resolve_concurrency_settings,
@@ -85,9 +86,21 @@ def test_slot_count_resolution_explicit_override(monkeypatch):
 
 def test_kokoro_synthesis_timeout_derivation(monkeypatch):
     """
-    Test that changing KOKORO_SYNTHESIS_TIMEOUT_SECONDS alters default tts_slot_lock timeout.
+    Test that changing KOKORO_SYNTHESIS_TIMEOUT_SECONDS alters get_tts_slot_wait_timeout_seconds()
+    and derives the intended 1.5x headroom (minimum 180s).
     """
+    # 1. Default (180s) -> slot wait timeout = 270.0s (180 * 1.5)
+    monkeypatch.setattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180)
+    assert get_tts_slot_wait_timeout_seconds() == 270.0
+
+    # 2. Configured higher (200s) -> Kokoro synth timeout = 200, slot wait timeout = 300.0s (200 * 1.5)
     monkeypatch.setattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 200)
+    assert settings.KOKORO_SYNTHESIS_TIMEOUT_SECONDS == 200
+    assert get_tts_slot_wait_timeout_seconds() == 300.0
+
+    # 3. Configured lower (60s) -> bounded by minimum floor of 180.0s
+    monkeypatch.setattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 60)
+    assert get_tts_slot_wait_timeout_seconds() == 180.0
 
     with tts_slot_lock(db=None) as slot:
         assert slot is None

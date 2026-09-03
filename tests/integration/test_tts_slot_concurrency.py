@@ -16,7 +16,6 @@ def test_tts_slot_lock_limits_concurrency(monkeypatch):
     active_count = 0
     max_active = 0
     import threading
-
     lock = threading.Lock()
 
     def worker():

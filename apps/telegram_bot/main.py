@@ -48,9 +48,7 @@ def print_startup_banner():
     print("\n" + "=" * 60)
     print("                HERALD PODCAST BOT")
     print("=" * 60)
-    print(
-        f"Telegram:   {'Connected (' + bot_name + ')' if bot_connected else 'Disconnected / Token Invalid'}"
-    )
+    print(f"Telegram:   {'Connected (' + bot_name + ')' if bot_connected else 'Disconnected / Token Invalid'}")
     print(f"TTS:        {'Ready (Kokoro)' if tts_ok else 'Unavailable / Offline'}")
     print(f"AI:         {ai_status}")
 

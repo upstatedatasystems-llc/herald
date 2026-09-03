@@ -25,7 +25,6 @@ class KokoroClient(BaseTTSEngine):
     """
     Kokoro-FastAPI engine client over internal OpenAI-compatible speech endpoint.
     """
-
     _last_successful_probe_at: datetime | None = None
 
     def __init__(
@@ -109,11 +108,7 @@ class KokoroClient(BaseTTSEngine):
         """
         use_voice = voice or self.voice
         use_speed = speed if speed is not None else self.speed
-        synthesis_timeout = (
-            timeout
-            if timeout is not None
-            else getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0)
-        )
+        synthesis_timeout = timeout if timeout is not None else getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,13 +140,10 @@ class KokoroClient(BaseTTSEngine):
         }
 
         import time
-
         start_time = time.monotonic()
 
         try:
-            logger.info(
-                f"Synthesizing chunk ({len(text)} chars) with Kokoro voice '{use_voice}' (Timeout: {synthesis_timeout}s)"
-            )
+            logger.info(f"Synthesizing chunk ({len(text)} chars) with Kokoro voice '{use_voice}' (Timeout: {synthesis_timeout}s)")
             with httpx.Client(timeout=synthesis_timeout) as client:
                 response = client.post(endpoint, json=payload)
 
@@ -160,7 +152,9 @@ class KokoroClient(BaseTTSEngine):
             if response.status_code != 200:
                 if output_path.exists():
                     output_path.unlink(missing_ok=True)
-                raise KokoroTTSError(f"Kokoro API error ({response.status_code}): {response.text}")
+                raise KokoroTTSError(
+                    f"Kokoro API error ({response.status_code}): {response.text}"
+                )
 
             with open(output_path, "wb") as f:
                 f.write(response.content)

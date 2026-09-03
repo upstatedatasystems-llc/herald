@@ -137,3 +137,4 @@ def test_details_finalization_retry_safety(api_client, db_session: Session):
 
     db_session.refresh(job)
     assert job.details_drive_file_id == "drive-details-updated"
+

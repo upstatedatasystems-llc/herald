@@ -79,10 +79,7 @@ def test_health_check_vs_synthesis_timeout_independence(monkeypatch, tmp_path):
     monkeypatch.delenv("HERALD_MOCK_TTS", raising=False)
     client = KokoroClient()
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("httpx.Client") as mock_client_cls,
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("httpx.Client") as mock_client_cls:
         mock_instance = MagicMock()
         mock_instance.__enter__.return_value = mock_instance
         mock_resp = MagicMock()
@@ -107,9 +104,7 @@ def test_health_check_vs_synthesis_timeout_independence(monkeypatch, tmp_path):
         mock_client_cls_synth.assert_called_with(timeout=180.0)
 
 
-def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(
-    db_session, monkeypatch, tmp_path
-):
+def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(db_session, monkeypatch, tmp_path):
     """
     Test that chunk failure/timeout:
     1. Does NOT advance job.completed_chunk_index
@@ -131,14 +126,12 @@ def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(
         completed_chunk_index=0,
         tts_chunk_chars=50,
         script_json={
+
+
             "episode_title": "Timeout Resumability Test",
             "segments": [
                 {"order": 1, "heading": "Part 1", "narration": "First segment narration."},
-                {
-                    "order": 2,
-                    "heading": "Part 2",
-                    "narration": "Second segment narration causing failure.",
-                },
+                {"order": 2, "heading": "Part 2", "narration": "Second segment narration causing failure."},
             ],
             "warnings": [],
         },
@@ -158,7 +151,6 @@ def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(
 
         import struct
         import wave
-
         with wave.open(str(output_path), "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
@@ -190,7 +182,6 @@ def test_failed_chunk_does_not_advance_completed_chunk_index_and_resumes(
         synth_calls.append(output_path.name)
         import struct
         import wave
-
         with wave.open(str(output_path), "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)

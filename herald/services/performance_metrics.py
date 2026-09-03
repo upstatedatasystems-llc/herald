@@ -115,10 +115,7 @@ def record_stage_metric(
         else:
             if stage == "TTS_TOTAL" and clean_meta:
                 existing_meta = metric.metadata_json or {}
-                if (
-                    existing_meta.get("full_synthesis") is True
-                    and clean_meta.get("full_synthesis") is False
-                ):
+                if existing_meta.get("full_synthesis") is True and clean_meta.get("full_synthesis") is False:
                     duration_ms = metric.duration_ms
                     started_at = metric.started_at
                     finished_at = metric.finished_at
@@ -126,18 +123,14 @@ def record_stage_metric(
 
             metric.substage = substage or metric.substage
             metric.attempt = attempt if attempt is not None else metric.attempt
-            metric.sequence_index = (
-                sequence_index if sequence_index is not None else metric.sequence_index
-            )
+            metric.sequence_index = sequence_index if sequence_index is not None else metric.sequence_index
             metric.started_at = started_at
             metric.finished_at = finished_at or metric.finished_at
             metric.duration_ms = duration_ms if duration_ms is not None else metric.duration_ms
             metric.status = status
             metric.input_chars = input_chars if input_chars is not None else metric.input_chars
             metric.output_bytes = output_bytes if output_bytes is not None else metric.output_bytes
-            metric.audio_duration_ms = (
-                audio_duration_ms if audio_duration_ms is not None else metric.audio_duration_ms
-            )
+            metric.audio_duration_ms = audio_duration_ms if audio_duration_ms is not None else metric.audio_duration_ms
             if clean_meta:
                 existing_meta = metric.metadata_json or {}
                 existing_meta.update(clean_meta)
@@ -151,9 +144,7 @@ def record_stage_metric(
                 db.rollback()
             except Exception:
                 pass
-        logger.warning(
-            f"Non-fatal warning: failed to record metric for job '{job_id}' stage '{stage}': {e}"
-        )
+        logger.warning(f"Non-fatal warning: failed to record metric for job '{job_id}' stage '{stage}': {e}")
         return None
     finally:
         if db:

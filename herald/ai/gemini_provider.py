@@ -50,19 +50,13 @@ class GeminiProvider(AIProvider):
             source_title=source_title,
         )
 
-    def check_connection(
-        self, timeout_seconds: float = 5.0, force_refresh: bool = False
-    ) -> dict[str, Any]:
+    def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         """
         Check Gemini API connectivity using a lightweight model info endpoint.
         Uses x-goog-api-key header and caches results for 5 minutes unless force_refresh is True.
         """
         now = time.time()
-        if (
-            not force_refresh
-            and self._cached_health
-            and (now - self._cache_timestamp) < self.cache_ttl_seconds
-        ):
+        if not force_refresh and self._cached_health and (now - self._cache_timestamp) < self.cache_ttl_seconds:
             return dict(self._cached_health)
 
         if not self.is_configured():

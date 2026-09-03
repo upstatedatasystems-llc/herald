@@ -56,7 +56,6 @@ def test_text_and_url_request_accepted(db_session, monkeypatch):
     """Point 1, 6, 7: Telegram update -> valid Herald job for text and URL requests."""
     # 1. Authorize owner
     from herald.telegram.auth import generate_pairing_code
-
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111, username="alice")
 
@@ -107,7 +106,6 @@ def test_text_and_url_request_accepted(db_session, monkeypatch):
 def test_duplicate_telegram_update_does_not_create_duplicate_job(db_session):
     """Point 5: Duplicate Telegram update does not create duplicate job."""
     from herald.telegram.auth import generate_pairing_code
-
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111)
 
@@ -139,7 +137,6 @@ def test_duplicate_telegram_update_does_not_create_duplicate_job(db_session):
 def test_status_command_with_and_without_ai(db_session, monkeypatch):
     """Point 16 & 17: /status contains AI provider/connection state and works with no AI provider."""
     from herald.telegram.auth import generate_pairing_code
-
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111)
 
@@ -161,7 +158,6 @@ def test_status_command_with_and_without_ai(db_session, monkeypatch):
 def test_readme_command(db_session):
     """Point 20: /readme sends README.md."""
     from herald.telegram.auth import generate_pairing_code
-
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111)
 
@@ -178,8 +174,6 @@ def test_secrets_never_appear_in_telegram_client():
     """Point 21: Secrets never appear in normal logs or error strings."""
     secret_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
     client = TelegramClient(token=secret_token)
-    sanitized = client._sanitize(
-        f"Error connecting to https://api.telegram.org/bot{secret_token}/getMe"
-    )
+    sanitized = client._sanitize(f"Error connecting to https://api.telegram.org/bot{secret_token}/getMe")
     assert secret_token not in sanitized
     assert "[REDACTED_BOT_TOKEN]" in sanitized

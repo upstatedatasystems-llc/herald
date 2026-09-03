@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from herald.audio.ffmpeg_builder import validate_audio_file
-from herald.concurrency import tts_slot_lock
+from herald.concurrency import get_tts_slot_wait_timeout_seconds, tts_slot_lock
 from herald.config import settings
 from herald.tts.kokoro_client import KokoroClient
 
@@ -142,7 +142,7 @@ def ensure_voice_sample(
     temp_mp3 = sample_mp3.with_name(f"{sample_mp3.stem}_{unique_suffix}.tmp.mp3")
 
     synth_timeout = float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0))
-    with tts_slot_lock(db=db, timeout_seconds=synth_timeout):
+    with tts_slot_lock(db=db, timeout_seconds=get_tts_slot_wait_timeout_seconds()):
         if is_valid_sample_audio(sample_mp3):
             return sample_mp3
 

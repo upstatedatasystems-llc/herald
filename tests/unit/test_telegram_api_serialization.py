@@ -69,3 +69,4 @@ def test_telegram_client_get_updates_limit_contract(monkeypatch):
     assert sent_params.get("offset") == 100
     assert sent_params.get("limit") == 50
     assert sent_params.get("timeout") == 10
+

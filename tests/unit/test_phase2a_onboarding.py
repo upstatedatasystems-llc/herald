@@ -126,9 +126,7 @@ def test_post_pair_sends_quickstart(db_session):
 def test_authenticated_start_and_help(db_session):
     """Test authenticated /start and /help return expected formatted reference."""
     code = generate_pairing_code(db_session)
-    verify_and_claim_pairing_code(
-        db_session, code, user_id=12345, chat_id=12345, username="bob", first_name="Bob"
-    )
+    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="bob", first_name="Bob")
 
     mock_client = MagicMock(spec=TelegramClient)
 
@@ -194,9 +192,7 @@ def test_set_my_commands_payload_validation():
     for cmd in TELEGRAM_BOT_COMMANDS_2A:
         name = cmd["command"]
         desc = cmd["description"]
-        assert pattern.match(name) is not None, (
-            f"Command '{name}' fails Telegram regex ^[a-z0-9_]{{1,32}}$"
-        )
+        assert pattern.match(name) is not None, f"Command '{name}' fails Telegram regex ^[a-z0-9_]{{1,32}}$"
         assert 1 <= len(desc) <= 256, f"Description for '{name}' invalid length {len(desc)}"
 
     # Invariant: 'ai-check' with hyphen is invalid for setMyCommands, 'ai_check' must be used
@@ -293,9 +289,7 @@ def test_send_document_dynamic_mime_handling(tmp_path, monkeypatch):
         fpath = tmp_path / fname
         fpath.write_text("sample content")
         client.send_document(chat_id=123, document_path=fpath)
-        assert posted_files[fname] == expected_mime, (
-            f"Failed MIME for {fname}: got {posted_files[fname]}"
-        )
+        assert posted_files[fname] == expected_mime, f"Failed MIME for {fname}: got {posted_files[fname]}"
 
     # Test explicit override
     override_path = tmp_path / "custom.dat"

@@ -9,6 +9,7 @@ class TTSChunk:
         self.is_section_end = is_section_end
 
 
+
 def split_text_into_sentences(text: str) -> list[str]:
     """
     Split text into sentences preserving sentence-ending punctuation.
@@ -41,7 +42,7 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
     for i, seg in enumerate(script_segments):
         seg_order = seg.get("order", i + 1)
         text = seg.get("narration", seg.get("text", "")).strip()
-        is_last_segment = i == total_segments - 1
+        is_last_segment = (i == total_segments - 1)
 
         if not text:
             continue
@@ -89,9 +90,7 @@ def chunk_podcast_script(script_segments: list[dict], max_chars: int = 500) -> l
                                 )
                                 sub_words = []
                                 sub_len = 0
-                            for w_part in [
-                                word[j : j + max_chars] for j in range(0, len(word), max_chars)
-                            ]:
+                            for w_part in [word[j:j+max_chars] for j in range(0, len(word), max_chars)]:
                                 chunk_index += 1
                                 chunks.append(
                                     TTSChunk(

@@ -59,9 +59,7 @@ def test_formatters_truthful_and_html_escaped():
     )
 
     # 1. Approval card
-    app_text, markup = format_approval(
-        job, job.script_json, eta_info={"estimated_completion_range": "3–5 minutes"}
-    )
+    app_text, markup = format_approval(job, job.script_json, eta_info={"estimated_completion_range": "3–5 minutes"})
     assert "Special &lt;Escaped&gt; &amp; Title" in app_text
     assert "af_bella" in app_text
     assert "1.1x" in app_text
@@ -69,11 +67,7 @@ def test_formatters_truthful_and_html_escaped():
     assert "h2:approve:test-job-uuid-12345" in markup["inline_keyboard"][0][0]["callback_data"]
 
     # 2. Queued card
-    q_text = format_queued(
-        job,
-        job.script_json,
-        eta_info={"jobs_ahead": 0, "estimated_completion_range": "3–5 minutes"},
-    )
+    q_text = format_queued(job, job.script_json, eta_info={"jobs_ahead": 0, "estimated_completion_range": "3–5 minutes"})
     assert "Special &lt;Escaped&gt; &amp; Title" in q_text
     assert "af_bella" in q_text
     assert "1.1x" in q_text

@@ -50,30 +50,24 @@ def test_same_source_different_mode_creates_new_job(api_client, db_session: Sess
     body = "Unique source text paragraph for mode variation testing in herald duplicate detection."
 
     # First request: Brief mode
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-mode-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Brief",
-            "body_text": body,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-mode-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Brief",
+        "body_text": body,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
     assert d1["request_mode"] == "brief"
 
     # Second request: Standard mode
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-mode-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-mode-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -85,28 +79,22 @@ def test_same_source_different_research_depth_creates_new_job(api_client, db_ses
     """3. Same source + different research_depth creates a NEW job."""
     body = "Deep investigation content for testing research depth deduplication handling."
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-rdepth-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Research Low",
-            "body_text": body,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-rdepth-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Research Low",
+        "body_text": body,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-rdepth-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Research High",
-            "body_text": body,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-rdepth-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Research High",
+        "body_text": body,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -118,28 +106,22 @@ def test_same_source_different_voice_creates_new_job(api_client, db_session: Ses
     body1 = "Voice: af_heart\n\nArticle body paragraph for voice testing."
     body2 = "Voice: am_adam\n\nArticle body paragraph for voice testing."
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-voice-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body1,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-voice-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body1,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-voice-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body2,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-voice-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body2,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -151,28 +133,22 @@ def test_same_source_different_speed_creates_new_job(api_client, db_session: Ses
     body1 = "Speed: 1.0\n\nArticle text paragraph for speed testing."
     body2 = "Speed: 1.2\n\nArticle text paragraph for speed testing."
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-speed-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body1,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-speed-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body1,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-speed-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body2,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-speed-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body2,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -183,29 +159,23 @@ def test_gmail_message_id_idempotency(api_client, db_session: Session):
     """6. Replaying exact same Gmail message ID returns existing job even if parameters differ."""
     msg_id = "msg-unique-gmail-id-999"
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": msg_id,
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": "Original message body content.",
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": msg_id,
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": "Original message body content.",
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
     # Replay exact same message_id with different subject/body
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": msg_id,
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Brief",
-            "body_text": "Replayed email body text.",
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": msg_id,
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Brief",
+        "body_text": "Replayed email body text.",
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is True
@@ -233,15 +203,12 @@ def test_concurrent_identical_intake_deduplication(api_client, db_session: Sessi
     db_session.commit()
 
     # Intake request with same message_id
-    r = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": msg_id,
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body,
-        },
-    )
+    r = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": msg_id,
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body,
+    })
     assert r.status_code == 200
     d = r.json()
     assert d["is_duplicate"] is True
@@ -252,28 +219,22 @@ def test_same_source_different_chunk_size_creates_new_job(api_client, db_session
     """8. Same source + different chunk-N setting creates a NEW job with identical source_hash."""
     body = "Article body text for testing chunk size deduplication matching logic."
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-chunk-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard chunk-500",
-            "body_text": body,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-chunk-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard chunk-500",
+        "body_text": body,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-chunk-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard chunk-1000",
-            "body_text": body,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-chunk-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard chunk-1000",
+        "body_text": body,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -291,28 +252,22 @@ def test_same_source_different_verify_creates_new_job(api_client, db_session: Se
     """9. Same source + differing verify setting creates a NEW job with identical source_hash."""
     body = "Article body text for testing verify directive deduplication matching logic."
 
-    r1 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-verify-1",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard",
-            "body_text": body,
-        },
-    )
+    r1 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-verify-1",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard",
+        "body_text": body,
+    })
     assert r1.status_code == 200
     d1 = r1.json()
     assert d1["is_duplicate"] is False
 
-    r2 = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-verify-2",
-            "sender_email": "user@example.com",
-            "subject": "Podcast: Standard verify",
-            "body_text": body,
-        },
-    )
+    r2 = api_client.post("/api/v1/intake", json={
+        "gmail_message_id": "msg-verify-2",
+        "sender_email": "user@example.com",
+        "subject": "Podcast: Standard verify",
+        "body_text": body,
+    })
     assert r2.status_code == 200
     d2 = r2.json()
     assert d2["is_duplicate"] is False
@@ -323,3 +278,4 @@ def test_same_source_different_verify_creates_new_job(api_client, db_session: Se
     assert j1.source_hash == j2.source_hash
     assert j1.verify_final_script is False
     assert j2.verify_final_script is True
+

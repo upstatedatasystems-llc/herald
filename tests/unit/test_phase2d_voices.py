@@ -38,9 +38,7 @@ def db_session():
         session.close()
 
 
-def test_voice_sample_uses_identical_comparison_phrase_across_all_voices(
-    db_session, monkeypatch, tmp_path
-):
+def test_voice_sample_uses_identical_comparison_phrase_across_all_voices(db_session, monkeypatch, tmp_path):
     """
     Every voice must synthesize exactly the same fixed comparison phrase.
     Voice names must NOT be injected into the spoken preview text.
@@ -183,11 +181,7 @@ def test_voice_sample_callback_non_blocking_and_in_flight_dedup(db_session, monk
         )
 
         # 2. Process another command (e.g. /status) WHILE sample is generating in background
-        status_msg = {
-            "chat": {"id": 12345, "type": "private"},
-            "from": {"id": 12345},
-            "message_id": 702,
-        }
+        status_msg = {"chat": {"id": 12345, "type": "private"}, "from": {"id": 12345}, "message_id": 702}
         handle_telegram_command(db_session, mock_client, status_msg, "status", "")
         assert mock_client.send_message.called
 
@@ -237,10 +231,7 @@ def test_voice_sample_callback_generic_error_on_failure(db_session, monkeypatch,
         "data": "h2:voice:sample:af_sarah",
     }
 
-    with patch(
-        "herald.telegram.bot.ensure_voice_sample",
-        side_effect=Exception("Internal secret db connection failed: /etc/passwd"),
-    ):
+    with patch("herald.telegram.bot.ensure_voice_sample", side_effect=Exception("Internal secret db connection failed: /etc/passwd")):
         handle_telegram_callback_query(db_session, mock_client, cb_query)
         time.sleep(0.3)
 

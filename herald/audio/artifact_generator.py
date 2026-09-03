@@ -57,6 +57,7 @@ def generate_diagnostics_artifact(job: PodcastJob, output_dir: Path) -> Path:
     return ensure_details_artifact(job, output_dir)
 
 
+
 def get_artifact_filenames(job: PodcastJob) -> dict[str, str]:
     """Return canonical filenames for all job artifacts."""
     base = get_job_basename(job)
@@ -99,9 +100,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
 
     total_proc_seconds = None
     if job.created_at:
-        start_t = (
-            job.created_at.replace(tzinfo=UTC) if job.created_at.tzinfo is None else job.created_at
-        )
+        start_t = job.created_at.replace(tzinfo=UTC) if job.created_at.tzinfo is None else job.created_at
         end_t = job.completed_at or datetime.now(UTC)
         end_t = end_t.replace(tzinfo=UTC) if end_t.tzinfo is None else end_t
         total_proc_seconds = round((end_t - start_t).total_seconds(), 2)
@@ -135,9 +134,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     m_rows = []
     if db is not None:
         try:
-            m_rows = (
-                db.query(JobProcessingMetric).filter(JobProcessingMetric.job_id == job.id).all()
-            )
+            m_rows = db.query(JobProcessingMetric).filter(JobProcessingMetric.job_id == job.id).all()
         except Exception as e:
             logger.warning(f"Could not load performance metrics from passed db: {e}")
 
@@ -159,9 +156,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             finally:
                 db_m.close()
         except Exception as me:
-            logger.warning(
-                f"Could not load performance metrics for details artifact generation: {me}"
-            )
+            logger.warning(f"Could not load performance metrics for details artifact generation: {me}")
 
     for r in m_rows:
         stage_metrics_map[r.stage] = r
@@ -177,38 +172,31 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     ]
     if is_research:
         lines.append(f"- **Research Depth**: `{job.research_depth or 'medium'}`")
-    lines.extend(
-        [
-            f"- **Source Type**: `{job.source_type}`",
-            f"- **Source Title / URL**: {job.source_url or job.custom_title or 'N/A'}",
-            f"- **Created At**: {created_iso}",
-            f"- **Audio Ready At**: {audio_ready_iso}",
-            f"- **Completed At**: {completed_iso}",
-            "",
-            "## Processing Summary",
-            f"- **Overall Status**: `{job.status}`",
-            f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
-            f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
-            f"- **Configured TTS Chunk Size**: `{getattr(job, 'tts_chunk_chars', 500) or 500} chars`",
-            f"- **Script Verification Setting**: `{bool(getattr(job, 'verify_final_script', False))}`",
-            f"- **Audio Duration**: {dur_str}",
-            f"- **Audio File Size**: {size_str}",
-            f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-            f"- **TTS Chunks Count**: {job.completed_chunk_index or 0}",
-            f"- **Synthesis Attempt Count**: {job.synthesis_attempt_count or 0}",
-            f"- **Total Processing Time**: {total_proc_seconds}s"
-            if total_proc_seconds
-            else "- **Total Processing Time**: N/A",
-        ]
-    )
+    lines.extend([
+        f"- **Source Type**: `{job.source_type}`",
+        f"- **Source Title / URL**: {job.source_url or job.custom_title or 'N/A'}",
+        f"- **Created At**: {created_iso}",
+        f"- **Audio Ready At**: {audio_ready_iso}",
+        f"- **Completed At**: {completed_iso}",
+        "",
+        "## Processing Summary",
+        f"- **Overall Status**: `{job.status}`",
+        f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
+        f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
+        f"- **Configured TTS Chunk Size**: `{getattr(job, 'tts_chunk_chars', 500) or 500} chars`",
+        f"- **Script Verification Setting**: `{bool(getattr(job, 'verify_final_script', False))}`",
+        f"- **Audio Duration**: {dur_str}",
+        f"- **Audio File Size**: {size_str}",
+        f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
+        f"- **TTS Chunks Count**: {job.completed_chunk_index or 0}",
+        f"- **Synthesis Attempt Count**: {job.synthesis_attempt_count or 0}",
+        f"- **Total Processing Time**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Time**: N/A",
+    ])
 
     try:
         from herald.config import settings
-
         c_cfg = settings.get_concurrency_config()
-        lines.append(
-            f"- **Concurrency Profile**: `{c_cfg.profile}` (CPUs: {c_cfg.detected_cpus}, Workers: {c_cfg.worker_concurrency}, Script: {c_cfg.script_concurrency}, TTS Slots Global: {c_cfg.tts_global_slots}, TTS/Job: {c_cfg.tts_per_job}, FFmpeg: {c_cfg.ffmpeg_concurrency})"
-        )
+        lines.append(f"- **Concurrency Profile**: `{c_cfg.profile}` (CPUs: {c_cfg.detected_cpus}, Workers: {c_cfg.worker_concurrency}, Script: {c_cfg.script_concurrency}, TTS Slots Global: {c_cfg.tts_global_slots}, TTS/Job: {c_cfg.tts_per_job}, FFmpeg: {c_cfg.ffmpeg_concurrency})")
     except Exception:
         pass
 
@@ -216,37 +204,31 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
 
     v_rep_count = getattr(job, "verify_repair_count", 0) or 0
     if getattr(job, "verify_final_script", False):
-        v_status = (
-            "PASS" if not v_audit.get("has_material_issues") else f"REPAIRED ({v_rep_count} pass)"
-        )
+        v_status = "PASS" if not v_audit.get("has_material_issues") else f"REPAIRED ({v_rep_count} pass)"
         lines.append(f"- **Fidelity Verify Status**: `{v_status}`")
 
     if is_research:
-        lines.extend(
-            [
-                f"- **Research Model**: `{job.research_model or 'gemini-2.5-flash'}`",
-                f"- **Search Queries Executed**: {job.research_search_count or 0}",
-                f"- **Grounded Sources Count**: {job.research_source_count or 0}",
-                f"- **Research Repair Count**: {job.research_repair_count or 0}",
-                f"- **Research Audit Status**: `{audit_pass}`",
-            ]
-        )
+        lines.extend([
+            f"- **Research Model**: `{job.research_model or 'gemini-2.5-flash'}`",
+            f"- **Search Queries Executed**: {job.research_search_count or 0}",
+            f"- **Grounded Sources Count**: {job.research_source_count or 0}",
+            f"- **Research Repair Count**: {job.research_repair_count or 0}",
+            f"- **Research Audit Status**: `{audit_pass}`",
+        ])
 
     # TTS Resource Monitoring aggregates table if collected
     r_metrics = getattr(job, "tts_resource_metrics_json", None)
     if r_metrics and isinstance(r_metrics, dict) and r_metrics.get("sample_count", 0) > 0:
-        lines.extend(
-            [
-                "",
-                "### TTS Resource Monitoring Summary (Synthesizing Window)",
-                f"- **Sample Count**: {r_metrics.get('sample_count', 0)} (Interval: ~{r_metrics.get('sample_interval_seconds', 5.0)}s)",
-                f"- **Observed TTS Wall Time**: {r_metrics.get('observed_tts_wall_time_ms', 0)} ms ({r_metrics.get('observed_tts_wall_time_ms', 0) / 1000.0:.2f}s)",
-                f"- **CPU Utilization**: Avg `{r_metrics.get('avg_cpu_percent', 0.0)}%` | Peak `{r_metrics.get('peak_cpu_percent', 0.0)}%`",
-                f"- **Process Memory Peak**: `{r_metrics.get('peak_memory_mb', 0.0)} MB`",
-                f"- **Min Available System Memory**: `{r_metrics.get('minimum_available_memory_mb', 0.0)} MB`",
-                f"- **Swap Usage**: Start `{r_metrics.get('swap_start_mb', 0.0)} MB` | End `{r_metrics.get('swap_end_mb', 0.0)} MB` | Peak `{r_metrics.get('swap_peak_mb', 0.0)} MB`",
-            ]
-        )
+        lines.extend([
+            "",
+            "### TTS Resource Monitoring Summary (Synthesizing Window)",
+            f"- **Sample Count**: {r_metrics.get('sample_count', 0)} (Interval: ~{r_metrics.get('sample_interval_seconds', 5.0)}s)",
+            f"- **Observed TTS Wall Time**: {r_metrics.get('observed_tts_wall_time_ms', 0)} ms ({r_metrics.get('observed_tts_wall_time_ms', 0) / 1000.0:.2f}s)",
+            f"- **CPU Utilization**: Avg `{r_metrics.get('avg_cpu_percent', 0.0)}%` | Peak `{r_metrics.get('peak_cpu_percent', 0.0)}%`",
+            f"- **Process Memory Peak**: `{r_metrics.get('peak_memory_mb', 0.0)} MB`",
+            f"- **Min Available System Memory**: `{r_metrics.get('minimum_available_memory_mb', 0.0)} MB`",
+            f"- **Swap Usage**: Start `{r_metrics.get('swap_start_mb', 0.0)} MB` | End `{r_metrics.get('swap_end_mb', 0.0)} MB` | Peak `{r_metrics.get('swap_peak_mb', 0.0)} MB`",
+        ])
 
     # Add Performance Metrics subsection if data is present
     if stage_metrics_map:
@@ -276,29 +258,19 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         for stage_key, label in metric_order:
             if stage_key in stage_metrics_map:
                 m = stage_metrics_map[stage_key]
-                dur_txt = (
-                    f"{m.duration_ms} ms ({m.duration_ms / 1000.0:.2f}s)"
-                    if m.duration_ms is not None
-                    else "N/A"
-                )
+                dur_txt = f"{m.duration_ms} ms ({m.duration_ms / 1000.0:.2f}s)" if m.duration_ms is not None else "N/A"
                 lines.append(f"- **{label}**: {dur_txt} [`{m.status}`]")
 
-    lines.extend(
-        [
-            "",
-            "## Content Metrics",
-            f"- **Source Word Count**: {source_words}",
-            f"- **Narration Word Count**: {narration_words}",
-            f"- **Compression Ratio**: {comp_ratio}",
-            f"- **Predicted Duration**: {dur_info['predicted_duration_seconds']}s (~{dur_info['estimated_minutes']} min)",
-            f"- **Actual Duration**: {actual_duration}s"
-            if actual_duration
-            else "- **Actual Duration**: N/A",
-            f"- **Actual Words Per Minute**: {actual_wpm} WPM"
-            if actual_wpm
-            else "- **Actual Words Per Minute**: N/A",
-        ]
-    )
+    lines.extend([
+        "",
+        "## Content Metrics",
+        f"- **Source Word Count**: {source_words}",
+        f"- **Narration Word Count**: {narration_words}",
+        f"- **Compression Ratio**: {comp_ratio}",
+        f"- **Predicted Duration**: {dur_info['predicted_duration_seconds']}s (~{dur_info['estimated_minutes']} min)",
+        f"- **Actual Duration**: {actual_duration}s" if actual_duration else "- **Actual Duration**: N/A",
+        f"- **Actual Words Per Minute**: {actual_wpm} WPM" if actual_wpm else "- **Actual Words Per Minute**: N/A",
+    ])
 
     if is_research:
         lines.extend(["", "## Research Investigation Summary"])
@@ -352,15 +324,13 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     if job.source_type == SourceType.URL.value and job.source_url:
         created_str = (job.created_at or datetime.now(UTC)).isoformat()
         source_title = job.custom_title or script.get("episode_title") or "Unknown Title"
-        lines.extend(
-            [
-                f"**Source URL**: {job.source_url}",
-                f"**Source Title**: {source_title}",
-                f"**Retrieved At**: {created_str}",
-                "---",
-                "",
-            ]
-        )
+        lines.extend([
+            f"**Source URL**: {job.source_url}",
+            f"**Source Title**: {source_title}",
+            f"**Retrieved At**: {created_str}",
+            "---",
+            "",
+        ])
     lines.append(job.source_text.strip() if job.source_text else "No source text recorded.")
 
     lines.extend(["", "## Final Podcast Script"])
@@ -381,37 +351,31 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             lines.append(f"- {w}")
 
     # Preserve full structured script JSON in a fenced section
-    lines.extend(
-        [
-            "",
-            "### Structured Script JSON",
-            "```json",
-            json.dumps(script, indent=2, ensure_ascii=False),
-            "```",
-        ]
-    )
+    lines.extend([
+        "",
+        "### Structured Script JSON",
+        "```json",
+        json.dumps(script, indent=2, ensure_ascii=False),
+        "```",
+    ])
 
     if is_research and job.research_json:
-        lines.extend(
-            [
-                "",
-                "### Structured Research Dossier JSON",
-                "```json",
-                json.dumps(job.research_json, indent=2, ensure_ascii=False),
-                "```",
-            ]
-        )
+        lines.extend([
+            "",
+            "### Structured Research Dossier JSON",
+            "```json",
+            json.dumps(job.research_json, indent=2, ensure_ascii=False),
+            "```",
+        ])
 
     if is_research and job.research_audit_json:
-        lines.extend(
-            [
-                "",
-                "### Research Audit JSON",
-                "```json",
-                json.dumps(job.research_audit_json, indent=2, ensure_ascii=False),
-                "```",
-            ]
-        )
+        lines.extend([
+            "",
+            "### Research Audit JSON",
+            "```json",
+            json.dumps(job.research_audit_json, indent=2, ensure_ascii=False),
+            "```",
+        ])
 
     lines.extend(["", "## Pipeline Transition Timeline"])
     timeline_entries = []
@@ -419,9 +383,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         for t in sorted(job.transitions, key=lambda x: x.created_at or datetime.min):
             ts_str = t.created_at.isoformat() if t.created_at else ""
             msg = f" (`{t.message}`)" if t.message else ""
-            timeline_entries.append(
-                f"- **{ts_str}** — Transitioned to `{t.to_state}` by `{t.component}`{msg}"
-            )
+            timeline_entries.append(f"- **{ts_str}** — Transitioned to `{t.to_state}` by `{t.component}`{msg}")
 
     if not timeline_entries:
         if job.created_at:
@@ -429,13 +391,9 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         if job.audio_ready_at:
             timeline_entries.append(f"- **{audio_ready_iso}** — Audio synthesis completed")
         if job.drive_uploaded_at:
-            timeline_entries.append(
-                f"- **{job.drive_uploaded_at.isoformat()}** — Google Drive artifacts uploaded"
-            )
+            timeline_entries.append(f"- **{job.drive_uploaded_at.isoformat()}** — Google Drive artifacts uploaded")
         if job.delivered_at:
-            timeline_entries.append(
-                f"- **{job.delivered_at.isoformat()}** — Completion email delivered"
-            )
+            timeline_entries.append(f"- **{job.delivered_at.isoformat()}** — Completion email delivered")
         if job.completed_at:
             timeline_entries.append(f"- **{completed_iso}** — Job state COMPLETE")
 
@@ -454,20 +412,18 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     else:
         lines.append("- **Warnings**: None")
 
-    lines.extend(
-        [
-            "",
-            "## Technical Identifiers",
-            f"- **Job ID**: `{job.id}`",
-            f"- **Gmail Message ID**: `{job.gmail_message_id or 'N/A'}`",
-            f"- **Gmail Thread ID**: `{job.gmail_thread_id or 'N/A'}`",
-            f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
-            f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-            f"- **Drive Job Key**: `{job.drive_job_key or 'N/A'}`",
-            f"- **Audio Drive File ID**: `{job.drive_file_id or 'N/A'}`",
-            f"- **Details Drive File ID**: `{job.details_drive_file_id or 'N/A'}`",
-        ]
-    )
+    lines.extend([
+        "",
+        "## Technical Identifiers",
+        f"- **Job ID**: `{job.id}`",
+        f"- **Gmail Message ID**: `{job.gmail_message_id or 'N/A'}`",
+        f"- **Gmail Thread ID**: `{job.gmail_thread_id or 'N/A'}`",
+        f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
+        f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
+        f"- **Drive Job Key**: `{job.drive_job_key or 'N/A'}`",
+        f"- **Audio Drive File ID**: `{job.drive_file_id or 'N/A'}`",
+        f"- **Details Drive File ID**: `{job.details_drive_file_id or 'N/A'}`",
+    ])
 
     content = "\n".join(lines)
     tmp_path = details_path.with_suffix(".md.tmp")

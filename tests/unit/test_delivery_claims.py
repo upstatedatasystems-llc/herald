@@ -49,11 +49,7 @@ def test_delivery_claim_endpoint_and_idempotency(db_session, monkeypatch):
 
     res_drive = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "artifact_type": "audio",
-            "drive_file_id": "file-123",
-            "drive_web_link": "https://drive.google.com/file/d/file-123",
-        },
+        json={"artifact_type": "audio", "drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
     )
     assert res_drive.status_code == 200
     assert res_drive.json()["status"] == JobState.DELIVERING.value
@@ -61,32 +57,20 @@ def test_delivery_claim_endpoint_and_idempotency(db_session, monkeypatch):
     # Record details Drive ID
     client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "artifact_type": "details",
-            "details_drive_file_id": "details-123",
-            "details_drive_web_link": "https://drive.google.com/details-123",
-        },
+        json={"artifact_type": "details", "details_drive_file_id": "details-123", "details_drive_web_link": "https://drive.google.com/details-123"},
     )
 
     # Repeating drive-complete with same ID -> 200 OK
     res_repeat = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "artifact_type": "audio",
-            "drive_file_id": "file-123",
-            "drive_web_link": "https://drive.google.com/file/d/file-123",
-        },
+        json={"artifact_type": "audio", "drive_file_id": "file-123", "drive_web_link": "https://drive.google.com/file/d/file-123"},
     )
     assert res_repeat.status_code == 200
 
     # Repeating drive-complete with conflicting ID -> 409 Conflict
     res_conflict = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "artifact_type": "audio",
-            "drive_file_id": "file-conflicting-999",
-            "drive_web_link": "https://drive.google.com/file/d/file-999",
-        },
+        json={"artifact_type": "audio", "drive_file_id": "file-conflicting-999", "drive_web_link": "https://drive.google.com/file/d/file-999"},
     )
     assert res_conflict.status_code == 409
 
@@ -101,10 +85,7 @@ def test_delivery_claim_endpoint_and_idempotency(db_session, monkeypatch):
     # Modifying COMPLETE job metadata with conflicting Drive ID -> 409 Conflict
     res_complete_mod = client.post(
         f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "drive_file_id": "file-conflicting-888",
-            "drive_web_link": "https://drive.google.com/file/d/file-888",
-        },
+        json={"drive_file_id": "file-conflicting-888", "drive_web_link": "https://drive.google.com/file/d/file-888"},
     )
     assert res_complete_mod.status_code == 409
 
@@ -157,18 +138,8 @@ def test_research_mode_delivery_flow(db_session, monkeypatch):
         source_hash="hash-res-six-1",
         source_text="Research text",
         status=JobState.AUDIO_READY.value,
-        script_json={
-            "episode_title": "Title",
-            "segments": [{"order": 1, "heading": "H", "narration": "N"}],
-            "warnings": [],
-        },
-        research_json={
-            "source_summary": "Summary",
-            "verification": [],
-            "useful_context": [],
-            "outdated_or_uncertain": [],
-            "research_sources": [],
-        },
+        script_json={"episode_title": "Title", "segments": [{"order": 1, "heading": "H", "narration": "N"}], "warnings": []},
+        research_json={"source_summary": "Summary", "verification": [], "useful_context": [], "outdated_or_uncertain": [], "research_sources": []},
     )
     db_session.add(job)
     db_session.commit()
@@ -180,30 +151,16 @@ def test_research_mode_delivery_flow(db_session, monkeypatch):
     assert data["job"]["needs_details_upload"] is True
 
     # Attempting completion with missing details artifact must fail (400)
-    client.post(
-        f"/api/v1/jobs/{job_id}/drive-complete",
-        json={"artifact_type": "audio", "drive_file_id": "a-1", "drive_web_link": "https://a-1"},
-    )
+    client.post(f"/api/v1/jobs/{job_id}/drive-complete", json={"artifact_type": "audio", "drive_file_id": "a-1", "drive_web_link": "https://a-1"})
 
-    res_incomplete = client.post(
-        f"/api/v1/jobs/{job_id}/delivery-complete", json={"gmail_result_message_id": "g-1"}
-    )
+    res_incomplete = client.post(f"/api/v1/jobs/{job_id}/delivery-complete", json={"gmail_result_message_id": "g-1"})
     assert res_incomplete.status_code == 400
     assert "details" in res_incomplete.json()["detail"]
 
     # Upload details artifact
-    client.post(
-        f"/api/v1/jobs/{job_id}/drive-complete",
-        json={
-            "artifact_type": "details",
-            "details_drive_file_id": "d-1",
-            "details_drive_web_link": "https://d-1",
-        },
-    )
+    client.post(f"/api/v1/jobs/{job_id}/drive-complete", json={"artifact_type": "details", "details_drive_file_id": "d-1", "details_drive_web_link": "https://d-1"})
 
     # Now completion succeeds (200)
-    res_complete = client.post(
-        f"/api/v1/jobs/{job_id}/delivery-complete", json={"gmail_result_message_id": "g-1"}
-    )
+    res_complete = client.post(f"/api/v1/jobs/{job_id}/delivery-complete", json={"gmail_result_message_id": "g-1"})
     assert res_complete.status_code == 200
     assert res_complete.json()["status"] == JobState.COMPLETE.value

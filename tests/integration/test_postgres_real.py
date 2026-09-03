@@ -356,38 +356,47 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
         sems = get_semaphores()
         chunk_item = TTSChunk(index=1, text="Worker chunk text", character_count=17)
 
+        worker_errors = []
+        voice_errors = []
+
         # Thread 1: Worker executing synthesize_single_chunk with SessionWorker
         def run_worker():
-            synthesize_single_chunk(
-                session_factory=pg_session_factory,
-                job_id=job.id,
-                chunk=chunk_item,
-                voice="af_heart",
-                speed=1.0,
-                synthesis_timeout=10.0,
-                chunks_dir=tmp_path,
-                kokoro_client=mock_kokoro_w,
-                global_semaphore=sems.global_tts,
-                per_job_semaphore=sems.create_per_job_tts_semaphore(),
-                worker_id="pg-worker-1",
-            )
+            try:
+                synthesize_single_chunk(
+                    session_factory=pg_session_factory,
+                    job_id=job.id,
+                    chunk=chunk_item,
+                    voice="af_heart",
+                    speed=1.0,
+                    synthesis_timeout=10.0,
+                    chunks_dir=tmp_path,
+                    kokoro_client=mock_kokoro_w,
+                    global_semaphore=sems.global_tts,
+                    per_job_semaphore=sems.create_per_job_tts_semaphore(),
+                    worker_id="pg-worker-1",
+                )
+            except Exception as e:
+                worker_errors.append(e)
 
         # Thread 2: Voice sample synthesis with SessionVoice
         def run_voice():
-            # Mock get_voice_sample_path to write to tmp_path
-            monkeypatch.setattr(
-                "herald.services.voice_manager.get_voice_sample_path",
-                lambda v: tmp_path / f"{v}.mp3",
-            )
-            monkeypatch.setattr(
-                "herald.services.voice_manager.convert_wav_to_mp3",
-                lambda src, dst: Path(dst).write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00dummy"),
-            )
-            monkeypatch.setattr(
-                "herald.services.voice_manager.is_valid_sample_audio",
-                lambda p: Path(p).exists() and Path(p).stat().st_size > 0,
-            )
-            ensure_voice_sample(voice="af_bella", kokoro_client=mock_kokoro_v, db=SessionVoice)
+            try:
+                # Mock get_voice_sample_path to write to tmp_path
+                monkeypatch.setattr(
+                    "herald.services.voice_manager.get_voice_sample_path",
+                    lambda v: tmp_path / f"{v}.mp3",
+                )
+                monkeypatch.setattr(
+                    "herald.services.voice_manager.convert_wav_to_mp3",
+                    lambda src, dst: Path(dst).write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00dummy"),
+                )
+                monkeypatch.setattr(
+                    "herald.services.voice_manager.is_valid_sample_audio",
+                    lambda p: Path(p).exists() and Path(p).stat().st_size > 0,
+                )
+                ensure_voice_sample(voice="af_bella", kokoro_client=mock_kokoro_v, db=SessionVoice)
+            except Exception as e:
+                voice_errors.append(e)
 
         t_w = threading.Thread(target=run_worker)
         t_v = threading.Thread(target=run_voice)
@@ -414,6 +423,9 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
         voice_can_finish.set()
         t_v.join(timeout=5.0)
 
+        assert len(worker_errors) == 0, f"Worker thread failed: {worker_errors}"
+        assert len(voice_errors) == 0, f"Voice sample thread failed: {voice_errors}"
+
         # Failure inside slot lock cleanly releases advisory lock
         try:
             with tts_slot_lock(db=SessionWorker, timeout_seconds=2.0):
@@ -432,6 +444,89 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
 
 def test_postgres_approval_cas_race(pg_session_factory):
     """
+    Prove that simultaneous atomic Compare-And-Swap decisions (Approve vs Approve)
+    across independent PostgreSQL sessions result in exactly ONE winner, one transition,
+    and preserve strict state consistency.
+    """
+    from herald.db.models import JobStateTransition
+
+    SessionAdmin = pg_session_factory()
+    SessionUser1 = pg_session_factory()
+    SessionUser2 = pg_session_factory()
+
+    try:
+        # 1. Setup job awaiting approval
+        job = PodcastJob(
+            id="pg-cas-job-race-aa-1111-2222-333333333333",
+            transport="telegram",
+            telegram_user_id=777,
+            telegram_chat_id=777,
+            request_mode="standard",
+            source_hash="pg-cas-h-aa",
+            source_text="CAS Approve vs Approve race test",
+            status=JobState.AWAITING_APPROVAL.value,
+        )
+        SessionAdmin.add(job)
+        SessionAdmin.commit()
+
+        barrier = threading.Barrier(2)
+        results = {}
+
+        def approve_task(session, name):
+            barrier.wait()
+            now = datetime.now(UTC)
+            updated = (
+                session.query(PodcastJob)
+                .filter(
+                    PodcastJob.id == job.id,
+                    PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                    PodcastJob.telegram_user_id == 777,
+                    PodcastJob.telegram_chat_id == 777,
+                )
+                .update(
+                    {"status": JobState.QUEUED_TTS.value, "approved_at": now},
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                t_rec = JobStateTransition(
+                    job_id=job.id,
+                    from_state=JobState.AWAITING_APPROVAL.value,
+                    to_state=JobState.QUEUED_TTS.value,
+                    component="telegram-approval",
+                    message="Approved by user",
+                    created_at=now,
+                )
+                session.add(t_rec)
+            session.commit()
+            results[name] = updated
+
+        t1 = threading.Thread(target=approve_task, args=(SessionUser1, "u1"))
+        t2 = threading.Thread(target=approve_task, args=(SessionUser2, "u2"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Exactly ONE session won the race
+        assert results["u1"] + results["u2"] == 1
+
+        # Verify DB state and transition history
+        SessionAdmin.expire_all()
+        db_job = SessionAdmin.query(PodcastJob).filter_by(id=job.id).first()
+        assert db_job.status == JobState.QUEUED_TTS.value
+
+        transitions = SessionAdmin.query(JobStateTransition).filter_by(job_id=job.id).all()
+        assert len(transitions) == 1
+        assert transitions[0].to_state == JobState.QUEUED_TTS.value
+    finally:
+        SessionAdmin.close()
+        SessionUser1.close()
+        SessionUser2.close()
+
+
+def test_postgres_approval_vs_cancel_cas_race(pg_session_factory):
+    """
     Prove that simultaneous atomic Compare-And-Swap decisions (Approve vs Cancel)
     across independent PostgreSQL sessions result in exactly ONE winner and preserve
     strict state consistency and transition history.
@@ -445,12 +540,12 @@ def test_postgres_approval_cas_race(pg_session_factory):
     try:
         # 1. Setup job awaiting approval
         job = PodcastJob(
-            id="pg-cas-job-race-1111-2222-333333333333",
+            id="pg-cas-job-race-ac-1111-2222-333333333333",
             transport="telegram",
             telegram_user_id=777,
             telegram_chat_id=777,
             request_mode="standard",
-            source_hash="pg-cas-h-race",
+            source_hash="pg-cas-h-ac",
             source_text="CAS Approve vs Cancel race test",
             status=JobState.AWAITING_APPROVAL.value,
         )

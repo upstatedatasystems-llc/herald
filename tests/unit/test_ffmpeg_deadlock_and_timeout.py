@@ -50,12 +50,11 @@ def test_ffmpeg_concurrency_one_no_self_deadlock(tmp_path):
         "audio_type": "MP3",
     }
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run,
-        patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val),
-        patch("herald.audio.ffmpeg_builder.embed_id3_metadata"),
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run, \
+         patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val), \
+         patch("herald.audio.ffmpeg_builder.embed_id3_metadata"):
+
         res = join_and_normalize_audio(
             chunk_paths=[chunk],
             output_mp3_path=out_mp3,
@@ -91,12 +90,11 @@ def test_join_and_normalize_audio_reaches_subprocess(tmp_path):
         "audio_type": "MP3",
     }
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run,
-        patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val),
-        patch("herald.audio.ffmpeg_builder.embed_id3_metadata"),
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run, \
+         patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val), \
+         patch("herald.audio.ffmpeg_builder.embed_id3_metadata"):
+
         join_and_normalize_audio(
             chunk_paths=[chunk],
             output_mp3_path=out_mp3,
@@ -145,12 +143,11 @@ def test_simultaneous_encodes_obey_concurrency_limit(tmp_path):
         m.returncode = 0
         return m
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("subprocess.run", side_effect=mock_subprocess_run),
-        patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val),
-        patch("herald.audio.ffmpeg_builder.embed_id3_metadata"),
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("subprocess.run", side_effect=mock_subprocess_run), \
+         patch("herald.audio.ffmpeg_builder.validate_audio_file", return_value=mock_val), \
+         patch("herald.audio.ffmpeg_builder.embed_id3_metadata"):
+
         t1 = threading.Thread(
             target=join_and_normalize_audio,
             kwargs={
@@ -190,11 +187,10 @@ def test_ffmpeg_timeout_raises_error_cleans_output_releases_semaphore(tmp_path):
     out_mp3 = tmp_path / "partial_output.mp3"
     out_mp3.write_bytes(b"PARTIAL_FFMPEG_DATA")
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=300)),
-        patch("herald.audio.ffmpeg_builder.validate_audio_file"),
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=300)), \
+         patch("herald.audio.ffmpeg_builder.validate_audio_file"):
+
         with pytest.raises(FFmpegExecutionError, match="timed out"):
             join_and_normalize_audio(
                 chunk_paths=[chunk],
@@ -220,11 +216,10 @@ def test_ffmpeg_failure_does_not_leak_semaphore(tmp_path):
     mock_res.returncode = 1
     mock_res.stderr = "Conversion failed"
 
-    with (
-        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
-        patch("subprocess.run", return_value=mock_res),
-        patch("herald.audio.ffmpeg_builder.validate_audio_file"),
-    ):
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("subprocess.run", return_value=mock_res), \
+         patch("herald.audio.ffmpeg_builder.validate_audio_file"):
+
         with pytest.raises(FFmpegExecutionError, match="FFmpeg failed with exit code 1"):
             join_and_normalize_audio(
                 chunk_paths=[chunk],

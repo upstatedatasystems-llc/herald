@@ -36,9 +36,8 @@ def test_eta_v2_preserves_full_synthesis_duration_on_cache_reuse_retry(db_sessio
     engine = db_session.get_bind()
     session_factory = sessionmaker(bind=engine)
 
-    with (
-        patch("herald.services.performance_metrics.SessionLocal", side_effect=session_factory),
-        patch("herald.services.performance_metrics.settings.HERALD_METRICS_ENABLED", True),
+    with patch("herald.services.performance_metrics.SessionLocal", side_effect=session_factory), patch(
+        "herald.services.performance_metrics.settings.HERALD_METRICS_ENABLED", True
     ):
         # 1. First attempt: full synthesis (120 seconds wall time)
         record_stage_metric(
@@ -113,6 +112,4 @@ def test_eta_v2_preserves_full_synthesis_duration_on_cache_reuse_retry(db_sessio
 
     eta = calculate_job_eta(db_session, target_job)
     assert eta["rtf_source"] == "historical"
-    assert (
-        eta["realtime_factor"] == 2.0
-    )  # Derived from 120,000 / 60,000, not contaminated by 200ms!
+    assert eta["realtime_factor"] == 2.0  # Derived from 120,000 / 60,000, not contaminated by 200ms!

@@ -220,8 +220,7 @@ def test_first_delivery_caption_includes_active_processing_time(db_session, tmp_
         source_text="Test source text for processing time",
         created_at=now - timedelta(seconds=120),
         approval_requested_at=now - timedelta(seconds=100),
-        approved_at=now
-        - timedelta(seconds=40),  # Held for approval 60s -> Active time = 120 - 60 = 60s
+        approved_at=now - timedelta(seconds=40),  # Held for approval 60s -> Active time = 120 - 60 = 60s
         audio_duration_seconds=75,
     )
     db_session.add(job)
@@ -235,8 +234,4 @@ def test_first_delivery_caption_includes_active_processing_time(db_session, tmp_
 
     mock_client.send_audio.assert_called_once()
     caption = mock_client.send_audio.call_args[1]["caption"]
-    assert (
-        "• <b>Processing Time:</b> 1m 0s" in caption
-        or "• <b>Processing Time:</b> 1m" in caption
-        or "• <b>Processing Time:</b> 60s" in caption
-    )
+    assert "• <b>Processing Time:</b> 1m 0s" in caption or "• <b>Processing Time:</b> 1m" in caption or "• <b>Processing Time:</b> 60s" in caption
