@@ -110,11 +110,23 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     file_size_bytes = audio_path.stat().st_size
     max_bytes = getattr(settings, "TELEGRAM_MAX_AUDIO_BYTES", 50 * 1024 * 1024)
 
-    # Format delivery caption
-    dur_secs = job.audio_duration_seconds or 0
-    dur_str = f"{dur_secs // 60}m {dur_secs % 60}s" if dur_secs >= 60 else f"{dur_secs}s"
-    source_line = f"\nSource: {job.source_url}" if job.source_url else ""
-    caption = f"🎙 {ep_title}\n⏱ {dur_str} | Mode: {mode_str}{source_line}"
+    from herald.db.models import PodcastTTSChunk
+    from herald.telegram.formatters import format_completion
+
+    chunks_count = (
+        db.query(PodcastTTSChunk)
+        .filter(PodcastTTSChunk.job_id == job.id, PodcastTTSChunk.status == "COMPLETED")
+        .count()
+    )
+    if chunks_count == 0 and job.completed_chunk_index:
+        chunks_count = job.completed_chunk_index
+
+    dur_secs = int(job.audio_duration_seconds or 0)
+    caption = format_completion(
+        job=job,
+        actual_chunks_count=chunks_count,
+        file_size_bytes=file_size_bytes,
+    )
 
     # Handle oversized audio
     if file_size_bytes > max_bytes:
@@ -142,7 +154,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
 
     # Upload MP3 to Telegram
     try:
-        client.send_audio(
+        res = client.send_audio(
             chat_id=chat_id,
             audio_path=audio_path,
             caption=caption,
@@ -151,16 +163,28 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             duration=dur_secs,
             reply_to_message_id=reply_id,
         )
+        if res and isinstance(res, dict):
+            if res.get("message_id"):
+                job.telegram_delivery_message_id = res["message_id"]
+            audio_obj = res.get("audio") or {}
+            if audio_obj.get("file_id"):
+                job.telegram_audio_file_id = audio_obj["file_id"]
     except TelegramAPIError as e:
         logger.error(f"Telegram sendAudio failed for job '{job.id}': {e}")
         # Retry with send_document fallback if audio upload failed
         try:
-            client.send_document(
+            res = client.send_document(
                 chat_id=chat_id,
                 document_path=audio_path,
                 caption=caption,
                 reply_to_message_id=reply_id,
             )
+            if res and isinstance(res, dict):
+                if res.get("message_id"):
+                    job.telegram_delivery_message_id = res["message_id"]
+                doc_obj = res.get("document") or {}
+                if doc_obj.get("file_id"):
+                    job.telegram_document_file_id = doc_obj["file_id"]
         except Exception as de:
             now = datetime.now(UTC)
             job.delivery_attempt_count = (job.delivery_attempt_count or 0) + 1

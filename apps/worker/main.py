@@ -16,7 +16,7 @@ from herald.audio.ffmpeg_builder import (
 from herald.concurrency import get_semaphores, initialize_semaphores
 from herald.config import settings
 from herald.db.connection import SessionLocal
-from herald.db.models import JobState, PodcastJob
+from herald.db.models import JobState, PodcastJob, RequestMode
 from herald.db.state_machine import transition_job_state
 from herald.services.performance_metrics import record_stage_metric
 from herald.services.resource_monitor import TTSResourceMonitor
@@ -505,9 +505,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             job.audio_duration_seconds = audio_info["duration_seconds"]
             job.audio_sha256 = audio_info["sha256"]
             job.audio_ready_at = datetime.now(UTC)
-            job.kokoro_voice = voice
-            job.kokoro_speed = speed
-            job.gemini_model = settings.GEMINI_MODEL
+            if job.request_mode != RequestMode.LITERAL.value and not job.gemini_model:
+                job.gemini_model = settings.GEMINI_MODEL if job.request_mode != RequestMode.RESEARCH.value else None
 
             # Clear claim fields on successful completion
             job.claimed_at = None

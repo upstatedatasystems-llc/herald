@@ -18,6 +18,7 @@ class HeraldRequest(BaseModel):
     verify_final_script: bool = False
     transport: str = "telegram"  # "telegram", "email", "api"
     transport_message_id: str | int | None = None
+    hold_for_approval: bool = False
     transport_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -38,9 +38,16 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     JobState.SCRIPT_READY.value: {
         JobState.QUEUED_TTS.value,
+        JobState.AWAITING_APPROVAL.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,
+    },
+    JobState.AWAITING_APPROVAL.value: {
+        JobState.QUEUED_TTS.value,
+        JobState.CANCELLED.value,
+        JobState.FAILED_RETRYABLE.value,
+        JobState.FAILED_FINAL.value,
     },
     JobState.QUEUED_TTS.value: {
         JobState.SYNTHESIZING.value,

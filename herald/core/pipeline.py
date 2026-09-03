@@ -387,6 +387,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_title=job.custom_title,
             )
             job.script_json = script_resp.model_dump()
+            job.gemini_model = getattr(provider, "model_name", settings.GEMINI_MODEL)
             db.commit()
             record_stage_metric(
                 job_id=job.id,
@@ -398,11 +399,30 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             )
 
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-core")
-        transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-core")
 
         script_obj = job.script_json or {}
         ep_title = script_obj.get("episode_title") or job.custom_title or "Herald Episode"
         dur_info = calculate_script_duration(script_obj, job.custom_speed or settings.KOKORO_SPEED)
+
+        if req.hold_for_approval:
+            job.approval_required = True
+            job.approval_requested_at = None
+            job.telegram_approval_message_id = None
+            transition_job_state(db, job, JobState.AWAITING_APPROVAL.value, component="herald-core")
+            db.commit()
+            return HeraldResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=False,
+                message="Script ready and awaiting approval.",
+                episode_title=ep_title,
+                estimated_minutes=dur_info.get("estimated_minutes"),
+            )
+
+        transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-core")
+        db.commit()
 
         return HeraldResponse(
             job_id=job.id,

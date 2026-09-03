@@ -16,6 +16,7 @@ from herald.core.pipeline import process_herald_request
 from herald.db.connection import SessionLocal
 from herald.db.models import (
     JobState,
+    JobStateTransition,
     PodcastJob,
     TelegramPollState,
     TelegramUpdateFailure,
@@ -23,6 +24,7 @@ from herald.db.models import (
 from herald.extraction.email_parser import (
     URL_REGEX,
 )
+from herald.services.eta_calculator import calculate_job_eta
 from herald.telegram.auth import (
     get_effective_user_preferences,
     get_paired_owner,
@@ -33,7 +35,13 @@ from herald.telegram.auth import (
 )
 from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs
-from herald.telegram.formatters import format_help, format_quickstart, format_settings
+from herald.telegram.formatters import (
+    format_approval,
+    format_help,
+    format_queued,
+    format_quickstart,
+    format_settings,
+)
 from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.telegram.bot")
@@ -183,6 +191,7 @@ def parse_telegram_message_directives(text: str) -> dict[str, Any]:
 
     return {
         "mode": mode,
+        "explicit_mode": matched_mode,
         "research_depth": matched_depth,
         "url": detected_url,
         "text": body,
@@ -502,20 +511,27 @@ def handle_telegram_content_message(
         )
         return
 
+    user_prefs = get_effective_user_preferences(db, user_id)
+    eff_mode = parsed.get("explicit_mode") or user_prefs.get("default_mode") or settings.get_default_mode()
+    eff_voice = parsed.get("voice") or user_prefs.get("default_voice") or settings.KOKORO_VOICE
+    eff_speed = parsed.get("speed") if parsed.get("speed") is not None else user_prefs.get("default_speed", settings.KOKORO_SPEED)
+    confirm_tts = bool(user_prefs.get("confirm_before_tts", False))
+
     req = HeraldRequest(
         transport="telegram",
         transport_message_id=msg_id,
         requester_identity=f"telegram:{user_id}",
         delivery_target=str(chat_id),
-        request_mode=parsed["mode"],
+        request_mode=eff_mode,
         research_depth=parsed["research_depth"],
         source_url=parsed["url"],
         source_text=parsed["text"] if not parsed["url"] else None,
-        custom_voice=parsed["voice"],
-        custom_speed=parsed["speed"],
+        custom_voice=eff_voice,
+        custom_speed=eff_speed,
         custom_title=parsed["title"],
         tts_chunk_chars=parsed["chunk_chars"],
         verify_final_script=parsed["verify"],
+        hold_for_approval=confirm_tts,
     )
 
     try:
@@ -534,10 +550,29 @@ def handle_telegram_content_message(
     mode_escaped = html.escape(response.request_mode)
 
     if response.is_duplicate:
-        if response.status == JobState.COMPLETE.value:
-            # Check if local MP3 is present on disk for immediate delivery
-            existing_job = db.query(PodcastJob).filter_by(id=response.job_id).first()
-            if existing_job and existing_job.local_audio_path and os.path.exists(existing_job.local_audio_path):
+        existing_job = db.query(PodcastJob).filter_by(id=response.job_id).first()
+        if existing_job:
+            # Recovery path: job is awaiting approval but card was never delivered
+            if existing_job.status == JobState.AWAITING_APPROVAL.value and not existing_job.telegram_approval_message_id:
+                eta_info = calculate_job_eta(db, existing_job)
+                app_text, reply_markup = format_approval(existing_job, existing_job.script_json, eta_info)
+                try:
+                    sent_msg = client.send_message(
+                        chat_id=chat_id,
+                        text=app_text,
+                        reply_markup=reply_markup,
+                        reply_to_message_id=msg_id,
+                        parse_mode="HTML",
+                    )
+                    if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                        existing_job.telegram_approval_message_id = sent_msg["message_id"]
+                        existing_job.approval_requested_at = datetime.now(UTC)
+                        db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to deliver recovery approval card for job '{existing_job.id}': {e}")
+                return
+
+            if existing_job.status == JobState.COMPLETE.value and existing_job.local_audio_path and os.path.exists(existing_job.local_audio_path):
                 client.send_message(
                     chat_id=chat_id,
                     text=f"🎧 <b>Already Processed:</b> Re-delivering '{title_escaped}'...",
@@ -562,16 +597,42 @@ def handle_telegram_content_message(
         )
         return
 
-    # Intake acknowledgment
-    client.send_message(
-        chat_id=chat_id,
-        text=(
+    job = db.query(PodcastJob).filter_by(id=response.job_id).first()
+    eta_info = calculate_job_eta(db, job) if job else {}
+
+    if response.status == JobState.AWAITING_APPROVAL.value and job:
+        app_text, reply_markup = format_approval(job, job.script_json, eta_info)
+        try:
+            sent_msg = client.send_message(
+                chat_id=chat_id,
+                text=app_text,
+                reply_markup=reply_markup,
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                job.telegram_approval_message_id = sent_msg["message_id"]
+                job.approval_requested_at = datetime.now(UTC)
+                db.commit()
+        except Exception as e:
+            logger.error(f"Failed to deliver Telegram approval card for job '{job.id}': {e}")
+        return
+
+    # Rich queued card (confirmation is OFF or directly queued)
+    if job:
+        queued_text = format_queued(job, job.script_json, eta_info)
+    else:
+        queued_text = (
             f"🎙️ <b>Podcast Queued!</b>\n\n"
             f"• <b>Title:</b> {title_escaped}\n"
             f"• <b>Format:</b> {mode_escaped}\n"
             f"• <b>Status:</b> <code>{html.escape(response.status)}</code>\n\n"
             f"Synthesizing audio now. You will receive the completed MP3 file shortly."
-        ),
+        )
+
+    client.send_message(
+        chat_id=chat_id,
+        text=queued_text,
         reply_to_message_id=msg_id,
         parse_mode="HTML",
     )
@@ -621,7 +682,7 @@ def handle_telegram_callback_query(
 
     # Route versioned callbacks with SET-semantics
     if raw_data == "h2:settings:confirm:on":
-        set_user_confirm_before_tts(db, user_id=user_id, enabled=True)
+        set_user_confirm_before_tts(db, user_id=user_id, chat_id=chat_id, enabled=True)
         # Acknowledge callback immediately to dismiss Telegram spinner
         client.answer_callback_query(cb_id, text="Confirm Before TTS enabled.")
         # Update settings message text and markup
@@ -643,7 +704,7 @@ def handle_telegram_callback_query(
         return
 
     elif raw_data == "h2:settings:confirm:off":
-        set_user_confirm_before_tts(db, user_id=user_id, enabled=False)
+        set_user_confirm_before_tts(db, user_id=user_id, chat_id=chat_id, enabled=False)
         # Acknowledge callback immediately to dismiss Telegram spinner
         client.answer_callback_query(cb_id, text="Confirm Before TTS disabled.")
         # Update settings message text and markup
@@ -663,6 +724,144 @@ def handle_telegram_callback_query(
             else:
                 logger.warning(f"Failed to update settings message markup: {e}")
         return
+
+    elif raw_data.startswith("h2:approve:"):
+        job_id = raw_data[len("h2:approve:"):]
+        job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+        if not job or job.telegram_user_id != user_id or job.telegram_chat_id != chat_id or job.transport != "telegram":
+            client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+            return
+
+        now = datetime.now(UTC)
+        updated_count = (
+            db.query(PodcastJob)
+            .filter(
+                PodcastJob.id == job_id,
+                PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                PodcastJob.telegram_user_id == user_id,
+                PodcastJob.telegram_chat_id == chat_id,
+            )
+            .update(
+                {
+                    "status": JobState.QUEUED_TTS.value,
+                    "approved_at": now,
+                    "updated_at": now,
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if updated_count == 1:
+            transition_rec = JobStateTransition(
+                job_id=job_id,
+                from_state=JobState.AWAITING_APPROVAL.value,
+                to_state=JobState.QUEUED_TTS.value,
+                component="telegram-approval",
+                message="Approved by user",
+                created_at=now,
+            )
+            db.add(transition_rec)
+            db.commit()
+            db.refresh(job)
+
+            client.answer_callback_query(cb_id, text="Approved! Queued for synthesis.")
+            eta_info = calculate_job_eta(db, job)
+            queued_text = format_queued(job, job.script_json, eta_info)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=queued_text,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to edit approval message to queued card: {e}")
+            return
+        else:
+            db.rollback()
+            db.refresh(job)
+            if job.status in (
+                JobState.QUEUED_TTS.value,
+                JobState.SYNTHESIZING.value,
+                JobState.ENCODING.value,
+                JobState.COMPLETE.value,
+            ):
+                client.answer_callback_query(cb_id, text="Job is already approved and synthesizing.")
+                return
+            elif job.status == JobState.CANCELLED.value:
+                client.answer_callback_query(cb_id, text="Job was already cancelled.", show_alert=True)
+                return
+            else:
+                client.answer_callback_query(cb_id, text=f"Cannot approve job in state {job.status}.", show_alert=True)
+                return
+
+    elif raw_data.startswith("h2:deny:"):
+        job_id = raw_data[len("h2:deny:"):]
+        job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+        if not job or job.telegram_user_id != user_id or job.telegram_chat_id != chat_id or job.transport != "telegram":
+            client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+            return
+
+        now = datetime.now(UTC)
+        updated_count = (
+            db.query(PodcastJob)
+            .filter(
+                PodcastJob.id == job_id,
+                PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                PodcastJob.telegram_user_id == user_id,
+                PodcastJob.telegram_chat_id == chat_id,
+            )
+            .update(
+                {
+                    "status": JobState.CANCELLED.value,
+                    "updated_at": now,
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if updated_count == 1:
+            transition_rec = JobStateTransition(
+                job_id=job_id,
+                from_state=JobState.AWAITING_APPROVAL.value,
+                to_state=JobState.CANCELLED.value,
+                component="telegram-approval",
+                message="Cancelled by user",
+                created_at=now,
+            )
+            db.add(transition_rec)
+            db.commit()
+
+            client.answer_callback_query(cb_id, text="Generation cancelled.")
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text="❌ <b>Podcast Generation Cancelled.</b>",
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to edit message to cancelled: {e}")
+            return
+        else:
+            db.rollback()
+            db.refresh(job)
+            if job.status == JobState.CANCELLED.value:
+                client.answer_callback_query(cb_id, text="Job already cancelled.")
+                return
+            elif job.status in (
+                JobState.QUEUED_TTS.value,
+                JobState.SYNTHESIZING.value,
+                JobState.ENCODING.value,
+                JobState.COMPLETE.value,
+            ):
+                client.answer_callback_query(cb_id, text="Job is already synthesizing and cannot be cancelled.", show_alert=True)
+                return
+            else:
+                client.answer_callback_query(cb_id, text=f"Cannot cancel job in state {job.status}.", show_alert=True)
+                return
 
     else:
         # Unknown / future callback actions safely acknowledged
@@ -715,6 +914,51 @@ def process_telegram_update(db: Session, client: TelegramClient, update: dict[st
         handle_telegram_content_message(db, client, message)
 
 
+def sweep_unpresented_approval_cards(db: Session, client: TelegramClient) -> int:
+    """
+    Find AWAITING_APPROVAL jobs whose Telegram approval card was not successfully sent yet,
+    and attempt delivery with bounded retries.
+    """
+    now = datetime.now(UTC)
+    unpresented_jobs = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.transport == "telegram",
+            PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+            PodcastJob.telegram_approval_message_id.is_(None),
+            PodcastJob.telegram_chat_id.isnot(None),
+            PodcastJob.attempt_count < 3,
+        )
+        .order_by(PodcastJob.created_at.asc())
+        .limit(5)
+        .all()
+    )
+
+    delivered = 0
+    for job in unpresented_jobs:
+        try:
+            eta_info = calculate_job_eta(db, job)
+            app_text, reply_markup = format_approval(job, job.script_json, eta_info)
+            reply_id = int(job.telegram_message_id) if job.telegram_message_id else None
+            sent_msg = client.send_message(
+                chat_id=job.telegram_chat_id,
+                text=app_text,
+                reply_markup=reply_markup,
+                reply_to_message_id=reply_id,
+                parse_mode="HTML",
+            )
+            if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                job.telegram_approval_message_id = sent_msg["message_id"]
+                job.approval_requested_at = now
+                db.commit()
+                delivered += 1
+        except Exception as e:
+            job.attempt_count = (job.attempt_count or 0) + 1
+            db.commit()
+            logger.warning(f"Failed retry to deliver approval card for job '{job.id}' (attempt {job.attempt_count}): {e}")
+    return delivered
+
+
 # Backward compatibility aliases
 handle_telegram_message = handle_telegram_content_message
 
@@ -739,9 +983,10 @@ def run_telegram_bot(poll_interval: float = 1.0) -> None:
 
     while True:
         try:
-            # 1. Deliver any ready audio files to Telegram
+            # 1. Deliver ready audio files and retry unpresented approval cards
             with SessionLocal() as db:
                 deliver_pending_telegram_jobs(db, client)
+                sweep_unpresented_approval_cards(db, client)
 
             # 2. Poll for new Telegram updates sequentially
             updates = client.get_updates(offset=last_offset + 1, limit=50, timeout=10)

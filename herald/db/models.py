@@ -28,6 +28,7 @@ class JobState(str, enum.Enum):
     SOURCE_READY = "SOURCE_READY"
     SCRIPTING = "SCRIPTING"
     SCRIPT_READY = "SCRIPT_READY"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
     QUEUED_TTS = "QUEUED_TTS"
     SYNTHESIZING = "SYNTHESIZING"
     ENCODING = "ENCODING"
@@ -145,6 +146,15 @@ class PodcastJob(Base):
     drive_uploaded_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     details_finalized_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Approval & Telegram delivery metadata
+    approval_required = Column(Boolean, nullable=False, default=False)
+    approval_requested_at = Column(DateTime(timezone=True), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    telegram_approval_message_id = Column(BigInteger, nullable=True)
+    telegram_delivery_message_id = Column(BigInteger, nullable=True)
+    telegram_audio_file_id = Column(Text, nullable=True)
+    telegram_document_file_id = Column(Text, nullable=True)
 
     # Error details
     error_code = Column(String(100), nullable=True)

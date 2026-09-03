@@ -3,6 +3,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from herald.config import settings
@@ -248,40 +249,101 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
     }
 
 
-def set_user_confirm_before_tts(db: Session, user_id: int | str, enabled: bool) -> bool:
-    """Set confirm_before_tts preference for a Telegram user."""
+def ensure_telegram_user(
+    db: Session,
+    user_id: int | str,
+    chat_id: int | str,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> TelegramUser | None:
+    """
+    Ensure a persistent TelegramUser row exists for an authorized user.
+    If the user already exists:
+    - Validates stored telegram_chat_id matches the provided chat_id.
+    If the user does not exist:
+    - Validates user_id and chat_id are authorized via settings.TELEGRAM_ALLOWED_USER_IDS in a private chat.
+    - Creates a new TelegramUser with role='user'.
+    - Handles concurrent creation races safely with rollback/re-query.
+    """
     try:
         uid_int = int(user_id)
+        cid_int = int(chat_id)
     except (ValueError, TypeError):
-        return False
+        return None
 
+    # Check if user already exists
     user = (
         db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
+        .filter(TelegramUser.telegram_user_id == uid_int)
         .first()
     )
+    if user:
+        if user.telegram_chat_id != cid_int or not user.is_active:
+            return None
+        return user
+
+    # User does not exist - check if authorized via static allowlist
+    if not is_user_authorized(db, uid_int, cid_int):
+        return None
+
+    now = datetime.now(UTC)
+    new_user = TelegramUser(
+        telegram_user_id=uid_int,
+        telegram_chat_id=cid_int,
+        username=username,
+        first_name=first_name,
+        role="user",
+        is_active=True,
+        confirm_before_tts=False,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_user)
+    try:
+        db.commit()
+        db.refresh(new_user)
+        logger.info(f"Created persistent allowlisted Telegram user '{uid_int}' (Chat: '{cid_int}') with role='user'.")
+        return new_user
+    except IntegrityError:
+        db.rollback()
+        user = (
+            db.query(TelegramUser)
+            .filter(TelegramUser.telegram_user_id == uid_int)
+            .first()
+        )
+        if user and user.telegram_chat_id == cid_int and user.is_active:
+            return user
+        return None
+
+
+def set_user_confirm_before_tts(
+    db: Session,
+    user_id: int | str,
+    enabled: bool,
+    chat_id: int | str | None = None,
+) -> bool:
+    """Set confirm_before_tts preference for a Telegram user."""
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
     if not user:
         return False
 
     user.confirm_before_tts = bool(enabled)
     user.updated_at = datetime.now(UTC)
     db.commit()
-    logger.info(f"Updated confirm_before_tts={enabled} for Telegram user '{uid_int}'.")
+    logger.info(f"Updated confirm_before_tts={enabled} for Telegram user '{user.telegram_user_id}'.")
     return True
 
 
-def set_user_default_voice(db: Session, user_id: int | str, voice: str | None) -> bool:
+def set_user_default_voice(
+    db: Session,
+    user_id: int | str,
+    voice: str | None,
+    chat_id: int | str | None = None,
+) -> bool:
     """Set default_voice preference for a Telegram user."""
-    try:
-        uid_int = int(user_id)
-    except (ValueError, TypeError):
-        return False
-
-    user = (
-        db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
-        .first()
-    )
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
     if not user:
         return False
 
@@ -298,18 +360,15 @@ def set_user_default_voice(db: Session, user_id: int | str, voice: str | None) -
     return True
 
 
-def set_user_default_speed(db: Session, user_id: int | str, speed: float | None) -> bool:
+def set_user_default_speed(
+    db: Session,
+    user_id: int | str,
+    speed: float | None,
+    chat_id: int | str | None = None,
+) -> bool:
     """Set default_speed preference for a Telegram user."""
-    try:
-        uid_int = int(user_id)
-    except (ValueError, TypeError):
-        return False
-
-    user = (
-        db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
-        .first()
-    )
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
     if not user:
         return False
 
@@ -326,18 +385,15 @@ def set_user_default_speed(db: Session, user_id: int | str, speed: float | None)
     return True
 
 
-def set_user_default_mode(db: Session, user_id: int | str, mode: str | None) -> bool:
+def set_user_default_mode(
+    db: Session,
+    user_id: int | str,
+    mode: str | None,
+    chat_id: int | str | None = None,
+) -> bool:
     """Set default_mode preference for a Telegram user."""
-    try:
-        uid_int = int(user_id)
-    except (ValueError, TypeError):
-        return False
-
-    user = (
-        db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == uid_int, TelegramUser.is_active.is_(True))
-        .first()
-    )
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
     if not user:
         return False
 

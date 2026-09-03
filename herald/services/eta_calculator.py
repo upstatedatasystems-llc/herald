@@ -55,28 +55,41 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
     fallback_rtf = getattr(settings, "TTS_ESTIMATED_REALTIME_FACTOR", 2.4)
     overhead_seconds = getattr(settings, "DELIVERY_ESTIMATED_OVERHEAD_SECONDS", 60)
 
-    # 0. Query recent successful Kokoro request metrics to calculate weighted RTF
+    # 0. Query recent successful TTS_TOTAL metrics and joined PodcastJob audio duration
     realtime_factor = fallback_rtf
     rtf_source = "fallback"
 
     try:
         from herald.db.models import JobProcessingMetric
-        recent_k_metrics = (
-            db.query(JobProcessingMetric)
+        completed_jobs = (
+            db.query(PodcastJob)
             .filter(
-                JobProcessingMetric.stage == "KOKORO_REQUEST",
-                JobProcessingMetric.status == "success",
+                PodcastJob.status == JobState.COMPLETE.value,
+                PodcastJob.audio_duration_seconds.isnot(None),
+                PodcastJob.audio_duration_seconds > 0,
             )
-            .order_by(JobProcessingMetric.created_at.desc())
-            .limit(50)
+            .order_by(PodcastJob.completed_at.desc())
+            .limit(20)
             .all()
         )
-        total_wall_ms = sum(m.duration_ms or 0 for m in recent_k_metrics)
-        total_audio_ms = sum(m.audio_duration_ms or 0 for m in recent_k_metrics)
+        if completed_jobs:
+            job_durations = {j.id: j.audio_duration_seconds for j in completed_jobs}
+            recent_tts_metrics = (
+                db.query(JobProcessingMetric)
+                .filter(
+                    JobProcessingMetric.job_id.in_(list(job_durations.keys())),
+                    JobProcessingMetric.stage == "TTS_TOTAL",
+                    JobProcessingMetric.status == "success",
+                    JobProcessingMetric.duration_ms > 0,
+                )
+                .all()
+            )
+            total_wall_ms = sum(m.duration_ms for m in recent_tts_metrics if m.duration_ms)
+            total_audio_ms = sum(job_durations[m.job_id] * 1000 for m in recent_tts_metrics if m.job_id in job_durations)
 
-        if total_audio_ms > 10000 and total_wall_ms > 0:
-            realtime_factor = round(total_wall_ms / float(total_audio_ms), 3)
-            rtf_source = "historical"
+            if total_audio_ms >= 10000 and total_wall_ms > 0:
+                realtime_factor = round(total_wall_ms / float(total_audio_ms), 3)
+                rtf_source = "historical"
     except Exception:
         pass
 
@@ -108,12 +121,27 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, any]:
         j_dur = calculate_script_duration(j.script_json, j.custom_speed or settings.KOKORO_SPEED)
         j_audio_seconds = j_dur["predicted_duration_seconds"]
 
-        if j.status == JobState.SYNTHESIZING.value and j.completed_chunk_index > 0:
-            segments = (j.script_json or {}).get("segments", [])
-            total_segments = max(len(segments), 1)
-            completed_ratio = min(1.0, max(0.0, j.completed_chunk_index / total_segments))
-            remaining_audio_seconds = j_audio_seconds * (1.0 - completed_ratio)
-            queue_ahead_audio_seconds += remaining_audio_seconds
+        if j.status == JobState.SYNTHESIZING.value:
+            from herald.db.models import PodcastTTSChunk
+            total_chunks = (
+                db.query(PodcastTTSChunk)
+                .filter(PodcastTTSChunk.job_id == j.id)
+                .count()
+            )
+            completed_chunks = (
+                db.query(PodcastTTSChunk)
+                .filter(
+                    PodcastTTSChunk.job_id == j.id,
+                    PodcastTTSChunk.status == "COMPLETED",
+                )
+                .count()
+            )
+            if total_chunks > 0:
+                completed_ratio = min(1.0, max(0.0, completed_chunks / float(total_chunks)))
+                remaining_audio_seconds = j_audio_seconds * (1.0 - completed_ratio)
+                queue_ahead_audio_seconds += remaining_audio_seconds
+            else:
+                queue_ahead_audio_seconds += j_audio_seconds
         elif j.status == JobState.ENCODING.value:
             queue_ahead_audio_seconds += 10.0  # Encoding is almost complete
         else:

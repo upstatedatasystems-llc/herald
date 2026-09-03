@@ -161,6 +161,7 @@ def synthesize_single_chunk(
     global_semaphore: Semaphore,
     per_job_semaphore: Semaphore,
     worker_id: str,
+    total_chunks: int = 1,
 ) -> Path:
     """
     Synthesize a single chunk bounded by both global and per-job semaphores.
@@ -196,7 +197,7 @@ def synthesize_single_chunk(
                     t0_mono = time.monotonic()
                     try:
                         logger.info(
-                            f"Worker '{worker_id}' synthesizing chunk {chunk.index} (attempt {attempt}): "
+                            f"Worker '{worker_id}' synthesizing chunk {chunk.index}/{total_chunks} (attempt {attempt}): "
                             f"{len(chunk.text)} chars | timeout: {synthesis_timeout}s"
                         )
                         kokoro_client.synthesize_chunk(
@@ -258,8 +259,9 @@ def synthesize_single_chunk(
                             job.last_heartbeat_at = datetime.now(UTC)
                             job.heartbeat_at = datetime.now(UTC)
                             db.commit()
+                            logger.info(f"Job '{job_id}' progress: {max_completed}/{total_chunks} chunks completed")
 
-                        logger.info(f"Chunk {chunk.index} completed successfully in {elapsed_ms / 1000.0:.1f}s")
+                        logger.info(f"Chunk {chunk.index}/{total_chunks} completed successfully in {elapsed_ms / 1000.0:.1f}s")
                         chunk_success = True
                         break
 
@@ -372,6 +374,7 @@ def process_tts_chunks_parallel(
                     global_semaphore=global_semaphore,
                     per_job_semaphore=per_job_semaphore,
                     worker_id=worker_id,
+                    total_chunks=len(script_chunks),
                 )
                 future_to_idx[fut] = db_c.chunk_index
 
