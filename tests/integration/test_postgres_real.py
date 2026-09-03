@@ -1,5 +1,6 @@
 import os
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -304,6 +305,10 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
 
     monkeypatch.setattr(settings, "HERALD_TTS_GLOBAL_SLOTS", 2)
     monkeypatch.setattr(settings, "HERALD_TTS_SLOT_BASE", 930000)
+    monkeypatch.setattr(
+        "herald.tts.chunk_manager.validate_audio_file",
+        lambda p: {"duration_seconds": 1.5, "size_bytes": 100},
+    )
     reset_semaphores_for_tests()
 
     SessionWorker = pg_session_factory()
@@ -313,7 +318,7 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
     try:
         # Create test job and chunk record in DB
         job = PodcastJob(
-            id="pg-slot-app-job-1",
+            id=f"pg-slot-{uuid.uuid4().hex[:16]}",
             transport="telegram",
             source_hash="pg-sh-1",
             source_text="Worker chunk text",
@@ -354,7 +359,7 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
         mock_kokoro_v.synthesize_chunk.side_effect = mock_voice_synth
 
         sems = get_semaphores()
-        chunk_item = TTSChunk(index=1, text="Worker chunk text", character_count=17)
+        chunk_item = TTSChunk(index=1, text="Worker chunk text")
 
         worker_errors = []
         voice_errors = []
@@ -457,7 +462,7 @@ def test_postgres_approval_cas_race(pg_session_factory):
     try:
         # 1. Setup job awaiting approval
         job = PodcastJob(
-            id="pg-cas-job-race-aa-1111-2222-333333333333",
+            id=f"pg-cas-aa-{uuid.uuid4().hex[:16]}",
             transport="telegram",
             telegram_user_id=777,
             telegram_chat_id=777,
@@ -540,7 +545,7 @@ def test_postgres_approval_vs_cancel_cas_race(pg_session_factory):
     try:
         # 1. Setup job awaiting approval
         job = PodcastJob(
-            id="pg-cas-job-race-ac-1111-2222-333333333333",
+            id=f"pg-cas-ac-{uuid.uuid4().hex[:16]}",
             transport="telegram",
             telegram_user_id=777,
             telegram_chat_id=777,
