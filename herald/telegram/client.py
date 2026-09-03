@@ -62,6 +62,7 @@ class TelegramClient:
     def get_updates(
         self,
         offset: int | None = None,
+        limit: int | None = None,
         timeout: int = 30,
         allowed_updates: list[str] | None = None,
     ) -> list[dict[str, Any]]:
@@ -69,6 +70,8 @@ class TelegramClient:
         params: dict[str, Any] = {"timeout": timeout}
         if offset is not None:
             params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
         if allowed_updates:
             params["allowed_updates"] = allowed_updates
         else:

@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -61,7 +62,9 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
         "research_sources": [],
     }
 
-    mock_gen_script = lambda *args, **kwargs: fake_script
+    def mock_gen_script(*args, **kwargs):
+        return fake_script
+
     monkeypatch.setattr("herald.gemini.client.generate_podcast_script", mock_gen_script)
     monkeypatch.setattr("herald.ai.gemini_provider.generate_podcast_script", mock_gen_script)
     monkeypatch.setattr(

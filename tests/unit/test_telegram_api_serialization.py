@@ -43,3 +43,30 @@ def test_job_status_response_serialization_with_telegram_fields():
     assert data["telegram_message_id"] == 98765
     assert data["gmail_message_id"] is None
     assert data["sender_email"] is None
+
+
+def test_telegram_client_get_updates_limit_contract(monkeypatch):
+    """
+    Test that TelegramClient.get_updates accepts limit argument and sends it in payload.
+    """
+    import httpx
+
+    from herald.telegram.client import TelegramClient
+
+    sent_params = {}
+
+    def mock_post(self, url, **kwargs):
+        nonlocal sent_params
+        sent_params = kwargs.get("json", {})
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    client = TelegramClient(token="123456:TEST_TOKEN")
+    updates = client.get_updates(offset=100, limit=50, timeout=10)
+
+    assert updates == []
+    assert sent_params.get("offset") == 100
+    assert sent_params.get("limit") == 50
+    assert sent_params.get("timeout") == 10
+
