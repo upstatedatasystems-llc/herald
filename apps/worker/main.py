@@ -118,6 +118,40 @@ class WorkerLeaseHeartbeat:
         self.stop()
 
 
+def should_send_delivery_nudge(job: PodcastJob) -> bool:
+    """Return True if an n8n post-commit delivery nudge should be sent for this job."""
+    if getattr(job, "transport", "email") == "telegram":
+        return False
+    return bool(getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True))
+
+
+def send_delivery_nudge(job: PodcastJob) -> bool:
+    """
+    Send post-commit delivery nudge webhook (e.g. for legacy n8n delivery).
+    Returns True if webhook request succeeded, False otherwise (always non-fatal).
+    """
+    if not should_send_delivery_nudge(job):
+        return False
+
+    nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
+    nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
+    nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
+    try:
+        import httpx
+
+        logger.info(f"Sending post-commit delivery nudge for job '{job.id}' to {nudge_url}")
+        headers = {"Content-Type": "application/json"}
+        if nudge_secret:
+            headers["X-API-Key"] = nudge_secret
+            headers["X-Herald-Delivery-Token"] = nudge_secret
+        with httpx.Client(timeout=nudge_timeout) as client:
+            resp = client.post(nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers)
+            return resp.status_code < 400
+    except Exception as ne:
+        logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}).")
+        return False
+
+
 def recover_stale_claims(db: Session, stale_minutes: int = 15):
     """
     Detect jobs stuck in SYNTHESIZING or ENCODING whose lease and heartbeat have expired,
@@ -496,22 +530,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             logger.info(f"Worker '{worker_id}' successfully rendered audio for job '{job.id}': {output_mp3_path}")
 
             # Post-commit delivery nudge (only for non-Telegram jobs, e.g. legacy email/n8n)
-            if job.transport != "telegram" and getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
-                nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
-                nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
-                nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)
-                try:
-                    import httpx
-
-                    logger.info(f"Sending post-commit delivery nudge for job '{job.id}' to {nudge_url}")
-                    headers = {"Content-Type": "application/json"}
-                    if nudge_secret:
-                        headers["X-API-Key"] = nudge_secret
-                        headers["X-Herald-Delivery-Token"] = nudge_secret
-                    with httpx.Client(timeout=nudge_timeout) as client:
-                        client.post(nudge_url, json={"job_id": job.id, "event": "AUDIO_READY"}, headers=headers)
-                except Exception as ne:
-                    logger.warning(f"Delivery nudge for job '{job.id}' failed non-fatally ({ne}).")
+            send_delivery_nudge(job)
 
             try:
                 shutil.rmtree(chunks_dir)

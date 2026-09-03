@@ -622,6 +622,9 @@ def handle_telegram_callback_query(
     # Route versioned callbacks with SET-semantics
     if raw_data == "h2:settings:confirm:on":
         set_user_confirm_before_tts(db, user_id=user_id, enabled=True)
+        # Acknowledge callback immediately to dismiss Telegram spinner
+        client.answer_callback_query(cb_id, text="Confirm Before TTS enabled.")
+        # Update settings message text and markup
         prefs = get_effective_user_preferences(db, user_id)
         settings_text, reply_markup = format_settings(prefs, settings)
         try:
@@ -633,12 +636,17 @@ def handle_telegram_callback_query(
                 reply_markup=reply_markup,
             )
         except Exception as e:
-            logger.debug(f"editMessageText non-fatal notice (idempotent click): {e}")
-        client.answer_callback_query(cb_id, text="Confirm Before TTS enabled.")
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"editMessageText idempotent notice: {e}")
+            else:
+                logger.warning(f"Failed to update settings message markup: {e}")
         return
 
     elif raw_data == "h2:settings:confirm:off":
         set_user_confirm_before_tts(db, user_id=user_id, enabled=False)
+        # Acknowledge callback immediately to dismiss Telegram spinner
+        client.answer_callback_query(cb_id, text="Confirm Before TTS disabled.")
+        # Update settings message text and markup
         prefs = get_effective_user_preferences(db, user_id)
         settings_text, reply_markup = format_settings(prefs, settings)
         try:
@@ -650,8 +658,10 @@ def handle_telegram_callback_query(
                 reply_markup=reply_markup,
             )
         except Exception as e:
-            logger.debug(f"editMessageText non-fatal notice (idempotent click): {e}")
-        client.answer_callback_query(cb_id, text="Confirm Before TTS disabled.")
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"editMessageText idempotent notice: {e}")
+            else:
+                logger.warning(f"Failed to update settings message markup: {e}")
         return
 
     else:

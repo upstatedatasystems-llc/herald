@@ -48,8 +48,9 @@ def format_help() -> str:
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"
+        "/settings — Preferences and pre-TTS confirmation toggle\n"
         "/readme — Project documentation\n\n"
-        "<i>Upcoming capabilities: /settings, /voices, /download, /diagnostics</i>"
+        "<i>Upcoming capabilities: /voices, /download, /diagnostics</i>"
     )
 
 

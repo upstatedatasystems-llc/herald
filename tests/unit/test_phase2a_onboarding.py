@@ -1,17 +1,23 @@
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from apps.telegram_bot.main import TELEGRAM_BOT_COMMANDS_2A, register_bot_commands
+from apps.telegram_bot.main import TELEGRAM_BOT_COMMANDS_2A
+from apps.worker.main import send_delivery_nudge, should_send_delivery_nudge
 from herald.config import settings
 from herald.db.models import Base, PodcastJob, TelegramPairingCode, TelegramUser
-from herald.telegram.auth import generate_pairing_code, verify_and_claim_pairing_code
-from herald.telegram.bot import handle_telegram_command, process_telegram_update
+from herald.telegram.auth import (
+    generate_pairing_code,
+    verify_and_claim_pairing_code,
+)
+from herald.telegram.bot import handle_telegram_command
 from herald.telegram.client import TelegramClient
-from herald.telegram.formatters import format_help, format_quickstart
 from herald.telegram.pairing_cli import get_pairing_status
 
 
@@ -27,21 +33,26 @@ def db_session():
         session.close()
 
 
-def test_pairing_cli_unpaired(db_session, monkeypatch):
-    """Test pairing CLI returns UNPAIRED:<code>:30 when instance has no owner."""
+def test_pairing_cli_unpaired_truthful_expiry(db_session, monkeypatch):
+    """Test pairing CLI returns UNPAIRED:<code>:<remaining_minutes> accurately calculating remaining duration."""
     monkeypatch.setattr("herald.telegram.pairing_cli.SessionLocal", lambda: db_session)
-    status = get_pairing_status(expires_in_minutes=30)
-    assert status.startswith("UNPAIRED:")
-    parts = status.split(":")
-    assert len(parts) == 3
-    code = parts[1]
-    assert len(code) == 6
-    assert parts[2] == "30"
 
-    # Verify code exists in DB
-    pairing_entry = db_session.query(TelegramPairingCode).filter_by(code=code).first()
-    assert pairing_entry is not None
-    assert pairing_entry.is_used is False
+    # 1. No code exists -> creates code with ~30 mins
+    status1 = get_pairing_status(expires_in_minutes=30)
+    assert status1.startswith("UNPAIRED:")
+    parts = status1.split(":")
+    assert len(parts) == 3
+    code1 = parts[1]
+    assert len(code1) == 6
+    assert int(parts[2]) in (29, 30)
+
+    # 2. Existing active code with 12 minutes remaining -> reuses same code and reports truthful 12 mins
+    pairing_entry = db_session.query(TelegramPairingCode).filter_by(code=code1).first()
+    pairing_entry.expires_at = datetime.now(UTC) + timedelta(minutes=12, seconds=10)
+    db_session.commit()
+
+    status2 = get_pairing_status(expires_in_minutes=30)
+    assert status2 == f"UNPAIRED:{code1}:12"
 
 
 def test_pairing_cli_already_paired(db_session, monkeypatch):
@@ -146,6 +157,9 @@ def test_authenticated_start_and_help(db_session):
     assert "/ai_check" in help_text
     assert "/status" in help_text
     assert "/queue" in help_text
+    assert "/settings" in help_text
+    assert "Upcoming capabilities: /voices, /download, /diagnostics" in help_text
+    assert "Upcoming capabilities: /settings" not in help_text
 
 
 def test_ai_check_command_aliases(db_session, monkeypatch):
@@ -174,8 +188,6 @@ def test_ai_check_command_aliases(db_session, monkeypatch):
 
 def test_set_my_commands_payload_validation():
     """Test that all commands in TELEGRAM_BOT_COMMANDS_2A match Telegram constraints."""
-    import re
-
     pattern = re.compile(r"^[a-z0-9_]{1,32}$")
     for cmd in TELEGRAM_BOT_COMMANDS_2A:
         name = cmd["command"]
@@ -189,28 +201,20 @@ def test_set_my_commands_payload_validation():
         client.set_my_commands([{"command": "ai-check", "description": "Invalid hyphen command"}])
 
 
-def test_set_my_commands_scope():
-    """Test that only 2A commands are registered in Package 2A."""
-    registered_names = {cmd["command"] for cmd in TELEGRAM_BOT_COMMANDS_2A}
-    expected_2a_names = {"start", "help", "status", "ai_check", "queue", "readme"}
-    assert registered_names == expected_2a_names
+def test_production_worker_delivery_nudge_logic(monkeypatch):
+    """Test actual apps.worker.main delivery nudge helper functions against real conditions."""
+    posted_payloads = []
 
-    # Ensure unimplemented/future commands are not in 2A
-    assert "voices" not in registered_names
-    assert "download" not in registered_names
-    assert "diagnostics" not in registered_names
-    assert "settings" not in registered_names
-
-
-def test_worker_suppresses_n8n_nudge_for_telegram_jobs(monkeypatch):
-    """Test that worker post-commit delivery block suppresses n8n webhook when transport is telegram."""
-    nudge_called = []
+    class MockResponse:
+        status_code = 200
 
     def mock_post(url, *args, **kwargs):
-        nudge_called.append(url)
-        return MagicMock(status_code=200)
+        posted_payloads.append((url, kwargs.get("json")))
+        return MockResponse()
 
-    # Create Telegram job and Email job
+    monkeypatch.setattr("httpx.Client.post", mock_post)
+    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True)
+
     telegram_job = PodcastJob(
         id="tg-job-123",
         transport="telegram",
@@ -226,14 +230,35 @@ def test_worker_suppresses_n8n_nudge_for_telegram_jobs(monkeypatch):
         source_text="text",
     )
 
-    # Simulate delivery nudge condition from apps/worker/main.py
-    for job in [telegram_job, email_job]:
-        if job.transport != "telegram" and getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
-            mock_post("http://n8n:5678/webhook/herald-audio-ready", json={"job_id": job.id})
+    # 1. Telegram job -> should_send returns False, send_delivery_nudge returns False without POSTing
+    assert should_send_delivery_nudge(telegram_job) is False
+    res_tg = send_delivery_nudge(telegram_job)
+    assert res_tg is False
+    assert len(posted_payloads) == 0
 
-    # Only email job should have triggered n8n post
-    assert len(nudge_called) == 1
-    assert "http://n8n:5678/webhook/herald-audio-ready" in nudge_called
+    # 2. Email job with ENABLE_EVENT_DRIVEN_DELIVERY=True -> should_send returns True, POST occurs
+    assert should_send_delivery_nudge(email_job) is True
+    res_email = send_delivery_nudge(email_job)
+    assert res_email is True
+    assert len(posted_payloads) == 1
+    assert posted_payloads[0][1] == {"job_id": "email-job-456", "event": "AUDIO_READY"}
+
+    # 3. Email job with ENABLE_EVENT_DRIVEN_DELIVERY=False -> should_send returns False
+    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", False)
+    assert should_send_delivery_nudge(email_job) is False
+    res_disabled = send_delivery_nudge(email_job)
+    assert res_disabled is False
+    assert len(posted_payloads) == 1  # No new POST
+
+    # 4. Network failure is handled non-fatally
+    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True)
+
+    def mock_post_fail(*args, **kwargs):
+        raise RuntimeError("Network unreachable")
+
+    monkeypatch.setattr("httpx.Client.post", mock_post_fail)
+    res_fail = send_delivery_nudge(email_job)
+    assert res_fail is False  # Does not raise RuntimeError
 
 
 def test_send_document_dynamic_mime_handling(tmp_path, monkeypatch):
@@ -271,3 +296,49 @@ def test_send_document_dynamic_mime_handling(tmp_path, monkeypatch):
     override_path.write_text("custom data")
     client.send_document(chat_id=123, document_path=override_path, mime_type="application/x-custom")
     assert posted_files["custom.dat"] == "application/x-custom"
+
+
+def test_compose_yaml_kokoro_service_healthy_dependencies():
+    """Test that compose.yaml specifies service_healthy for kokoro across worker and telegram-bot."""
+    compose_path = Path("compose.yaml")
+    assert compose_path.exists()
+    content = compose_path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(content)
+
+    services = parsed.get("services", {})
+
+    # Kokoro must define healthcheck
+    kokoro = services.get("kokoro", {})
+    assert "healthcheck" in kokoro
+    assert kokoro["healthcheck"]["interval"] == "60s"
+
+    # Worker must depend on kokoro service_healthy
+    worker = services.get("herald-worker", {})
+    assert worker["depends_on"]["kokoro"]["condition"] == "service_healthy"
+
+    # Telegram bot must depend on kokoro service_healthy
+    bot = services.get("telegram-bot", {})
+    assert bot["depends_on"]["kokoro"]["condition"] == "service_healthy"
+
+
+def test_setup_script_zero_secret_leakage_and_settings_presence():
+    """Test that setup.sh contains /settings, truthful instructions, and does not leak sentinel secrets."""
+    setup_path = Path("setup.sh")
+    assert setup_path.exists()
+    setup_text = setup_path.read_text(encoding="utf-8")
+
+    # Invariant: No 1-second kokoro curl loop in setup.sh
+    assert "docker compose exec -T kokoro curl" not in setup_text
+
+    # Invariant: /settings listed in TELEGRAM COMMANDS
+    assert "/settings" in setup_text
+
+    # Verify sentinel secrets are not hardcoded or leaked into template output
+    sentinels = [
+        "SENTINEL_TELEGRAM_SECRET",
+        "SENTINEL_GEMINI_SECRET",
+        "SENTINEL_DB_SECRET",
+        "SENTINEL_HERALD_SECRET",
+    ]
+    for s in sentinels:
+        assert s not in setup_text

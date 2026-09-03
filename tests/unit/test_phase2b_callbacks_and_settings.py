@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -5,12 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from apps.telegram_bot.main import TELEGRAM_BOT_COMMANDS
-from herald.config import settings
-from herald.db.models import Base, PodcastJob, TelegramPairingCode, TelegramUser
+from herald.db.models import Base, PodcastJob
 from herald.telegram.auth import (
     generate_pairing_code,
     get_effective_user_preferences,
-    set_user_confirm_before_tts,
     set_user_default_mode,
     set_user_default_speed,
     set_user_default_voice,
@@ -21,8 +20,7 @@ from herald.telegram.bot import (
     handle_telegram_command,
     process_telegram_update,
 )
-from herald.telegram.client import TelegramClient
-from herald.telegram.formatters import format_settings
+from herald.telegram.client import TelegramAPIError, TelegramClient
 
 
 @pytest.fixture
@@ -35,6 +33,23 @@ def db_session():
         yield session
     finally:
         session.close()
+
+
+def test_telegram_modules_import_cleanly():
+    """Smoke test proving Cycle 1 Telegram modules import successfully without NameError or missing Any."""
+    import apps.telegram_bot.main
+    import herald.telegram.auth
+    import herald.telegram.bot
+    import herald.telegram.client
+    import herald.telegram.formatters
+    import herald.telegram.pairing_cli
+
+    assert apps.telegram_bot.main is not None
+    assert herald.telegram.auth is not None
+    assert herald.telegram.bot is not None
+    assert herald.telegram.client is not None
+    assert herald.telegram.formatters is not None
+    assert herald.telegram.pairing_cli is not None
 
 
 def test_callback_byte_length_limit(db_session):
@@ -109,6 +124,68 @@ def test_callback_private_chat_and_auth_enforcement(db_session):
     }
     handle_telegram_callback_query(db_session, mock_client, cb_unauth)
     mock_client.answer_callback_query.assert_called_with("cb-202", text="Unauthorized: Access denied.", show_alert=True)
+
+    # 3. Paired owner from WRONG private chat ID -> rejected
+    mock_client.reset_mock()
+    cb_wrong_chat = {
+        "id": "cb-203",
+        "from": {"id": 12345, "username": "owner"},
+        "message": {"message_id": 10, "chat": {"id": 54321, "type": "private"}},
+        "data": "h2:settings:confirm:on",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_wrong_chat)
+    mock_client.answer_callback_query.assert_called_with("cb-203", text="Unauthorized: Access denied.", show_alert=True)
+
+
+def test_callback_answers_before_message_edit(db_session):
+    """Test that answerCallbackQuery is called BEFORE editMessageText network I/O."""
+    code = generate_pairing_code(db_session)
+    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
+
+    call_order = []
+    mock_client = MagicMock(spec=TelegramClient)
+    mock_client.answer_callback_query.side_effect = lambda *args, **kwargs: call_order.append("answerCallbackQuery")
+    mock_client.edit_message_text.side_effect = lambda *args, **kwargs: call_order.append("editMessageText")
+
+    cb_on = {
+        "id": "cb-order-1",
+        "from": {"id": 12345, "username": "owner"},
+        "message": {"message_id": 50, "chat": {"id": 12345, "type": "private"}},
+        "data": "h2:settings:confirm:on",
+    }
+
+    handle_telegram_callback_query(db_session, mock_client, cb_on)
+
+    assert call_order == ["answerCallbackQuery", "editMessageText"]
+
+
+def test_callback_edit_message_text_error_handling(db_session):
+    """Test that 'message is not modified' is benign debug, while other edit errors log warnings."""
+    code = generate_pairing_code(db_session)
+    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
+
+    mock_client = MagicMock(spec=TelegramClient)
+
+    cb = {
+        "id": "cb-err-1",
+        "from": {"id": 12345, "username": "owner"},
+        "message": {"message_id": 50, "chat": {"id": 12345, "type": "private"}},
+        "data": "h2:settings:confirm:on",
+    }
+
+    # 1. Benign "message is not modified" -> logs debug, not warning
+    mock_client.edit_message_text.side_effect = TelegramAPIError("Bad Request: message is not modified")
+    with patch("herald.telegram.bot.logger.warning") as mock_warn, patch("herald.telegram.bot.logger.debug") as mock_debug:
+        handle_telegram_callback_query(db_session, mock_client, cb)
+        mock_warn.assert_not_called()
+        mock_debug.assert_called()
+
+    # 2. Real TelegramAPIError (e.g. Chat not found or Network error) -> logs warning
+    mock_client.edit_message_text.side_effect = TelegramAPIError("Forbidden: bot was blocked by the user")
+    with patch("herald.telegram.bot.logger.warning") as mock_warn, patch("herald.telegram.bot.logger.debug") as mock_debug:
+        handle_telegram_callback_query(db_session, mock_client, cb)
+        mock_warn.assert_called_once()
+        assert "Failed to update settings message markup" in mock_warn.call_args[0][0]
 
 
 def test_callback_idempotency_set_semantics(db_session):
@@ -268,3 +345,61 @@ def test_set_my_commands_includes_settings():
     registered_names = {cmd["command"] for cmd in TELEGRAM_BOT_COMMANDS}
     assert "settings" in registered_names
     assert registered_names == {"start", "help", "status", "ai_check", "queue", "settings", "readme"}
+
+
+def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, monkeypatch):
+    """Test send_audio and send_document: multipart JSON string serialization vs explicit file_id."""
+    client = TelegramClient(token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
+    posted_calls = []
+
+    def mock_post(url, *args, **kwargs):
+        posted_calls.append({"url": url, "data": kwargs.get("data"), "json": kwargs.get("json"), "files": kwargs.get("files")})
+        return MagicMock(json=lambda: {"ok": True, "result": {"message_id": 200}})
+
+    monkeypatch.setattr("httpx.Client.post", mock_post)
+
+    test_markup = {"inline_keyboard": [[{"text": "Btn", "callback_data": "h2:test"}]]}
+
+    # 1. Local audio file with reply_markup -> sends multipart with JSON string reply_markup
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"dummy audio")
+    client.send_audio(chat_id=123, audio_path=audio_file, reply_markup=test_markup)
+
+    assert len(posted_calls) == 1
+    call1 = posted_calls[0]
+    assert call1["files"] is not None
+    assert call1["data"]["reply_markup"] == json.dumps(test_markup)
+
+    # 2. Explicit file_id audio with reply_markup -> sends JSON payload with dict reply_markup
+    client.send_audio(chat_id=123, file_id="CQADBAADbAIAAjZ_uVB", reply_markup=test_markup)
+    assert len(posted_calls) == 2
+    call2 = posted_calls[1]
+    assert call2["files"] is None
+    assert call2["json"]["audio"] == "CQADBAADbAIAAjZ_uVB"
+    assert call2["json"]["reply_markup"] == test_markup
+
+    # 3. Nonexistent audio_path -> raises FileNotFoundError
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        client.send_audio(chat_id=123, audio_path=tmp_path / "nonexistent.mp3")
+
+    # 4. Local document file with reply_markup -> sends multipart with JSON string reply_markup
+    doc_file = tmp_path / "doc.pdf"
+    doc_file.write_bytes(b"dummy pdf")
+    client.send_document(chat_id=123, document_path=doc_file, reply_markup=test_markup)
+    assert len(posted_calls) == 3
+    call3 = posted_calls[2]
+    assert call3["files"] is not None
+    assert call3["data"]["reply_markup"] == json.dumps(test_markup)
+
+    # 5. Explicit file_id document with reply_markup -> sends JSON payload with dict reply_markup
+    client.send_document(chat_id=123, file_id="BQADBAADbAIAAjZ_uVD", reply_markup=test_markup)
+    assert len(posted_calls) == 4
+    call4 = posted_calls[3]
+    assert call4["files"] is None
+    assert call4["json"]["document"] == "BQADBAADbAIAAjZ_uVD"
+    assert call4["json"]["reply_markup"] == test_markup
+
+    # 6. Nonexistent document_path -> raises FileNotFoundError
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        client.send_document(chat_id=123, document_path=tmp_path / "nonexistent.doc")

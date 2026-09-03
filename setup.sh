@@ -206,14 +206,18 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
         echo "⚠️  Migration container status: ${MIG_STATUS:-unknown}. Check 'docker compose logs herald-migration'."
     fi
 
-    echo "⏳ Waiting for Kokoro TTS engine initialization..."
+    echo "⏳ Waiting for Kokoro TTS engine initialization (Docker healthcheck)..."
     KOKORO_OK=false
-    for i in {1..45}; do
-        if docker compose exec -T kokoro curl -s -f http://localhost:8880/v1/models &>/dev/null; then
-            KOKORO_OK=true
-            break
+    for i in {1..30}; do
+        K_CID=$(docker compose ps -q kokoro 2>/dev/null || true)
+        if [ -n "$K_CID" ]; then
+            K_STATUS=$(docker inspect --format='{{json .State.Health.Status}}' "$K_CID" 2>/dev/null | tr -d '"')
+            if [ "$K_STATUS" = "healthy" ]; then
+                KOKORO_OK=true
+                break
+            fi
         fi
-        sleep 1
+        sleep 2
     done
 
     if [ "$KOKORO_OK" = true ]; then
@@ -276,6 +280,7 @@ echo "/help      - Full usage and directive reference"
 echo "/status    - System health, queue depth, and uptime"
 echo "/ai_check  - AI provider connection test"
 echo "/queue     - Pending and processing jobs"
+echo "/settings  - Preferences and pre-TTS confirmation toggle"
 echo "/readme    - Project documentation"
 echo ""
 echo "SERVER COMMANDS"

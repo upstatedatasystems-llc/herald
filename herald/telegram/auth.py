@@ -1,6 +1,7 @@
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -44,9 +45,9 @@ def generate_pairing_code(db: Session, expires_in_minutes: int = 15) -> str:
     return code
 
 
-def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15) -> str | None:
+def get_or_create_active_pairing_record(db: Session, expires_in_minutes: int = 15) -> TelegramPairingCode | None:
     """
-    Return an existing valid, unexpired, unused pairing code or generate a fresh one.
+    Return an existing valid, unexpired, unused pairing code record or generate a fresh one.
     If an owner already exists, returns None.
     """
     if has_owner(db):
@@ -63,8 +64,30 @@ def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15)
         .first()
     )
     if active:
-        return active.code
-    return generate_pairing_code(db, expires_in_minutes=expires_in_minutes)
+        return active
+
+    code = "".join(secrets.choice("0123456789") for _ in range(6))
+    exp = now + timedelta(minutes=expires_in_minutes)
+
+    pairing_obj = TelegramPairingCode(
+        code=code,
+        is_used=False,
+        expires_at=exp,
+        created_at=now,
+    )
+    db.add(pairing_obj)
+    db.commit()
+    db.refresh(pairing_obj)
+    return pairing_obj
+
+
+def get_or_create_active_pairing_code(db: Session, expires_in_minutes: int = 15) -> str | None:
+    """
+    Return an existing valid, unexpired, unused pairing code string or generate a fresh one.
+    If an owner already exists, returns None.
+    """
+    rec = get_or_create_active_pairing_record(db, expires_in_minutes=expires_in_minutes)
+    return rec.code if rec else None
 
 
 def verify_and_claim_pairing_code(

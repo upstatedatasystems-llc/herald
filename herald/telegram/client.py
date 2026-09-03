@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import re
@@ -196,7 +197,8 @@ class TelegramClient:
     def send_audio(
         self,
         chat_id: int | str,
-        audio_path: str | Path,
+        audio_path: str | Path | None = None,
+        file_id: str | None = None,
         caption: str | None = None,
         title: str | None = None,
         performer: str = "Herald",
@@ -205,8 +207,8 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Upload and send an MP3 audio file or reuse an existing Telegram file_id."""
-        p = Path(audio_path)
-        is_local_file = p.exists() and p.is_file()
+        if not file_id and not audio_path:
+            raise ValueError("Either audio_path or file_id must be provided to send_audio.")
 
         data: dict[str, Any] = {
             "chat_id": str(chat_id),
@@ -220,28 +222,38 @@ class TelegramClient:
             data["duration"] = str(int(duration))
         if reply_to_message_id:
             data["reply_to_message_id"] = str(reply_to_message_id)
-        if reply_markup:
-            data["reply_markup"] = reply_markup
 
         url = f"{self._base_url}/sendAudio"
         try:
-            if is_local_file:
+            if file_id:
+                # Reusable Telegram file_id (JSON payload)
+                data["audio"] = str(file_id)
+                if reply_markup:
+                    data["reply_markup"] = reply_markup
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url, json=data)
+            else:
+                # Local file upload (Multipart payload)
+                p = Path(audio_path)
+                if not p.exists() or not p.is_file():
+                    raise FileNotFoundError(f"Audio file '{p}' does not exist.")
+
+                if reply_markup:
+                    data["reply_markup"] = (
+                        json.dumps(reply_markup) if isinstance(reply_markup, (dict, list)) else str(reply_markup)
+                    )
+
                 with open(p, "rb") as f:
                     files = {"audio": (p.name, f, "audio/mpeg")}
                     with httpx.Client(timeout=120.0) as client:
                         resp = client.post(url, data=data, files=files)
-            else:
-                # Treat audio_path as existing Telegram file_id
-                data["audio"] = str(audio_path)
-                with httpx.Client(timeout=30.0) as client:
-                    resp = client.post(url, json=data)
 
             res_json = resp.json()
             if not res_json.get("ok"):
                 desc = res_json.get("description", "Failed to upload audio")
                 raise TelegramAPIError(self._sanitize(f"sendAudio failed ({resp.status_code}): {desc}"))
             return res_json.get("result", {})
-        except TelegramAPIError:
+        except (TelegramAPIError, FileNotFoundError, ValueError):
             raise
         except Exception as e:
             raise TelegramAPIError(self._sanitize(f"Audio upload exception: {e}")) from None
@@ -249,27 +261,43 @@ class TelegramClient:
     def send_document(
         self,
         chat_id: int | str,
-        document_path: str | Path,
+        document_path: str | Path | None = None,
+        file_id: str | None = None,
         caption: str | None = None,
         reply_to_message_id: int | None = None,
         mime_type: str | None = None,
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Upload and send a document file with dynamic MIME resolution or reuse existing file_id."""
-        p = Path(document_path)
-        is_local_file = p.exists() and p.is_file()
+        if not file_id and not document_path:
+            raise ValueError("Either document_path or file_id must be provided to send_document.")
 
         data: dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:
             data["caption"] = caption
         if reply_to_message_id:
             data["reply_to_message_id"] = str(reply_to_message_id)
-        if reply_markup:
-            data["reply_markup"] = reply_markup
 
         url = f"{self._base_url}/sendDocument"
         try:
-            if is_local_file:
+            if file_id:
+                # Reusable Telegram file_id (JSON payload)
+                data["document"] = str(file_id)
+                if reply_markup:
+                    data["reply_markup"] = reply_markup
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url, json=data)
+            else:
+                # Local file upload (Multipart payload)
+                p = Path(document_path)
+                if not p.exists() or not p.is_file():
+                    raise FileNotFoundError(f"Document file '{p}' does not exist.")
+
+                if reply_markup:
+                    data["reply_markup"] = (
+                        json.dumps(reply_markup) if isinstance(reply_markup, (dict, list)) else str(reply_markup)
+                    )
+
                 if mime_type:
                     resolved_mime = mime_type
                 else:
@@ -284,18 +312,13 @@ class TelegramClient:
                     files = {"document": (p.name, f, resolved_mime)}
                     with httpx.Client(timeout=60.0) as client:
                         resp = client.post(url, data=data, files=files)
-            else:
-                # Treat document_path as existing Telegram file_id
-                data["document"] = str(document_path)
-                with httpx.Client(timeout=30.0) as client:
-                    resp = client.post(url, json=data)
 
             res_json = resp.json()
             if not res_json.get("ok"):
                 desc = res_json.get("description", "Failed to upload document")
                 raise TelegramAPIError(self._sanitize(f"sendDocument failed ({resp.status_code}): {desc}"))
             return res_json.get("result", {})
-        except TelegramAPIError:
+        except (TelegramAPIError, FileNotFoundError, ValueError):
             raise
         except Exception as e:
             raise TelegramAPIError(self._sanitize(f"Document upload exception: {e}")) from None
