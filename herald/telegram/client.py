@@ -1,4 +1,6 @@
 import logging
+import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +9,14 @@ import httpx
 from herald.config import settings
 
 logger = logging.getLogger("herald.telegram.client")
+
+DEFAULT_DOCUMENT_MIME_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".zip": "application/zip",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".txt": "text/plain",
+}
 
 
 class TelegramAPIError(Exception):
@@ -58,6 +68,37 @@ class TelegramClient:
     def get_me(self, timeout: float = 10.0) -> dict[str, Any]:
         """Fetch bot info to verify token connectivity."""
         return self._request("GET", "getMe", timeout=timeout)
+
+    def set_my_commands(
+        self,
+        commands: list[dict[str, str]],
+        scope: dict[str, Any] | None = None,
+        language_code: str | None = None,
+        timeout: float = 15.0,
+    ) -> bool:
+        """
+        Register bot commands via Telegram Bot API setMyCommands.
+        Each command dictionary must have 'command' (1-32 chars: a-z, 0-9, _) and 'description' (1-256 chars).
+        """
+        cmd_pattern = re.compile(r"^[a-z0-9_]{1,32}$")
+        validated_cmds = []
+        for cmd in commands:
+            name = (cmd.get("command") or "").strip().lower()
+            desc = (cmd.get("description") or "").strip()
+            if not cmd_pattern.match(name):
+                raise ValueError(f"Invalid Telegram command name '{name}'. Must match ^[a-z0-9_]{{1,32}}$")
+            if not desc or len(desc) > 256:
+                raise ValueError(f"Command description for '{name}' must be between 1 and 256 characters.")
+            validated_cmds.append({"command": name, "description": desc})
+
+        payload: dict[str, Any] = {"commands": validated_cmds}
+        if scope:
+            payload["scope"] = scope
+        if language_code:
+            payload["language_code"] = language_code
+
+        res = self._request("POST", "setMyCommands", timeout=timeout, json=payload)
+        return bool(res)
 
     def get_updates(
         self,
@@ -155,11 +196,18 @@ class TelegramClient:
         document_path: str | Path,
         caption: str | None = None,
         reply_to_message_id: int | None = None,
+        mime_type: str | None = None,
     ) -> dict[str, Any]:
-        """Upload and send a document file (e.g. README.md)."""
+        """Upload and send a document file with dynamic MIME resolution."""
         p = Path(document_path)
         if not p.exists():
             raise FileNotFoundError(f"Document file '{p}' does not exist.")
+
+        if mime_type:
+            resolved_mime = mime_type
+        else:
+            ext = p.suffix.lower()
+            resolved_mime = DEFAULT_DOCUMENT_MIME_TYPES.get(ext) or mimetypes.guess_type(str(p))[0] or "application/octet-stream"
 
         data: dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:
@@ -170,7 +218,7 @@ class TelegramClient:
         url = f"{self._base_url}/sendDocument"
         try:
             with open(p, "rb") as f:
-                files = {"document": (p.name, f, "text/markdown")}
+                files = {"document": (p.name, f, resolved_mime)}
                 with httpx.Client(timeout=60.0) as client:
                     resp = client.post(url, data=data, files=files)
 

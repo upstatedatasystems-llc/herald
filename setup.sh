@@ -232,18 +232,55 @@ else
     echo "ℹ️  Docker Compose not detected. Please run 'docker compose up -d' when Docker is available."
 fi
 
-# 6. Pairing instructions
+# 6. Retrieve active pairing status & display setup complete summary
+PAIRING_OUTPUT=""
+if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+    PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli 2>/dev/null || true)
+fi
+
 echo ""
 echo "========================================================"
-echo "               🎉 Herald Setup Complete!               "
+echo "               Herald Setup Complete!                  "
 echo "========================================================"
 echo ""
-echo "Next step: Pair your Telegram account as instance owner."
+echo "Telegram Bot: @${BOT_NAME:-HeraldBot}"
+
+if [ "$PAIRING_OUTPUT" = "PAIRED" ]; then
+    echo "Owner:        Owner already paired"
+    echo ""
+    echo "Your Telegram account is already paired as the authorized owner."
+elif echo "$PAIRING_OUTPUT" | grep -q "^UNPAIRED:"; then
+    PAIR_CODE=$(echo "$PAIRING_OUTPUT" | cut -d':' -f2)
+    PAIR_EXP=$(echo "$PAIRING_OUTPUT" | cut -d':' -f3)
+    echo "Pairing Code: ${PAIR_CODE}"
+    echo "Pairing expires in: ${PAIR_EXP:-30} minutes"
+    echo ""
+    echo "PAIR YOUR ACCOUNT"
+    echo "1. Open a private chat with @${BOT_NAME:-HeraldBot}"
+    echo "2. Send:"
+    echo "   /pair ${PAIR_CODE}"
+else
+    echo "Status:       Stack running (check 'docker compose logs telegram-bot' for pairing)"
+fi
+
 echo ""
-echo "1. Open Telegram and start a private chat with your bot (@${BOT_NAME:-HeraldBot})."
-echo "2. Find the active 6-digit pairing code in your server logs:"
-echo "   docker compose logs telegram-bot | grep \"/pair\""
-echo "3. Send the command in your private Telegram chat:"
-echo "   /pair <6_digit_code>"
+echo "QUICK START"
+echo "- Send an article URL by itself for a Standard podcast."
+echo "- Put \"brief\" above a URL/text for a shorter episode."
+echo "- Put \"research high\" above a URL/text for deep research."
+echo "- Put \"literal\" above text for zero-AI narration."
 echo ""
+echo "TELEGRAM COMMANDS"
+echo "/start     - Quick-start guide"
+echo "/help      - Full usage and directive reference"
+echo "/status    - System health, queue depth, and uptime"
+echo "/ai_check  - AI provider connection test"
+echo "/queue     - Pending and processing jobs"
+echo "/readme    - Project documentation"
+echo ""
+echo "SERVER COMMANDS"
+echo "Live logs: docker compose logs -f --tail=100"
+echo "Status:    docker compose ps"
+echo "Stop:      docker compose down"
+echo "Start:     docker compose up -d"
 echo "========================================================"

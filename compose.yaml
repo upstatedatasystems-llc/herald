@@ -98,11 +98,12 @@ services:
       herald-migration:
         condition: service_completed_successfully
       kokoro:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
       HERALD_WORK_DIR: /data/herald
+      PYTHONUNBUFFERED: "1"
     volumes:
       - work_data:/data/herald
     networks:
@@ -114,7 +115,7 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: herald-telegram-bot
     restart: unless-stopped
-    command: ["python", "-m", "apps.telegram_bot.main"]
+    command: ["python", "-u", "-m", "apps.telegram_bot.main"]
     security_opt:
       - no-new-privileges:true
     logging:
@@ -131,10 +132,13 @@ services:
         condition: service_healthy
       herald-migration:
         condition: service_completed_successfully
+      kokoro:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       HERALD_WORK_DIR: /data/herald
+      PYTHONUNBUFFERED: "1"
     volumes:
       - work_data:/data/herald
     networks:

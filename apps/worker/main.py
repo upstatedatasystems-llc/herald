@@ -495,8 +495,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             transition_job_state(db, job, JobState.AUDIO_READY.value, component="herald-worker")
             logger.info(f"Worker '{worker_id}' successfully rendered audio for job '{job.id}': {output_mp3_path}")
 
-            # Post-commit delivery nudge
-            if getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
+            # Post-commit delivery nudge (only for non-Telegram jobs, e.g. legacy email/n8n)
+            if job.transport != "telegram" and getattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True):
                 nudge_url = getattr(settings, "DELIVERY_NUDGE_WEBHOOK_URL", "http://n8n:5678/webhook/herald-audio-ready")
                 nudge_secret = getattr(settings, "DELIVERY_NUDGE_SECRET", "") or settings.HERALD_API_KEY
                 nudge_timeout = getattr(settings, "DELIVERY_NUDGE_TIMEOUT_SECONDS", 3.0)

@@ -67,12 +67,38 @@ def print_startup_banner():
     print("=" * 60 + "\n")
 
 
+TELEGRAM_BOT_COMMANDS_2A = [
+    {"command": "start", "description": "Start bot and view quick-start guide"},
+    {"command": "help", "description": "View usage guide, modes, and directives"},
+    {"command": "status", "description": "View system health, queue depth, and uptime"},
+    {"command": "ai_check", "description": "Test AI provider connection"},
+    {"command": "queue", "description": "View active podcast queue"},
+    {"command": "readme", "description": "Download project documentation"},
+]
+
+
+def register_bot_commands(client: TelegramClient) -> bool:
+    """Register supported Telegram bot commands with setMyCommands."""
+    try:
+        ok = client.set_my_commands(TELEGRAM_BOT_COMMANDS_2A)
+        if ok:
+            logger.info("Successfully registered Telegram bot commands with setMyCommands.")
+        else:
+            logger.warning("Telegram setMyCommands returned non-ok result.")
+        return ok
+    except Exception as e:
+        logger.warning(f"Non-fatal error registering Telegram commands: {e}")
+        return False
+
+
 def main():
     if not settings.TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is not set in environment or .env. Exiting.")
         sys.exit(1)
 
+    client = TelegramClient()
     print_startup_banner()
+    register_bot_commands(client)
     run_telegram_bot()
 
 

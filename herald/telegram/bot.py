@@ -31,6 +31,7 @@ from herald.telegram.auth import (
 )
 from herald.telegram.client import TelegramClient
 from herald.telegram.delivery import deliver_pending_telegram_jobs
+from herald.telegram.formatters import format_help, format_quickstart
 from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.telegram.bot")
@@ -241,9 +242,14 @@ def handle_telegram_command(
         )
         escaped_reply = html.escape(reply_msg)
         if success:
+            owner = get_paired_owner(db)
+            owner_name = (owner.first_name or owner.username or str(owner.telegram_user_id)) if owner else "Owner"
+            default_mode = settings.get_default_mode()
+            ai_prov = settings.AI_PROVIDER or "None (Literal only)"
+            quickstart_msg = format_quickstart(owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov)
             client.send_message(
                 chat_id=chat_id,
-                text=f"✅ <b>{escaped_reply}</b>\n\nYou can now send article URLs or paste text to generate podcasts.",
+                text=f"✅ <b>{escaped_reply}</b>\n\n{quickstart_msg}",
                 reply_to_message_id=msg_id,
                 parse_mode="HTML",
             )
@@ -276,46 +282,19 @@ def handle_telegram_command(
 
     if cmd_clean == "start":
         owner = get_paired_owner(db)
-        owner_name = html.escape(owner.first_name or owner.username or str(owner.telegram_user_id)) if owner else "Owner"
+        owner_name = (owner.first_name or owner.username or str(owner.telegram_user_id)) if owner else "Owner"
         default_mode = settings.get_default_mode()
         ai_prov = settings.AI_PROVIDER or "None (Literal only)"
+        quickstart_msg = format_quickstart(owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov)
         client.send_message(
             chat_id=chat_id,
-            text=(
-                f"🎙️ <b>Welcome to Herald!</b>\n\n"
-                f"Owner: <b>{owner_name}</b>\n"
-                f"Default Mode: <code>{html.escape(default_mode)}</code>\n"
-                f"AI Provider: <code>{html.escape(ai_prov)}</code>\n\n"
-                f"Send an article URL or paste text to generate a podcast.\n\n"
-                f"Use /help to view available commands and directives."
-            ),
+            text=quickstart_msg,
             reply_to_message_id=msg_id,
             parse_mode="HTML",
         )
 
     elif cmd_clean == "help":
-        help_text = (
-            "📖 <b>Herald Usage Guide</b>\n\n"
-            "<b>Ways to generate audio:</b>\n"
-            "• Send an article URL (e.g. <code>https://example.com/article</code>)\n"
-            "• Paste or forward an article, document, or newsletter\n\n"
-            "<b>Modes (top of message):</b>\n"
-            "• <code>literal</code> — Local deterministic reading (no AI required)\n"
-            "• <code>brief</code> — Concise AI summary\n"
-            "• <code>standard</code> — Full AI podcast narration\n"
-            "• <code>research high</code> — Deep-dive grounded research podcast\n\n"
-            "<b>Directives:</b>\n"
-            "• <code>Voice: af_bella</code> (af_heart, af_bella, af_sarah, am_adam, am_michael)\n"
-            "• <code>Speed: 1.1</code> (0.8 to 1.2)\n"
-            "• <code>Title: Custom Title</code>\n\n"
-            "<b>Commands:</b>\n"
-            "/status — Live system health, AI status, and queue depth\n"
-            "/ai-check — Fresh AI provider connection test\n"
-            "/queue — Pending and processing jobs\n"
-            "/settings — Configuration and defaults\n"
-            "/readme — Project documentation"
-        )
-        client.send_message(chat_id=chat_id, text=help_text, reply_to_message_id=msg_id, parse_mode="HTML")
+        client.send_message(chat_id=chat_id, text=format_help(), reply_to_message_id=msg_id, parse_mode="HTML")
 
     elif cmd_clean == "status":
         uptime_seconds = int((datetime.now(UTC) - _START_TIME).total_seconds())
@@ -370,7 +349,7 @@ def handle_telegram_command(
         )
         client.send_message(chat_id=chat_id, text=status_msg, reply_to_message_id=msg_id, parse_mode="HTML")
 
-    elif cmd_clean == "ai-check":
+    elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
         ai_provider = get_ai_provider()
         if not ai_provider or not ai_provider.is_configured():
             client.send_message(
