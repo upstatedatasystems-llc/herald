@@ -4,6 +4,7 @@ All dynamic text values MUST be escaped with html.escape when used in HTML parse
 """
 
 import html
+from datetime import UTC, datetime
 from typing import Any
 
 from herald.config import settings
@@ -81,6 +82,7 @@ def format_help() -> str:
         "/help — Full usage and directive reference\n"
         "/voices — Browse voices, hear samples, and set default voice\n"
         "/download — Download latest (or specific) episode MP3 file\n"
+        "/diagnostics — View job diagnostics and download support package\n"
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"
@@ -356,17 +358,130 @@ def format_completion(
 
 
 def format_completion_markup(job: PodcastJob) -> dict[str, Any]:
-    """Return inline keyboard markup with Download MP3 button for completed podcasts."""
+    """Return inline keyboard markup with Download MP3 and Diagnostics buttons for completed podcasts."""
     return {
         "inline_keyboard": [
             [
                 {
                     "text": "📥 Download MP3",
                     "callback_data": f"h2:download:{job.id}",
-                }
+                },
+                {
+                    "text": "🛠️ Diagnostics",
+                    "callback_data": f"h2:diag:{job.id}",
+                },
             ]
         ]
     }
+
+
+def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
+    """Format concise Telegram HTML diagnostic card for a job."""
+    from herald.db.models import AIInteraction, PodcastTTSChunk
+
+    title = html.escape(get_job_display_title(job))
+    short_id = html.escape(job.id[:8])
+    status = html.escape(job.status)
+    mode_str = (job.request_mode or "standard").capitalize()
+    if job.request_mode == "research" and job.research_depth:
+        mode_str += f" ({job.research_depth.capitalize()})"
+    mode_esc = html.escape(mode_str)
+    src_type = html.escape(job.source_type or "text")
+
+    voice = html.escape(job.kokoro_voice or job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
+    speed = float(job.kokoro_speed or job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+
+    # Duration and processing time
+    proc_time_str = "N/A"
+    created_utc = job.created_at.replace(tzinfo=UTC) if (job.created_at and job.created_at.tzinfo is None) else job.created_at
+    if created_utc:
+        comp_utc = job.completed_at.replace(tzinfo=UTC) if (job.completed_at and job.completed_at.tzinfo is None) else job.completed_at
+        deliv_utc = job.delivered_at.replace(tzinfo=UTC) if (job.delivered_at and job.delivered_at.tzinfo is None) else job.delivered_at
+        end_time = comp_utc or deliv_utc or datetime.now(UTC)
+        total_sec = (end_time - created_utc).total_seconds()
+        app_req_utc = job.approval_requested_at.replace(tzinfo=UTC) if (job.approval_requested_at and job.approval_requested_at.tzinfo is None) else job.approval_requested_at
+        app_done_utc = job.approved_at.replace(tzinfo=UTC) if (job.approved_at and job.approved_at.tzinfo is None) else job.approved_at
+        if app_done_utc and app_req_utc:
+            hold_sec = (app_done_utc - app_req_utc).total_seconds()
+            active_sec = max(1, int(total_sec - hold_sec))
+        else:
+            active_sec = max(1, int(total_sec))
+        proc_time_str = format_duration_sec(active_sec)
+
+    created_str = created_utc.strftime("%Y-%m-%d %H:%M:%S UTC") if created_utc else "N/A"
+
+    # AI identity & tokens
+    ai_prov, ai_model = get_job_ai_identity(job)
+    if job.request_mode == "literal":
+        ai_line = "• <b>AI:</b> <code>None (Literal mode)</code>"
+    elif ai_prov and ai_model:
+        ai_line = f"• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
+    else:
+        ai_line = "• <b>AI:</b> <code>None</code>"
+
+    # TTS chunks count
+    chunks_str = ""
+    if db:
+        tts_count = db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == job.id).count()
+        if tts_count > 0:
+            chunks_str = f"\n• <b>TTS Chunks:</b> {tts_count}"
+        ai_calls = db.query(AIInteraction).filter(AIInteraction.job_id == job.id).all()
+        if ai_calls:
+            tot_tok = sum(c.total_tokens for c in ai_calls if c.total_tokens is not None)
+            tok_str = f" ({tot_tok:,} tokens)" if tot_tok else ""
+            ai_line += f"\n• <b>AI Interactions:</b> {len(ai_calls)} call(s){tok_str}"
+
+    # Retries / Errors
+    retry_parts = []
+    if job.attempt_count and job.attempt_count > 1:
+        retry_parts.append(f"intake: {job.attempt_count}")
+    if job.synthesis_attempt_count and job.synthesis_attempt_count > 1:
+        retry_parts.append(f"synthesis: {job.synthesis_attempt_count}")
+    if job.delivery_attempt_count and job.delivery_attempt_count > 1:
+        retry_parts.append(f"delivery: {job.delivery_attempt_count}")
+    if job.verify_repair_count:
+        retry_parts.append(f"repair: {job.verify_repair_count}")
+    retries_line = f"\n• <b>Retries:</b> {', '.join(retry_parts)}" if retry_parts else ""
+
+    error_section = ""
+    if job.error_code or job.failed_stage:
+        err_stage = html.escape(job.failed_stage or "UNKNOWN")
+        err_code = html.escape(job.error_code or "ERROR")
+        err_det = html.escape(job.error_detail[:200] + "..." if job.error_detail and len(job.error_detail) > 200 else (job.error_detail or ""))
+        error_section = (
+            f"\n\n⚠️ <b>Failure Details:</b>\n"
+            f"• <b>Stage:</b> <code>{err_stage}</code>\n"
+            f"• <b>Error:</b> <code>{err_code}</code>\n"
+            f"• <i>{err_det}</i>"
+        )
+
+    audio_line = ""
+    if job.audio_duration_seconds:
+        dur_str = format_duration_sec(job.audio_duration_seconds)
+        size_mb = (job.audio_bytes / (1024 * 1024)) if job.audio_bytes else 0
+        audio_line = f"\n• <b>Audio Output:</b> {dur_str} ({size_mb:.1f} MB)"
+
+    card = (
+        f"🛠️ <b>Diagnostics: {title}</b>\n\n"
+        f"• <b>Job ID:</b> <code>{short_id}</code> (<code>{job.id}</code>)\n"
+        f"• <b>Status:</b> <code>{status}</code>\n"
+        f"• <b>Mode:</b> {mode_esc}\n"
+        f"• <b>Source Type:</b> <code>{src_type}</code>\n"
+        f"{ai_line}\n"
+        f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
+        f"{chunks_str}"
+        f"{audio_line}\n"
+        f"• <b>Created:</b> {created_str}\n"
+        f"• <b>Processing Time:</b> {proc_time_str}"
+        f"{retries_line}"
+        f"{error_section}\n\n"
+        f"📦 <i>Downloading diagnostic support package (ZIP)...</i>"
+    )
+
+    if len(card) > 4000:
+        card = card[:3900] + "\n\n<i>[Truncated to fit Telegram limits]</i>"
+
+    return card
 
 
 def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:

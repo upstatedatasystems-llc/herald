@@ -368,6 +368,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 grounded_data = generate_grounded_research(
                     source_text=job.source_text,
                     research_depth=job.research_depth or "medium",
+                    job_id=job.id,
                 )
                 job.research_grounding_json = grounded_data
                 job.research_search_count = grounded_data.get("search_count", 0)
@@ -378,6 +379,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 dossier = normalize_research_dossier(
                     source_text=job.source_text,
                     grounded_research_data=job.research_grounding_json,
+                    job_id=job.id,
                 )
                 job.research_json = dossier.model_dump()
                 job.research_model = settings.GEMINI_RESEARCH_MODEL
@@ -389,6 +391,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     request_mode="research",
                     research_dossier=job.research_json,
                     source_title=job.custom_title,
+                    job_id=job.id,
                 )
                 job.script_json = script.model_dump()
                 db.commit()
@@ -398,6 +401,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     source_text=job.source_text,
                     research_dossier=job.research_json,
                     script_dict=job.script_json,
+                    job_id=job.id,
                 )
                 job.research_audit_json = audit.model_dump()
                 db.commit()
@@ -409,6 +413,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     research_dossier=job.research_json,
                     script_dict=job.script_json,
                     audit_result=audit_data,
+                    job_id=job.id,
                 )
                 job.script_json = repaired.model_dump()
                 job.research_repair_count = 1
@@ -423,6 +428,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_text=job.source_text,
                 request_mode=mode_val,
                 source_title=job.custom_title,
+                job_id=job.id,
             )
             job.script_json = script_resp.model_dump()
             job.gemini_model = getattr(provider, "model_name", settings.GEMINI_MODEL)

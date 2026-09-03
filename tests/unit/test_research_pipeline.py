@@ -240,7 +240,7 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
     db_session.commit()
 
     # Mock Gemini Research calls
-    def mock_grounded_research(source_text, research_depth):
+    def mock_grounded_research(source_text, research_depth="medium", *args, **kwargs):
         return {
             "raw_text": "Grounded evidence text",
             "search_count": 2,
@@ -257,7 +257,7 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
             ],
         }
 
-    def mock_normalize_dossier(source_text, grounded_research_data):
+    def mock_normalize_dossier(source_text, grounded_research_data, *args, **kwargs):
         return ResearchDossierResponse(
             source_summary="Summary",
             verification=[
@@ -273,7 +273,7 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
             research_sources=grounded_research_data["research_sources"],
         )
 
-    def mock_generate_script(source_text, request_mode, research_dossier=None, source_title=None):
+    def mock_generate_script(source_text, request_mode, research_dossier=None, source_title=None, *args, **kwargs):
         return PodcastScriptResponse(
             episode_title="Quantum Endpoint Test",
             episode_description="Description",
@@ -284,7 +284,7 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
             warnings=[],
         )
 
-    def mock_audit_script(source_text, research_dossier, script_dict):
+    def mock_audit_script(source_text, research_dossier, script_dict, *args, **kwargs):
         return ResearchAuditResponse(has_material_issues=False)
 
     monkeypatch.setattr("apps.api.main.generate_grounded_research", mock_grounded_research)

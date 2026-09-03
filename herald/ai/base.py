@@ -28,6 +28,7 @@ class AIProvider(ABC):
         request_mode: str = "standard",
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
+        job_id: str | None = None,
     ) -> PodcastScriptResponse:
         """Generate structured podcast script from source text."""
 

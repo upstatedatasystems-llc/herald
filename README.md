@@ -99,6 +99,7 @@ research high
 | `/help` | Concise Telegram usage instructions |
 | `/voices` | Interactive voice catalog, audio sample previews, and default voice selection |
 | `/download [id]` | Download completed podcast MP3 as an audio document |
+| `/diagnostics [id]` | View job diagnostics card and download support bundle ZIP |
 | `/status` | Live runtime, TTS readiness, AI provider health, queue, disk, and uptime |
 | `/ai_check` | Dedicated AI API configuration and connection test |
 | `/queue` | View pending and in-progress podcast jobs |

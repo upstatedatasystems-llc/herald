@@ -772,6 +772,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 grounded_data = generate_grounded_research(
                     source_text=job.source_text,
                     research_depth=job.research_depth or "medium",
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.research_grounding_json = grounded_data
@@ -795,6 +796,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 dossier = normalize_research_dossier(
                     source_text=job.source_text,
                     grounded_research_data=job.research_grounding_json,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.research_json = dossier.model_dump()
@@ -817,6 +819,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     request_mode="research",
                     research_dossier=job.research_json,
                     source_title=job.custom_title,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.script_json = script.model_dump()
@@ -837,6 +840,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     source_text=job.source_text,
                     research_dossier=job.research_json,
                     script_dict=job.script_json,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.research_audit_json = audit.model_dump()
@@ -860,6 +864,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     research_dossier=job.research_json,
                     script_dict=job.script_json,
                     audit_result=audit_data,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.script_json = repaired_script.model_dump()
@@ -881,6 +886,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 v_audit = audit_script_fidelity(
                     source_text=job.source_text,
                     script_dict=job.script_json,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.verify_audit_json = v_audit.model_dump()
@@ -902,6 +908,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                         research_dossier=job.research_json or {},
                         script_dict=job.script_json,
                         audit_result=v_audit.model_dump(),
+                        job_id=job.id,
                     )
                     t1 = datetime.now(UTC)
                     job.script_json = repaired_script.model_dump()
@@ -924,6 +931,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     source_text=job.source_text,
                     request_mode=req_mode,
                     source_title=job.custom_title,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.script_json = script.model_dump()
@@ -944,6 +952,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 v_audit = audit_script_fidelity(
                     source_text=job.source_text,
                     script_dict=job.script_json,
+                    job_id=job.id,
                 )
                 t1 = datetime.now(UTC)
                 job.verify_audit_json = v_audit.model_dump()
@@ -964,6 +973,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                         source_text=job.source_text,
                         script_dict=job.script_json,
                         audit_result=v_audit.model_dump(),
+                        job_id=job.id,
                     )
                     t1 = datetime.now(UTC)
                     job.script_json = repaired.model_dump()

@@ -40,6 +40,7 @@ class GeminiProvider(AIProvider):
         request_mode: str = "standard",
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
+        job_id: str | None = None,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
             raise GeminiAuthError("Gemini API key is not configured.")
@@ -48,6 +49,7 @@ class GeminiProvider(AIProvider):
             request_mode=request_mode,
             research_dossier=research_dossier,
             source_title=source_title,
+            job_id=job_id,
         )
 
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:

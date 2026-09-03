@@ -173,6 +173,7 @@ class PodcastJob(Base):
     transitions = relationship("JobStateTransition", back_populates="job", cascade="all, delete-orphan")
     metrics = relationship("JobProcessingMetric", back_populates="job", cascade="all, delete-orphan")
     tts_chunks = relationship("PodcastTTSChunk", back_populates="job", cascade="all, delete-orphan")
+    ai_interactions = relationship("AIInteraction", back_populates="job", cascade="all, delete-orphan")
 
 
 class PodcastTTSChunk(Base):
@@ -309,12 +310,37 @@ class TelegramUpdateFailure(Base):
     )
 
 
+class AIInteraction(Base):
+    __tablename__ = "ai_interactions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=True, index=True)
+    provider = Column(String(50), nullable=False)
+    model = Column(String(100), nullable=False)
+    operation = Column(String(50), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    duration_ms = Column(BigInteger, nullable=True)
+    success = Column(Boolean, nullable=False, default=True)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    error_category = Column(String(100), nullable=True)
+    error_message = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+
+    job = relationship("PodcastJob", back_populates="ai_interactions")
+
+
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
 Index("idx_podcast_jobs_claim", PodcastJob.status, PodcastJob.claimed_at)
 Index("uq_podcast_jobs_telegram", PodcastJob.transport, PodcastJob.telegram_chat_id, PodcastJob.telegram_message_id, unique=True)
 Index("idx_job_processing_metrics_job_stage", JobProcessingMetric.job_id, JobProcessingMetric.stage)
 Index("idx_job_processing_metrics_stage_created", JobProcessingMetric.stage, JobProcessingMetric.created_at)
 Index("idx_job_processing_metrics_job_seq", JobProcessingMetric.job_id, JobProcessingMetric.sequence_index)
+Index("idx_ai_interactions_job_created", AIInteraction.job_id, AIInteraction.created_at)
+Index("idx_ai_interactions_provider_created", AIInteraction.provider, AIInteraction.created_at)
 
 
 

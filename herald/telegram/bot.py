@@ -43,7 +43,11 @@ from herald.telegram.auth import (
     verify_and_claim_pairing_code,
 )
 from herald.telegram.client import TelegramClient
-from herald.telegram.delivery import deliver_job_download, deliver_pending_telegram_jobs
+from herald.telegram.delivery import (
+    deliver_job_diagnostics,
+    deliver_job_download,
+    deliver_pending_telegram_jobs,
+)
 from herald.telegram.formatters import (
     format_approval,
     format_help,
@@ -511,6 +515,25 @@ def handle_telegram_command(
             return
 
         deliver_job_download(db, client, job, chat_id=chat_id, reply_to_message_id=msg_id)
+
+    elif cmd_clean == "diagnostics":
+        job = resolve_user_job(
+            db,
+            telegram_user_id=user_id,
+            telegram_chat_id=chat_id,
+            identifier=args,
+            completed_only=False,
+        )
+        if not job:
+            client.send_message(
+                chat_id=chat_id,
+                text="ℹ️ <b>No matching podcast found for diagnostics.</b>\n\nProvide a valid episode ID (e.g. <code>/diagnostics &lt;id&gt;</code>) or submit a job first.",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            return
+
+        deliver_job_diagnostics(db, client, job, chat_id=chat_id, reply_to_message_id=msg_id)
 
     elif cmd_clean == "readme":
         readme_path = Path("README.md")
@@ -1020,6 +1043,25 @@ def handle_telegram_callback_query(
 
         client.answer_callback_query(cb_id, text="Sending MP3 file...")
         deliver_job_download(db, client, job, chat_id=chat_id)
+        return
+
+    elif raw_data.startswith("h2:diag:"):
+        job_id = raw_data[len("h2:diag:") :]
+        job = resolve_user_job(
+            db,
+            telegram_user_id=user_id,
+            telegram_chat_id=chat_id,
+            identifier=job_id,
+            completed_only=False,
+        )
+        if not job:
+            client.answer_callback_query(
+                cb_id, text="Podcast not found or access denied.", show_alert=True
+            )
+            return
+
+        client.answer_callback_query(cb_id, text="Generating diagnostics...")
+        deliver_job_diagnostics(db, client, job, chat_id=chat_id)
         return
 
     elif raw_data.startswith("h2:voice:set:"):

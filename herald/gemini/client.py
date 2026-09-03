@@ -14,8 +14,20 @@ from herald.gemini.schema import (
     ResearchAuditResponse,
     ResearchDossierResponse,
 )
+from herald.services.ai_recorder import record_ai_interaction
 
 logger = logging.getLogger("herald.gemini")
+
+
+def _extract_tokens(result_json: dict | None) -> tuple[int | None, int | None, int | None]:
+    """Safely extract prompt, completion, and total tokens from Gemini usageMetadata."""
+    if not isinstance(result_json, dict):
+        return None, None, None
+    usage = result_json.get("usageMetadata") or result_json.get("usage_metadata") or {}
+    p = usage.get("promptTokenCount") or usage.get("prompt_token_count")
+    c = usage.get("candidatesTokenCount") or usage.get("candidates_token_count")
+    t = usage.get("totalTokenCount") or usage.get("total_token_count")
+    return p, c, t
 
 
 class GeminiError(Exception):
@@ -46,6 +58,7 @@ def generate_grounded_research(
     research_depth: str = "medium",
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """
     Stage 1a: Call GEMINI_RESEARCH_MODEL with Google Search grounding to retrieve external evidence.
@@ -90,6 +103,7 @@ Report your comprehensive grounded findings in detail.
     backoff = 2.0
 
     for attempt in range(1, max_attempts + 1):
+        t0 = datetime.now(UTC)
         try:
             logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{max_attempts}")
             from herald.concurrency import get_semaphores
@@ -101,12 +115,34 @@ Report your comprehensive grounded findings in detail.
                 raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
             elif resp.status_code == 429:
                 if attempt < max_attempts:
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="gemini",
+                        model=model,
+                        operation="grounded_research",
+                        started_at=t0,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=f"HTTP 429: {resp.text}",
+                        metadata={"attempt": attempt, "research_depth": depth},
+                    )
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
                 raise GeminiQuotaError(f"Gemini API rate limit exceeded: {resp.text}")
             elif resp.status_code != 200:
                 if attempt < max_attempts:
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="gemini",
+                        model=model,
+                        operation="grounded_research",
+                        started_at=t0,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=f"HTTP {resp.status_code}: {resp.text}",
+                        metadata={"attempt": attempt, "research_depth": depth},
+                    )
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -171,6 +207,26 @@ Report your comprehensive grounded findings in detail.
                     )
                     idx += 1
 
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="grounded_research",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                metadata={
+                    "attempt": attempt,
+                    "research_depth": depth,
+                    "search_count": len(web_queries),
+                    "source_count": len(research_sources),
+                },
+            )
+
             return {
                 "raw_text": raw_text,
                 "grounding_metadata": grounding_meta,
@@ -180,6 +236,17 @@ Report your comprehensive grounded findings in detail.
             }
 
         except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="grounded_research",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+                metadata={"attempt": attempt, "research_depth": depth},
+            )
             if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
                 raise
             if attempt == max_attempts:
@@ -195,6 +262,7 @@ def normalize_research_dossier(
     grounded_research_data: dict,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> ResearchDossierResponse:
     """
     Stage 1b: Second non-search structured-output call using GEMINI_MODEL.
@@ -288,6 +356,7 @@ Requirements:
     backoff = 2.0
 
     for attempt in range(1, max_attempts + 1):
+        t0 = datetime.now(UTC)
         try:
             logger.info(f"Sending dossier normalization request to Gemini ({model}), attempt {attempt}/{max_attempts}")
             payload = {
@@ -307,6 +376,17 @@ Requirements:
 
             if resp.status_code != 200:
                 if attempt < max_attempts:
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="gemini",
+                        model=model,
+                        operation="dossier_normalization",
+                        started_at=t0,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=f"HTTP {resp.status_code}: {resp.text}",
+                        metadata={"attempt": attempt},
+                    )
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -331,9 +411,35 @@ Requirements:
             if not data.get("research_sources") and sources_registry:
                 data["research_sources"] = sources_registry
 
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="dossier_normalization",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                metadata={"attempt": attempt},
+            )
+
             return ResearchDossierResponse(**data)
 
         except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="dossier_normalization",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+                metadata={"attempt": attempt},
+            )
             if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
                 raise
             if attempt == max_attempts:
@@ -351,6 +457,7 @@ def generate_podcast_script(
     source_title: str | None = None,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
@@ -431,6 +538,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     last_error = ""
 
     for attempt in range(1, max_attempts + 1):
+        t0 = datetime.now(UTC)
         try:
             logger.info(f"Sending script request to Gemini ({model}), mode={mode_clean}, attempt {attempt}/{max_attempts}")
             prompt_content = f"{system_prompt}\n\n{user_prompt}"
@@ -456,12 +564,34 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
             elif resp.status_code == 429:
                 if attempt < max_attempts:
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="gemini",
+                        model=model,
+                        operation="script_generation",
+                        started_at=t0,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=f"HTTP 429: {resp.text}",
+                        metadata={"attempt": attempt, "mode": mode_clean},
+                    )
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
                 raise GeminiQuotaError(f"Gemini API rate limit exceeded: {resp.text}")
             elif resp.status_code != 200:
                 if attempt < max_attempts:
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="gemini",
+                        model=model,
+                        operation="script_generation",
+                        started_at=t0,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=f"HTTP {resp.status_code}: {resp.text}",
+                        metadata={"attempt": attempt, "mode": mode_clean},
+                    )
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -479,14 +609,51 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             raw_text = parts[0]["text"]
             script_data = json.loads(raw_text)
 
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="script_generation",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+
             return PodcastScriptResponse(**script_data)
 
         except (json.JSONDecodeError, GeminiValidationError) as e:
             last_error = str(e)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="script_generation",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
             logger.error(f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}")
             if attempt == max_attempts:
                 raise GeminiValidationError(f"Invalid JSON/schema returned by Gemini: {e}")
         except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="script_generation",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
             if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
                 raise
             last_error = str(e)
@@ -506,6 +673,7 @@ def audit_research_script(
     script_dict: dict,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> ResearchAuditResponse:
     """
     Stage 3: Post-generation research audit.
@@ -573,6 +741,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         ],
     }
 
+    t0 = datetime.now(UTC)
     try:
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -588,9 +757,44 @@ If has_material_issues is true, provide concrete repair_instructions.
             resp = client.post(url, json=payload, headers=headers)
 
         if resp.status_code == 200:
-            raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            result_json = resp.json()
+            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="research_audit",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
             return ResearchAuditResponse(**json.loads(raw_text))
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="research_audit",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=f"HTTP {resp.status_code}: {resp.text}",
+        )
     except Exception as e:
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="research_audit",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=e,
+        )
         logger.warning(f"Research audit error: {e}")
 
     # Default clean audit if audit call fails non-fatally
@@ -604,6 +808,7 @@ def repair_research_script(
     audit_result: dict,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> PodcastScriptResponse:
     """
     Stage 4: Perform ONE targeted script repair pass using audit findings.
@@ -669,12 +874,51 @@ Return the corrected PodcastScriptResponse JSON now.
         },
     }
 
-    with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
+    t0 = datetime.now(UTC)
+    try:
+        with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            resp = client.post(url, json=payload, headers=headers)
 
-    if resp.status_code == 200:
-        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return PodcastScriptResponse(**json.loads(raw_text))
+        if resp.status_code == 200:
+            result_json = resp.json()
+            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="research_repair",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            return PodcastScriptResponse(**json.loads(raw_text))
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="research_repair",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=f"HTTP {resp.status_code}: {resp.text}",
+        )
+    except Exception as e:
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="research_repair",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=e,
+        )
+        raise GeminiError(f"Failed to repair research script: {e}")
 
     raise GeminiError("Failed to repair research script.")
 
@@ -684,6 +928,7 @@ def audit_script_fidelity(
     script_dict: dict,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> FidelityAuditResponse:
     """
     Perform a Gemini fidelity audit against normalized source text for Brief/Standard script validation when verify=true.
@@ -746,6 +991,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         ],
     }
 
+    t0 = datetime.now(UTC)
     try:
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -761,9 +1007,44 @@ If has_material_issues is true, provide concrete repair_instructions.
             resp = client.post(url, json=payload, headers=headers)
 
         if resp.status_code == 200:
-            raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            result_json = resp.json()
+            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="fidelity_audit",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
             return FidelityAuditResponse(**json.loads(raw_text))
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="fidelity_audit",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=f"HTTP {resp.status_code}: {resp.text}",
+        )
     except Exception as e:
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="fidelity_audit",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=e,
+        )
         logger.warning(f"Fidelity audit error: {e}")
 
     return FidelityAuditResponse(has_material_issues=False)
@@ -775,6 +1056,7 @@ def repair_script_fidelity(
     audit_result: dict,
     api_key: str | None = None,
     model_name: str | None = None,
+    job_id: str | None = None,
 ) -> PodcastScriptResponse:
     """
     Perform ONE controlled script repair pass for Brief/Standard script when verify=true.
@@ -836,12 +1118,51 @@ Return the corrected PodcastScriptResponse JSON now.
         },
     }
 
-    with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=payload, headers=headers)
+    t0 = datetime.now(UTC)
+    try:
+        with httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            resp = client.post(url, json=payload, headers=headers)
 
-    if resp.status_code == 200:
-        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return PodcastScriptResponse(**json.loads(raw_text))
+        if resp.status_code == 200:
+            result_json = resp.json()
+            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            record_ai_interaction(
+                job_id=job_id,
+                provider="gemini",
+                model=model,
+                operation="fidelity_repair",
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            return PodcastScriptResponse(**json.loads(raw_text))
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="fidelity_repair",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=f"HTTP {resp.status_code}: {resp.text}",
+        )
+    except Exception as e:
+        record_ai_interaction(
+            job_id=job_id,
+            provider="gemini",
+            model=model,
+            operation="fidelity_repair",
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=False,
+            error=e,
+        )
+        raise GeminiError(f"Failed to repair script fidelity: {e}")
 
     raise GeminiError("Failed to repair script fidelity.")
 

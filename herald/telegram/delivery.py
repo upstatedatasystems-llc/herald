@@ -346,3 +346,52 @@ def deliver_job_download(
         reply_to_message_id=reply_to_message_id,
     )
     return False
+
+
+def deliver_job_diagnostics(
+    db: Session,
+    client: TelegramClient,
+    job: PodcastJob,
+    chat_id: int,
+    reply_to_message_id: int | None = None,
+) -> bool:
+    """Deliver diagnostic summary card and support export ZIP to caller."""
+    from herald.services.diagnostics_export import generate_job_diagnostics_zip
+    from herald.telegram.formatters import format_diagnostics_card
+
+    card = format_diagnostics_card(job, db)
+    client.send_message(
+        chat_id=chat_id,
+        text=card,
+        reply_to_message_id=reply_to_message_id,
+        parse_mode="HTML",
+    )
+    zip_path = None
+    try:
+        zip_path = generate_job_diagnostics_zip(db, job)
+        if zip_path and zip_path.exists():
+            client.send_document(
+                chat_id=chat_id,
+                document_path=str(zip_path),
+                caption=f"🛠️ <b>Herald Diagnostics Bundle:</b> <code>{job.id[:8]}</code>",
+                parse_mode="HTML",
+                mime_type="application/zip",
+                reply_to_message_id=reply_to_message_id,
+            )
+            return True
+    except Exception as e:
+        logger.error(f"Failed to generate/send diagnostics ZIP for job '{job.id}': {e}")
+        client.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ <i>Error creating diagnostics ZIP: {html.escape(str(e))}</i>",
+            parse_mode="HTML",
+            reply_to_message_id=reply_to_message_id,
+        )
+        return False
+    finally:
+        if zip_path and zip_path.exists():
+            try:
+                zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return True
