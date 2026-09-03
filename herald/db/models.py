@@ -174,6 +174,7 @@ class PodcastJob(Base):
     metrics = relationship("JobProcessingMetric", back_populates="job", cascade="all, delete-orphan")
     tts_chunks = relationship("PodcastTTSChunk", back_populates="job", cascade="all, delete-orphan")
     ai_interactions = relationship("AIInteraction", back_populates="job", cascade="all, delete-orphan")
+    diagnostic_events = relationship("JobDiagnosticEvent", back_populates="job", cascade="all, delete-orphan")
 
 
 class PodcastTTSChunk(Base):
@@ -318,6 +319,10 @@ class AIInteraction(Base):
     provider = Column(String(50), nullable=False)
     model = Column(String(100), nullable=False)
     operation = Column(String(50), nullable=False)
+    attempt = Column(Integer, nullable=True, default=1)
+    http_status = Column(Integer, nullable=True)
+    provider_request_id = Column(String(128), nullable=True)
+    input_chars = Column(Integer, nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     duration_ms = Column(BigInteger, nullable=True)
@@ -327,10 +332,28 @@ class AIInteraction(Base):
     total_tokens = Column(Integer, nullable=True)
     error_category = Column(String(100), nullable=True)
     error_message = Column(Text, nullable=True)
+    request_json_sanitized = Column(JSON, nullable=True)
+    response_json_sanitized = Column(JSON, nullable=True)
     metadata_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
     job = relationship("PodcastJob", back_populates="ai_interactions")
+
+
+class JobDiagnosticEvent(Base):
+    __tablename__ = "job_diagnostic_events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    level = Column(String(16), nullable=False, default="INFO")
+    component = Column(String(32), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    message = Column(Text, nullable=False)
+    metadata_json_sanitized = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+
+    job = relationship("PodcastJob", back_populates="diagnostic_events")
 
 
 Index("idx_podcast_jobs_status_created", PodcastJob.status, PodcastJob.created_at)
@@ -341,6 +364,8 @@ Index("idx_job_processing_metrics_stage_created", JobProcessingMetric.stage, Job
 Index("idx_job_processing_metrics_job_seq", JobProcessingMetric.job_id, JobProcessingMetric.sequence_index)
 Index("idx_ai_interactions_job_created", AIInteraction.job_id, AIInteraction.created_at)
 Index("idx_ai_interactions_provider_created", AIInteraction.provider, AIInteraction.created_at)
+Index("idx_diag_events_job_time", JobDiagnosticEvent.job_id, JobDiagnosticEvent.timestamp)
+Index("idx_diag_events_comp_type", JobDiagnosticEvent.component, JobDiagnosticEvent.event_type)
 
 
 

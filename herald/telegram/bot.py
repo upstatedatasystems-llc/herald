@@ -518,11 +518,13 @@ def handle_telegram_command(
         deliver_job_download(db, client, job, chat_id=chat_id, reply_to_message_id=msg_id)
 
     elif cmd_clean == "diagnostics":
+        clean_args = args.strip() if args else ""
+        target_id = None if clean_args.lower() in ("latest", "") else clean_args
         job = resolve_user_job(
             db,
             telegram_user_id=user_id,
             telegram_chat_id=chat_id,
-            identifier=args,
+            identifier=target_id,
             completed_only=False,
         )
         if not job:

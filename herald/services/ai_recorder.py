@@ -1,6 +1,6 @@
 """
 Provider-Neutral AI Interaction Recording Service for Herald.
-Persists evidence of external AI calls (duration, tokens, success/failure, sanitized errors)
+Persists evidence of external AI calls (duration, tokens, success/failure, sanitized errors, request/response evidence)
 into the `ai_interactions` table for support diagnostics.
 """
 
@@ -23,6 +23,10 @@ def record_ai_interaction(
     operation: str,
     started_at: datetime,
     completed_at: datetime | None = None,
+    attempt: int = 1,
+    http_status: int | None = None,
+    provider_request_id: str | None = None,
+    input_chars: int | None = None,
     success: bool = True,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
@@ -30,6 +34,8 @@ def record_ai_interaction(
     error: Exception | str | None = None,
     error_category: str | None = None,
     error_message: str | None = None,
+    request_json: dict[str, Any] | None = None,
+    response_json: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     db: Any = None,
 ) -> str | None:
@@ -53,6 +59,8 @@ def record_ai_interaction(
         error_message = error_message or msg
 
     clean_meta = redact_dict(metadata) if metadata else None
+    clean_req = redact_dict(request_json) if request_json else None
+    clean_resp = redact_dict(response_json) if response_json else None
 
     # Derive total tokens if prompt and completion are provided
     if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
@@ -65,6 +73,10 @@ def record_ai_interaction(
         provider=str(provider or "unknown").lower(),
         model=str(model or "unknown"),
         operation=str(operation or "unknown"),
+        attempt=attempt,
+        http_status=http_status,
+        provider_request_id=str(provider_request_id) if provider_request_id else None,
+        input_chars=input_chars,
         started_at=started_at,
         completed_at=completed_at,
         duration_ms=duration_ms,
@@ -74,6 +86,8 @@ def record_ai_interaction(
         total_tokens=total_tokens,
         error_category=error_category,
         error_message=error_message,
+        request_json_sanitized=clean_req,
+        response_json_sanitized=clean_resp,
         metadata_json=clean_meta,
         created_at=datetime.now(UTC),
     )

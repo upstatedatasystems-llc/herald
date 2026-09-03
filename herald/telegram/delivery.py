@@ -348,6 +348,29 @@ def deliver_job_download(
     return False
 
 
+def format_diagnostics_caption(job: PodcastJob, file_size_bytes: int) -> str:
+    """Format structured, safe caption for diagnostic bundle delivery."""
+    from herald.core.pipeline import _resolve_response_title
+
+    title = html.escape(_resolve_response_title(job))
+    short_id = job.id[:8]
+    mode = html.escape(job.request_mode or "standard")
+    st = html.escape(job.status)
+    if file_size_bytes < 1024 * 1024:
+        size_str = f"{file_size_bytes / 1024:.1f} KB"
+    else:
+        size_str = f"{file_size_bytes / (1024 * 1024):.2f} MB"
+
+    return (
+        f"🛠️ <b>Herald Diagnostics Bundle</b>\n\n"
+        f"• <b>Episode:</b> {title}\n"
+        f"• <b>Job ID:</b> <code>{short_id}</code>\n"
+        f"• <b>Mode:</b> {mode}\n"
+        f"• <b>Status:</b> <code>{st}</code>\n"
+        f"• <b>Size:</b> {size_str}"
+    )
+
+
 def deliver_job_diagnostics(
     db: Session,
     client: TelegramClient,
@@ -357,6 +380,7 @@ def deliver_job_diagnostics(
 ) -> bool:
     """Deliver diagnostic summary card and support export ZIP to caller."""
     from herald.services.diagnostics_export import generate_job_diagnostics_zip
+    from herald.services.redaction import redact_text
     from herald.telegram.formatters import format_diagnostics_card
 
     card = format_diagnostics_card(job, db)
@@ -370,20 +394,22 @@ def deliver_job_diagnostics(
     try:
         zip_path = generate_job_diagnostics_zip(db, job)
         if zip_path and zip_path.exists():
+            zip_size = zip_path.stat().st_size
+            caption = format_diagnostics_caption(job, zip_size)
             client.send_document(
                 chat_id=chat_id,
                 document_path=str(zip_path),
-                caption=f"🛠️ <b>Herald Diagnostics Bundle:</b> <code>{job.id[:8]}</code>",
+                caption=caption,
                 parse_mode="HTML",
                 mime_type="application/zip",
                 reply_to_message_id=reply_to_message_id,
             )
             return True
     except Exception as e:
-        logger.error(f"Failed to generate/send diagnostics ZIP for job '{job.id}': {e}")
+        logger.error("Failed to generate/send diagnostics ZIP for job '%s': %s", job.id, redact_text(str(e)))
         client.send_message(
             chat_id=chat_id,
-            text=f"⚠️ <i>Error creating diagnostics ZIP: {html.escape(str(e))}</i>",
+            text="❌ <b>Diagnostics package generation failed.</b>\nPlease try again or review Herald server logs.",
             parse_mode="HTML",
             reply_to_message_id=reply_to_message_id,
         )

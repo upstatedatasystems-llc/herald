@@ -181,7 +181,21 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         "",
         "## Processing Summary",
         f"- **Overall Status**: `{job.status}`",
-        f"- **Gemini Scripting Model**: `{job.gemini_model or 'gemini-3.5-flash'}`",
+    ])
+
+    from herald.telegram.formatters import get_job_ai_identity
+
+    prov_name, model_name = get_job_ai_identity(job)
+    if prov_name:
+        lines.append(f"- **AI Provider**: `{prov_name}`")
+        lines.append(f"- **AI Scripting Model**: `{model_name or 'N/A'}`")
+    else:
+        lines.append("- **AI Provider**: `None (Literal / Deterministic Chunker)`")
+
+    if is_research and getattr(job, "research_model", None):
+        lines.append(f"- **Gemini Research Model**: `{job.research_model}`")
+
+    lines.extend([
         f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
         f"- **Configured TTS Chunk Size**: `{getattr(job, 'tts_chunk_chars', 500) or 500} chars`",
         f"- **Script Verification Setting**: `{bool(getattr(job, 'verify_final_script', False))}`",

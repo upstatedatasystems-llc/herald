@@ -28,6 +28,7 @@ from herald.gemini.client import (
     repair_research_script,
 )
 from herald.literal.script_generator import generate_literal_script
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.performance_metrics import record_stage_metric
 
@@ -357,7 +358,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
 
     transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
     transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
+    record_job_diagnostic_event(job.id, "INFO", "intake", "INTAKE_RECEIVED", f"Accepted {req.transport} intake request (mode={mode_val})", db=db)
     transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
+    record_job_diagnostic_event(job.id, "INFO", "scripting", "SCRIPTING_BEGIN", f"Starting script generation for mode '{mode_val}'", db=db)
 
     # 5. Generate Script
     try:
@@ -448,7 +451,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job_id=job.id,
             )
             job.script_json = script_resp.model_dump()
-            job.gemini_model = getattr(provider, "model_name", settings.GEMINI_MODEL)
+            job.gemini_model = getattr(provider, "configured_model", settings.GEMINI_MODEL)
             db.commit()
             record_stage_metric(
                 job_id=job.id,
@@ -460,6 +463,15 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             )
 
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-core")
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "scripting",
+            "SCRIPTING_COMPLETE",
+            "Script generated successfully",
+            metadata={"segments_count": len((job.script_json or {}).get("segments", []))},
+            db=db,
+        )
 
         script_obj = job.script_json or {}
         ep_title = _resolve_response_title(
@@ -472,6 +484,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.approval_requested_at = None
             job.telegram_approval_message_id = None
             transition_job_state(db, job, JobState.AWAITING_APPROVAL.value, component="herald-core")
+            record_job_diagnostic_event(job.id, "INFO", "approval", "APPROVAL_REQUESTED", "Job held for user approval", db=db)
             db.commit()
             return HeraldResponse(
                 job_id=job.id,
@@ -485,6 +498,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             )
 
         transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-core")
+        record_job_diagnostic_event(job.id, "INFO", "queue", "QUEUED_FOR_TTS", "Job queued for Kokoro TTS synthesis", db=db)
         db.commit()
 
         return HeraldResponse(
@@ -499,6 +513,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         )
     except Exception as e:
         logger.error(f"Script generation failure for job '{job.id}': {e}")
+        record_job_diagnostic_event(job.id, "ERROR", "scripting", "SCRIPTING_FAILED", f"Script generation failed: {e}", db=db)
         transition_job_state(
             db,
             job,
