@@ -1,6 +1,8 @@
 import logging
 import math
 import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Semaphore
@@ -220,3 +222,63 @@ def reset_semaphores_for_tests():
     """Reset global semaphores singleton (for unit testing purposes only)."""
     global _GLOBAL_SEMAPHORES
     _GLOBAL_SEMAPHORES = None
+
+
+@contextmanager
+def tts_slot_lock(db=None, timeout_seconds: float = 60.0):
+    """
+    Acquire a global TTS synthesis slot.
+    On PostgreSQL, uses an advisory lock slot pool across all containers/processes.
+    On SQLite/test environments, uses the in-process global TTS semaphore.
+    """
+    is_postgres = False
+    if db is not None:
+        try:
+            bind = db.get_bind()
+            if bind and bind.dialect.name == "postgresql":
+                is_postgres = True
+        except Exception:
+            pass
+
+    if is_postgres and db is not None:
+        from sqlalchemy import text as sa_text
+
+        from herald.config import settings
+        base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", 920000)
+        num_slots = max(1, getattr(settings, "HERALD_TTS_GLOBAL_SLOTS", 3))
+        t_start = time.monotonic()
+        acquired_key = None
+
+        while (time.monotonic() - t_start) < timeout_seconds:
+            for slot_idx in range(num_slots):
+                key = base_key + slot_idx
+                try:
+                    res = db.execute(sa_text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
+                    if res is True or res == 1:
+                        acquired_key = key
+                        break
+                except Exception as e:
+                    logger.debug(f"pg_try_advisory_lock failed on key {key}: {e}")
+            if acquired_key is not None:
+                break
+            time.sleep(0.1)
+
+        if acquired_key is None:
+            raise TimeoutError(f"Timed out waiting for available TTS slot after {timeout_seconds}s")
+
+        try:
+            yield acquired_key
+        finally:
+            try:
+                db.execute(sa_text("SELECT pg_advisory_unlock(:key)"), {"key": acquired_key})
+            except Exception as e:
+                logger.warning(f"Failed to release pg_advisory_unlock for key {acquired_key}: {e}")
+    else:
+        sem = get_semaphores().global_tts
+        acquired = sem.acquire(timeout=timeout_seconds)
+        if not acquired:
+            raise TimeoutError(f"Timed out waiting for local TTS semaphore after {timeout_seconds}s")
+        try:
+            yield None
+        finally:
+            sem.release()

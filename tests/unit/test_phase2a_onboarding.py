@@ -158,8 +158,8 @@ def test_authenticated_start_and_help(db_session):
     assert "/status" in help_text
     assert "/queue" in help_text
     assert "/settings" in help_text
-    assert "Upcoming capabilities: /voices, /download, /diagnostics" in help_text
-    assert "Upcoming capabilities: /settings" not in help_text
+    assert "/voices" in help_text
+    assert "/download" in help_text
 
 
 def test_ai_check_command_aliases(db_session, monkeypatch):

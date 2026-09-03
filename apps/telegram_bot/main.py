@@ -70,6 +70,8 @@ def print_startup_banner():
 TELEGRAM_BOT_COMMANDS = [
     {"command": "start", "description": "Start bot and view quick-start guide"},
     {"command": "help", "description": "View usage guide, modes, and directives"},
+    {"command": "voices", "description": "Browse voices, hear samples, and set default"},
+    {"command": "download", "description": "Download podcast audio MP3"},
     {"command": "status", "description": "View system health, queue depth, and uptime"},
     {"command": "ai_check", "description": "Test AI provider connection"},
     {"command": "queue", "description": "View active podcast queue"},

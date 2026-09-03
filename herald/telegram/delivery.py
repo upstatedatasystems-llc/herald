@@ -111,7 +111,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     max_bytes = getattr(settings, "TELEGRAM_MAX_AUDIO_BYTES", 50 * 1024 * 1024)
 
     from herald.db.models import PodcastTTSChunk
-    from herald.telegram.formatters import format_completion
+    from herald.telegram.formatters import format_completion, format_completion_markup
 
     chunks_count = (
         db.query(PodcastTTSChunk)
@@ -127,6 +127,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         actual_chunks_count=chunks_count,
         file_size_bytes=file_size_bytes,
     )
+    completion_markup = format_completion_markup(job)
 
     # Handle oversized audio
     if file_size_bytes > max_bytes:
@@ -162,6 +163,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             performer="Herald",
             duration=dur_secs,
             reply_to_message_id=reply_id,
+            reply_markup=completion_markup,
         )
         if res and isinstance(res, dict):
             if res.get("message_id"):
@@ -178,6 +180,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                 document_path=audio_path,
                 caption=caption,
                 reply_to_message_id=reply_id,
+                reply_markup=completion_markup,
             )
             if res and isinstance(res, dict):
                 if res.get("message_id"):

@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from herald.core.models import HeraldRequest
 from herald.core.pipeline import process_herald_request
@@ -15,12 +14,14 @@ from herald.telegram.client import TelegramClient
 
 
 @pytest.fixture
-def db_factory():
+def db_factory(tmp_path):
+    db_file = tmp_path / "concurrency_approval.db"
     engine = create_engine(
-        "sqlite:///:memory:",
+        f"sqlite:///{db_file}?timeout=30",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
     )
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine)
     return TestingSession

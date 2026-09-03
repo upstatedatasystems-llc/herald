@@ -25,12 +25,14 @@ from herald.extraction.email_parser import (
     URL_REGEX,
 )
 from herald.services.eta_calculator import calculate_job_eta
+from herald.services.voice_manager import VOICE_METADATA, ensure_voice_sample
 from herald.telegram.auth import (
     get_effective_user_preferences,
     get_paired_owner,
     has_owner,
     is_user_authorized,
     set_user_confirm_before_tts,
+    set_user_default_voice,
     verify_and_claim_pairing_code,
 )
 from herald.telegram.client import TelegramClient
@@ -41,7 +43,9 @@ from herald.telegram.formatters import (
     format_queued,
     format_quickstart,
     format_settings,
+    format_voices_browser,
 )
+from herald.telegram.resolver import resolve_user_job
 from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.telegram.bot")
@@ -424,6 +428,82 @@ def handle_telegram_command(
             reply_to_message_id=msg_id,
             parse_mode="HTML",
             reply_markup=reply_markup,
+        )
+
+    elif cmd_clean == "voices":
+        user_prefs = get_effective_user_preferences(db, user_id)
+        voices_text, reply_markup = format_voices_browser(
+            current_default=user_prefs.get("default_voice", "af_heart")
+        )
+        client.send_message(
+            chat_id=chat_id,
+            text=voices_text,
+            reply_markup=reply_markup,
+            reply_to_message_id=msg_id,
+            parse_mode="HTML",
+        )
+
+    elif cmd_clean == "download":
+        job = resolve_user_job(db, user_id=user_id, chat_id=chat_id, query_or_id=args)
+        if not job:
+            client.send_message(
+                chat_id=chat_id,
+                text="ℹ️ <b>No completed podcast found to download.</b>\n\nProvide an episode ID (e.g. <code>/download &lt;id&gt;</code>) or generate a podcast first.",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            return
+
+        title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
+        caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
+
+        # 1. Reusable document file_id
+        if job.telegram_document_file_id:
+            try:
+                client.send_document(
+                    chat_id=chat_id,
+                    file_id=job.telegram_document_file_id,
+                    caption=caption,
+                    reply_to_message_id=msg_id,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
+
+        # 2. Local audio path
+        if job.local_audio_path and os.path.exists(job.local_audio_path):
+            try:
+                res = client.send_document(
+                    chat_id=chat_id,
+                    document_path=job.local_audio_path,
+                    caption=caption,
+                    reply_to_message_id=msg_id,
+                )
+                if res and isinstance(res, dict) and (res.get("document") or {}).get("file_id"):
+                    job.telegram_document_file_id = res["document"]["file_id"]
+                    db.commit()
+                return
+            except Exception as e:
+                logger.error(f"Failed uploading local MP3 document: {e}")
+
+        # 3. Audio file_id fallback
+        if job.telegram_audio_file_id:
+            try:
+                client.send_audio(
+                    chat_id=chat_id,
+                    file_id=job.telegram_audio_file_id,
+                    caption=caption,
+                    reply_to_message_id=msg_id,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed sending audio by file_id '{job.telegram_audio_file_id}': {e}")
+
+        client.send_message(
+            chat_id=chat_id,
+            text="⚠️ <b>Audio file is no longer available on server.</b>",
+            reply_to_message_id=msg_id,
+            parse_mode="HTML",
         )
 
     elif cmd_clean == "readme":
@@ -862,6 +942,124 @@ def handle_telegram_callback_query(
             else:
                 client.answer_callback_query(cb_id, text=f"Cannot cancel job in state {job.status}.", show_alert=True)
                 return
+
+    elif raw_data.startswith("h2:download:"):
+        job_id = raw_data[len("h2:download:"):]
+        job = resolve_user_job(db, user_id=user_id, chat_id=chat_id, query_or_id=job_id)
+        if not job:
+            client.answer_callback_query(cb_id, text="Podcast not found or access denied.", show_alert=True)
+            return
+
+        client.answer_callback_query(cb_id, text="Sending MP3 file...")
+        title = (job.script_json or {}).get("episode_title") or job.custom_title or "Herald Episode"
+        caption = f"🎙️ <b>{html.escape(title)}</b>\nJob ID: <code>{html.escape(job.id[:8])}</code>"
+
+        # 1. Reusable document file_id
+        if job.telegram_document_file_id:
+            try:
+                client.send_document(
+                    chat_id=chat_id,
+                    file_id=job.telegram_document_file_id,
+                    caption=caption,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed sending document by file_id '{job.telegram_document_file_id}': {e}")
+
+        # 2. Local audio path
+        if job.local_audio_path and os.path.exists(job.local_audio_path):
+            try:
+                res = client.send_document(
+                    chat_id=chat_id,
+                    document_path=job.local_audio_path,
+                    caption=caption,
+                )
+                if res and isinstance(res, dict) and (res.get("document") or {}).get("file_id"):
+                    job.telegram_document_file_id = res["document"]["file_id"]
+                    db.commit()
+                return
+            except Exception as e:
+                logger.error(f"Failed uploading local MP3 document: {e}")
+
+        # 3. Audio file_id fallback
+        if job.telegram_audio_file_id:
+            try:
+                client.send_audio(
+                    chat_id=chat_id,
+                    file_id=job.telegram_audio_file_id,
+                    caption=caption,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed sending audio by file_id '{job.telegram_audio_file_id}': {e}")
+
+        client.send_message(
+            chat_id=chat_id,
+            text="⚠️ <b>Audio file is no longer available on server.</b>",
+            parse_mode="HTML",
+        )
+        return
+
+    elif raw_data.startswith("h2:voice:set:"):
+        v_name = raw_data[len("h2:voice:set:"):]
+        allowed = settings.get_allowed_voices_list()
+        if v_name not in allowed:
+            client.answer_callback_query(cb_id, text=f"Invalid voice '{v_name}'.", show_alert=True)
+            return
+
+        set_user_default_voice(db, user_id=user_id, voice=v_name, chat_id=chat_id)
+        meta = VOICE_METADATA.get(v_name, {})
+        disp_name = meta.get("display_name", v_name)
+        client.answer_callback_query(cb_id, text=f"Default voice set to {disp_name} ({v_name}).")
+        voices_text, reply_markup = format_voices_browser(current_default=v_name)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=voices_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.debug(f"Failed to edit voices browser: {e}")
+        return
+
+    elif raw_data.startswith("h2:voice:sample:"):
+        v_name = raw_data[len("h2:voice:sample:"):]
+        allowed = settings.get_allowed_voices_list()
+        if v_name not in allowed:
+            client.answer_callback_query(cb_id, text=f"Invalid voice '{v_name}'.", show_alert=True)
+            return
+
+        client.answer_callback_query(cb_id, text=f"Preparing voice sample for {v_name}...")
+        try:
+            sample_path = ensure_voice_sample(voice=v_name, db=db)
+            meta = VOICE_METADATA.get(v_name, {})
+            disp_name = meta.get("display_name", v_name)
+            caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
+            sample_markup = {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": f"⭐ Set as Default ({disp_name})",
+                            "callback_data": f"h2:voice:set:{v_name}",
+                        }
+                    ]
+                ]
+            }
+            client.send_audio(
+                chat_id=chat_id,
+                audio_path=sample_path,
+                title=f"Sample: {disp_name}",
+                performer="Herald",
+                caption=caption,
+                reply_markup=sample_markup,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate voice sample for '{v_name}': {e}")
+            client.send_message(chat_id=chat_id, text=f"⚠️ Failed to generate voice sample: {e}")
+        return
 
     else:
         # Unknown / future callback actions safely acknowledged

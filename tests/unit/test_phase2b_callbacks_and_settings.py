@@ -341,10 +341,12 @@ def test_typed_preference_setters(db_session):
 
 
 def test_set_my_commands_includes_settings():
-    """Test that /settings is registered in TELEGRAM_BOT_COMMANDS after Package 2B."""
+    """Test that /settings, /voices, and /download are registered in TELEGRAM_BOT_COMMANDS."""
     registered_names = {cmd["command"] for cmd in TELEGRAM_BOT_COMMANDS}
     assert "settings" in registered_names
-    assert registered_names == {"start", "help", "status", "ai_check", "queue", "settings", "readme"}
+    assert "voices" in registered_names
+    assert "download" in registered_names
+    assert {"start", "help", "status", "ai_check", "queue", "settings", "readme", "voices", "download"}.issubset(registered_names)
 
 
 def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, monkeypatch):

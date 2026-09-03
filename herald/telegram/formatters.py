@@ -4,6 +4,7 @@ All dynamic text values MUST be escaped with html.escape when used in HTML parse
 """
 
 import html
+from typing import Any
 
 from herald.config import settings
 from herald.db.models import PodcastJob, RequestMode
@@ -78,12 +79,13 @@ def format_help() -> str:
         "<b>Commands:</b>\n"
         "/start — Quick-start guide\n"
         "/help — Full usage and directive reference\n"
+        "/voices — Browse voices, hear samples, and set default voice\n"
+        "/download — Download latest (or specific) episode MP3 file\n"
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"
         "/settings — Preferences and pre-TTS confirmation toggle\n"
-        "/readme — Project documentation\n\n"
-        "<i>Upcoming capabilities: /voices, /download, /diagnostics</i>"
+        "/readme — Project documentation"
     )
 
 
@@ -289,3 +291,61 @@ def format_completion(
         f"{proc_line}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>"
     )
+
+
+def format_completion_markup(job: PodcastJob) -> dict[str, Any]:
+    """Return inline keyboard markup with Download MP3 button for completed podcasts."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📥 Download MP3",
+                    "callback_data": f"h2:download:{job.id}",
+                }
+            ]
+        ]
+    }
+
+
+def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
+    """
+    Format interactive voice browser message and generate inline keyboard markup.
+    Returns:
+        (text, reply_markup_dict)
+    """
+    from herald.services.voice_manager import get_all_voice_metadata
+
+    curr_clean = current_default.lower().strip()
+    voices = get_all_voice_metadata()
+
+    lines = [
+        "🗣️ <b>Herald Voice Catalog</b>\n",
+        "Select a voice below to preview a sample or set your default voice:\n",
+    ]
+
+    keyboard = []
+    for meta in voices:
+        vid = meta["voice_id"]
+        dname = meta["display_name"]
+        gender = meta["gender"]
+        desc = meta["description"]
+        is_curr = vid == curr_clean
+
+        marker = " 🟢 <i>(Default)</i>" if is_curr else ""
+        lines.append(f"• <b>{html.escape(dname)}</b> (<code>{html.escape(vid)}</code>) — <i>{html.escape(gender)}</i>{marker}\n  {html.escape(desc)}")
+
+        btn_sample = {
+            "text": f"🔊 Sample {dname}",
+            "callback_data": f"h2:voice:sample:{vid}",
+        }
+        btn_set = {
+            "text": "✅ Default" if is_curr else f"⭐ Set {dname}",
+            "callback_data": f"h2:voice:set:{vid}",
+        }
+        keyboard.append([btn_sample, btn_set])
+
+    lines.append("\n<i>Tip: You can also use <code>Voice: <name></code> at the top of any message.</i>")
+    text = "\n".join(lines)
+    reply_markup = {"inline_keyboard": keyboard}
+
+    return text, reply_markup
