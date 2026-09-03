@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class HeraldRequest(BaseModel):
     """Transport-neutral input representation for Herald podcast jobs."""
+
     source_text: str | None = None
     source_url: str | None = None
     request_mode: str = "literal"
@@ -24,6 +25,7 @@ class HeraldRequest(BaseModel):
 
 class HeraldResponse(BaseModel):
     """Transport-neutral response returned after core intake & script queueing."""
+
     job_id: str
     status: str
     request_mode: str

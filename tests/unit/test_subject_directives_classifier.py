@@ -43,7 +43,9 @@ def test_parse_subject_directives_extended():
     assert chunk4 == 1000
     assert verify4 is True
 
-    mode5, depth5, chunk5, verify5 = parse_subject_directives("Podcast: Research High verify chunk-1000")
+    mode5, depth5, chunk5, verify5 = parse_subject_directives(
+        "Podcast: Research High verify chunk-1000"
+    )
     assert mode5 == RequestMode.RESEARCH
     assert depth5 == "high"
     assert chunk5 == 1000
@@ -94,19 +96,29 @@ def test_invalid_directive_rejected():
 
 def test_source_classification():
     # Bare URL -> url mode
-    c1, url1 = classify_source_content("https://example.com/article", ["https://example.com/article"])
+    c1, url1 = classify_source_content(
+        "https://example.com/article", ["https://example.com/article"]
+    )
     assert c1 == SourceClassification.URL
     assert url1 == "https://example.com/article"
 
     # Article label + URL -> url mode
-    c2, url2 = classify_source_content("Article: https://example.com/article", ["https://example.com/article"])
+    c2, url2 = classify_source_content(
+        "Article: https://example.com/article", ["https://example.com/article"]
+    )
     assert c2 == SourceClassification.URL
 
     # Commentary + URL -> email_body mode
-    c3, url3 = classify_source_content("Please summarize this critically:\nhttps://example.com/article", ["https://example.com/article"])
+    c3, url3 = classify_source_content(
+        "Please summarize this critically:\nhttps://example.com/article",
+        ["https://example.com/article"],
+    )
     assert c3 == SourceClassification.EMAIL_BODY
     assert url3 is None
 
     # Multiple bare URLs -> invalid_multiple_urls mode
-    c4, url4 = classify_source_content("https://example.com/a\nhttps://example.com/b", ["https://example.com/a", "https://example.com/b"])
+    c4, url4 = classify_source_content(
+        "https://example.com/a\nhttps://example.com/b",
+        ["https://example.com/a", "https://example.com/b"],
+    )
     assert c4 == SourceClassification.INVALID_MULTIPLE_URLS

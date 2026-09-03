@@ -7,7 +7,10 @@ from herald.services.email_formatter import (
 
 def test_get_canonical_drive_url():
     # 1. Web link present -> returns web_link
-    assert get_canonical_drive_url("id123", "https://drive.google.com/custom") == "https://drive.google.com/custom"
+    assert (
+        get_canonical_drive_url("id123", "https://drive.google.com/custom")
+        == "https://drive.google.com/custom"
+    )
 
     # 2. Web link missing, file_id present -> returns canonical fallback URL
     assert get_canonical_drive_url("id123", None) == "https://drive.google.com/file/d/id123/view"

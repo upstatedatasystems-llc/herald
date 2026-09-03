@@ -21,8 +21,18 @@ class SecretRedactingFormatter(logging.Formatter):
         # Redact generic bot token patterns in URLs, e.g. /bot123456:ABC.../
         s = re.sub(r"/bot\d+:[a-zA-Z0-9_-]+/", "/bot[REDACTED_BOT_TOKEN]/", s)
         # Redact x-goog-api-key or authorization headers
-        s = re.sub(r"(x-goog-api-key['\"]?:\s*['\"])[^'\"]+(['\"])", r"\1[REDACTED_API_KEY]\2", s, flags=re.IGNORECASE)
-        s = re.sub(r"(authorization['\"]?:\s*['\"](?:Bearer\s+)?)[^'\"]+(['\"])", r"\1[REDACTED_AUTH]\2", s, flags=re.IGNORECASE)
+        s = re.sub(
+            r"(x-goog-api-key['\"]?:\s*['\"])[^'\"]+(['\"])",
+            r"\1[REDACTED_API_KEY]\2",
+            s,
+            flags=re.IGNORECASE,
+        )
+        s = re.sub(
+            r"(authorization['\"]?:\s*['\"](?:Bearer\s+)?)[^'\"]+(['\"])",
+            r"\1[REDACTED_AUTH]\2",
+            s,
+            flags=re.IGNORECASE,
+        )
         return s
 
 
@@ -35,8 +45,18 @@ class SecretRedactingFilter(logging.Filter):
             for pattern, placeholder in _SECRET_PATTERNS:
                 msg = pattern.sub(placeholder, msg)
             msg = re.sub(r"/bot\d+:[a-zA-Z0-9_-]+/", "/bot[REDACTED_BOT_TOKEN]/", msg)
-            msg = re.sub(r"(x-goog-api-key['\"]?:\s*['\"])[^'\"]+(['\"])", r"\1[REDACTED_API_KEY]\2", msg, flags=re.IGNORECASE)
-            msg = re.sub(r"(authorization['\"]?:\s*['\"](?:Bearer\s+)?)[^'\"]+(['\"])", r"\1[REDACTED_AUTH]\2", msg, flags=re.IGNORECASE)
+            msg = re.sub(
+                r"(x-goog-api-key['\"]?:\s*['\"])[^'\"]+(['\"])",
+                r"\1[REDACTED_API_KEY]\2",
+                msg,
+                flags=re.IGNORECASE,
+            )
+            msg = re.sub(
+                r"(authorization['\"]?:\s*['\"](?:Bearer\s+)?)[^'\"]+(['\"])",
+                r"\1[REDACTED_AUTH]\2",
+                msg,
+                flags=re.IGNORECASE,
+            )
             record.msg = msg
         return True
 
@@ -59,7 +79,11 @@ def setup_secure_logging() -> None:
     for h in root.handlers:
         h.addFilter(redacting_filter)
         if h.formatter:
-            fmt = h.formatter._fmt if hasattr(h.formatter, "_fmt") else "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+            fmt = (
+                h.formatter._fmt
+                if hasattr(h.formatter, "_fmt")
+                else "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+            )
             h.setFormatter(SecretRedactingFormatter(fmt))
 
     # Suppress verbose httpx/httpcore request line logging in production

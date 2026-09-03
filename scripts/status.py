@@ -3,12 +3,14 @@
 Herald Status CLI Script.
 Queries database and reports system health and active job queue counts.
 """
+
 import sys
-import os
+
 from sqlalchemy import text
+
 from herald.config import settings
 from herald.db.connection import SessionLocal
-from herald.db.models import PodcastJob, JobState
+from herald.db.models import JobState, PodcastJob
 
 
 def get_status_report():

@@ -92,7 +92,9 @@ class TTSResourceMonitor:
             self._running = True
             self.samples.clear()
             self._start_time_mono = time.monotonic()
-            self._thread = threading.Thread(target=self._sample_loop, daemon=True, name="herald-tts-monitor")
+            self._thread = threading.Thread(
+                target=self._sample_loop, daemon=True, name="herald-tts-monitor"
+            )
             self._thread.start()
         except Exception as e:
             logger.warning(f"Could not start TTS resource monitor thread: {e}")
@@ -143,6 +145,7 @@ class TTSResourceMonitor:
                 if meminfo["available_mb"] == 0.0 and sys.platform == "win32":
                     try:
                         import psutil
+
                         vm = psutil.virtual_memory()
                         sw = psutil.swap_memory()
                         meminfo["available_mb"] = round(vm.available / (1024 * 1024), 2)
@@ -169,7 +172,11 @@ class TTSResourceMonitor:
     def get_aggregates(self) -> dict[str, Any]:
         """Compute summary aggregates safely without throwing exceptions."""
         try:
-            wall_ms = max(0, int((self._stop_time_mono - self._start_time_mono) * 1000)) if self._start_time_mono > 0 else 0
+            wall_ms = (
+                max(0, int((self._stop_time_mono - self._start_time_mono) * 1000))
+                if self._start_time_mono > 0
+                else 0
+            )
             with self._lock:
                 samples_copy = list(self.samples)
 
@@ -191,7 +198,9 @@ class TTSResourceMonitor:
 
             cpu_vals = [s["cpu_percent"] for s in samples_copy]
             proc_mem_vals = [s["proc_memory_mb"] for s in samples_copy]
-            avail_mem_vals = [s["available_memory_mb"] for s in samples_copy if s["available_memory_mb"] > 0]
+            avail_mem_vals = [
+                s["available_memory_mb"] for s in samples_copy if s["available_memory_mb"] > 0
+            ]
             swap_vals = [s["swap_used_mb"] for s in samples_copy]
 
             avg_cpu = round(sum(cpu_vals) / len(cpu_vals), 2) if cpu_vals else 0.0

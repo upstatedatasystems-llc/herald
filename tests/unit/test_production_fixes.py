@@ -127,7 +127,10 @@ def test_delivery_claim_single_row_lock_and_metrics_ordering(db_session: Session
     # Verify metric was recorded post-commit
     m = (
         db_session.query(JobProcessingMetric)
-        .filter(JobProcessingMetric.job_id == claimed_id, JobProcessingMetric.stage == "DELIVERY_DISPATCH_WAIT")
+        .filter(
+            JobProcessingMetric.job_id == claimed_id,
+            JobProcessingMetric.stage == "DELIVERY_DISPATCH_WAIT",
+        )
         .first()
     )
     assert m is not None

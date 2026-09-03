@@ -40,7 +40,9 @@ class TelegramClient:
             return message.replace(self._token, "[REDACTED_BOT_TOKEN]")
         return message
 
-    def _request(self, method: str, endpoint: str, timeout: float = 30.0, **kwargs: Any) -> dict[str, Any]:
+    def _request(
+        self, method: str, endpoint: str, timeout: float = 30.0, **kwargs: Any
+    ) -> dict[str, Any]:
         if not self.is_configured:
             raise TelegramAPIError("Telegram bot token is not configured.")
 
@@ -87,9 +89,13 @@ class TelegramClient:
             name = (cmd.get("command") or "").strip().lower()
             desc = (cmd.get("description") or "").strip()
             if not cmd_pattern.match(name):
-                raise ValueError(f"Invalid Telegram command name '{name}'. Must match ^[a-z0-9_]{{1,32}}$")
+                raise ValueError(
+                    f"Invalid Telegram command name '{name}'. Must match ^[a-z0-9_]{{1,32}}$"
+                )
             if not desc or len(desc) > 256:
-                raise ValueError(f"Command description for '{name}' must be between 1 and 256 characters.")
+                raise ValueError(
+                    f"Command description for '{name}' must be between 1 and 256 characters."
+                )
             validated_cmds.append({"command": name, "description": desc})
 
         payload: dict[str, Any] = {"commands": validated_cmds}
@@ -243,7 +249,9 @@ class TelegramClient:
 
                 if reply_markup:
                     data["reply_markup"] = (
-                        json.dumps(reply_markup) if isinstance(reply_markup, (dict, list)) else str(reply_markup)
+                        json.dumps(reply_markup)
+                        if isinstance(reply_markup, (dict, list))
+                        else str(reply_markup)
                     )
 
                 with open(p, "rb") as f:
@@ -254,7 +262,9 @@ class TelegramClient:
             res_json = resp.json()
             if not res_json.get("ok"):
                 desc = res_json.get("description", "Failed to upload audio")
-                raise TelegramAPIError(self._sanitize(f"sendAudio failed ({resp.status_code}): {desc}"))
+                raise TelegramAPIError(
+                    self._sanitize(f"sendAudio failed ({resp.status_code}): {desc}")
+                )
             return res_json.get("result", {})
         except (TelegramAPIError, FileNotFoundError, ValueError):
             raise
@@ -301,7 +311,9 @@ class TelegramClient:
 
                 if reply_markup:
                     data["reply_markup"] = (
-                        json.dumps(reply_markup) if isinstance(reply_markup, (dict, list)) else str(reply_markup)
+                        json.dumps(reply_markup)
+                        if isinstance(reply_markup, (dict, list))
+                        else str(reply_markup)
                     )
 
                 if mime_type:
@@ -322,7 +334,9 @@ class TelegramClient:
             res_json = resp.json()
             if not res_json.get("ok"):
                 desc = res_json.get("description", "Failed to upload document")
-                raise TelegramAPIError(self._sanitize(f"sendDocument failed ({resp.status_code}): {desc}"))
+                raise TelegramAPIError(
+                    self._sanitize(f"sendDocument failed ({resp.status_code}): {desc}")
+                )
             return res_json.get("result", {})
         except (TelegramAPIError, FileNotFoundError, ValueError):
             raise

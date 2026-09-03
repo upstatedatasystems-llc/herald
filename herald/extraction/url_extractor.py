@@ -35,7 +35,9 @@ BOT_PAYWALL_MARKERS = (
 )
 
 
-def unmap_ipv6(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+def unmap_ipv6(
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     """Unmap IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1 -> 127.0.0.1)."""
     if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
         return ip_obj.ipv4_mapped
@@ -53,7 +55,14 @@ def is_ip_allowed(ip_str: str) -> bool:
     except ValueError:
         return False
 
-    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+    ):
         return False
 
     ip_clean = str(ip)
@@ -71,7 +80,9 @@ def validate_url_host(url: str) -> tuple[str, int, str]:
         raise SSRFVulnerabilityError(f"Malformed URL: {e}")
 
     if parsed.scheme.lower() not in ("http", "https"):
-        raise SSRFVulnerabilityError(f"Unsupported scheme: '{parsed.scheme}'. Only HTTP and HTTPS are permitted.")
+        raise SSRFVulnerabilityError(
+            f"Unsupported scheme: '{parsed.scheme}'. Only HTTP and HTTPS are permitted."
+        )
 
     if parsed.username or parsed.password:
         raise SSRFVulnerabilityError("URLs with embedded user credentials are not permitted.")
@@ -116,6 +127,7 @@ class SSRFSafeTransport(httpx.HTTPTransport):
     HTTPTransport that binds socket connections directly to pre-validated public IP addresses
     while preserving Host header, TLS SNI, and certificate hostname verification.
     """
+
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
         hostname, port, resolved_ip = validate_url_host(url_str)
@@ -155,7 +167,9 @@ def extract_article_from_url(
         elapsed = time.monotonic() - start_time
         remaining_timeout = timeout_seconds - elapsed
         if remaining_timeout <= 0:
-            raise ArticleExtractionError(f"Total extraction elapsed deadline ({timeout_seconds}s) exceeded.")
+            raise ArticleExtractionError(
+                f"Total extraction elapsed deadline ({timeout_seconds}s) exceeded."
+            )
 
         if current_url in seen_urls and retries_429 == 0:
             raise ArticleExtractionError("Redirect loop detected")
@@ -177,11 +191,15 @@ def extract_article_from_url(
                     if response.is_redirect:
                         redirect_count += 1
                         if redirect_count > max_redirects:
-                            raise ArticleExtractionError(f"Exceeded maximum redirect limit of {max_redirects}")
+                            raise ArticleExtractionError(
+                                f"Exceeded maximum redirect limit of {max_redirects}"
+                            )
 
                         location = response.headers.get("location")
                         if not location:
-                            raise ArticleExtractionError("Redirect response missing Location header")
+                            raise ArticleExtractionError(
+                                "Redirect response missing Location header"
+                            )
 
                         next_url = urljoin(current_url, location)
                         validate_url_host(next_url)
@@ -193,26 +211,38 @@ def extract_article_from_url(
                             retries_429 += 1
                             time.sleep(1.0 * retries_429)
                             continue
-                        raise SourceAccessBlockedError(f"Publisher returned HTTP 429 Too Many Requests after retries: {current_url}")
+                        raise SourceAccessBlockedError(
+                            f"Publisher returned HTTP 429 Too Many Requests after retries: {current_url}"
+                        )
 
                     if response.status_code in (401, 403):
-                        raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (HTTP {response.status_code}): {current_url}")
+                        raise SourceAccessBlockedError(
+                            f"Publisher blocked automated retrieval (HTTP {response.status_code}): {current_url}"
+                        )
 
                     if response.status_code != 200:
-                        raise ArticleExtractionError(f"Server returned non-200 status code: {response.status_code}")
+                        raise ArticleExtractionError(
+                            f"Server returned non-200 status code: {response.status_code}"
+                        )
 
                     content_type = response.headers.get("content-type", "").lower()
                     if "text/html" not in content_type and "text/plain" not in content_type:
-                        raise ArticleExtractionError(f"Unsupported content type '{content_type}'. Expected HTML or plain text.")
+                        raise ArticleExtractionError(
+                            f"Unsupported content type '{content_type}'. Expected HTML or plain text."
+                        )
 
                     body_chunks = []
                     bytes_read = 0
                     for chunk in response.iter_bytes(chunk_size=8192):
                         if time.monotonic() - start_time > timeout_seconds:
-                            raise ArticleExtractionError("Total extraction elapsed deadline exceeded during stream read")
+                            raise ArticleExtractionError(
+                                "Total extraction elapsed deadline exceeded during stream read"
+                            )
                         bytes_read += len(chunk)
                         if bytes_read > max_bytes:
-                            raise ArticleExtractionError(f"Response size exceeds maximum limit of {max_bytes} bytes")
+                            raise ArticleExtractionError(
+                                f"Response size exceeds maximum limit of {max_bytes} bytes"
+                            )
                         body_chunks.append(chunk)
 
                     content_bytes = b"".join(body_chunks)
@@ -232,9 +262,13 @@ def extract_article_from_url(
     title_lower = title.lower()
     for marker in BOT_PAYWALL_MARKERS:
         if marker in title_lower or (marker in html_lower and len(html_text) < 5000):
-            raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (bot/paywall/interstitial marker detected): {current_url}")
+            raise SourceAccessBlockedError(
+                f"Publisher blocked automated retrieval (bot/paywall/interstitial marker detected): {current_url}"
+            )
 
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]):
+    for tag in soup(
+        ["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]
+    ):
         tag.extract()
 
     main_container = soup.find("article") or soup.find("main") or soup.find("body") or soup
@@ -252,8 +286,12 @@ def extract_article_from_url(
         # Check if the page had paywall/interstitial clues before raising general error
         for marker in BOT_PAYWALL_MARKERS:
             if marker in html_lower:
-                raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (short text with paywall marker): {current_url}")
-        raise ArticleExtractionError("Insufficient article text extracted from page (less than 100 characters).")
+                raise SourceAccessBlockedError(
+                    f"Publisher blocked automated retrieval (short text with paywall marker): {current_url}"
+                )
+        raise ArticleExtractionError(
+            "Insufficient article text extracted from page (less than 100 characters)."
+        )
 
     canonical_url = current_url
     canonical_tag = soup.find("link", rel="canonical")

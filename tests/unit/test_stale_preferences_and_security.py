@@ -46,20 +46,26 @@ def test_stale_persisted_user_defaults_revalidation(db_session, monkeypatch):
     db_session.add(user)
     db_session.commit()
 
-    # Case 1: AI configured
+    # Case 1: AI configured & valid KOKORO_SPEED=1.1
     monkeypatch.setattr(settings, "AI_PROVIDER", "gemini")
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
     monkeypatch.setattr(settings, "KOKORO_VOICE", "af_heart")
-    monkeypatch.setattr(settings, "KOKORO_SPEED", 1.0)
+    monkeypatch.setattr(settings, "KOKORO_SPEED", 1.1)
 
     prefs = get_effective_user_preferences(db_session, 12345)
     assert prefs["default_voice"] == "af_heart"  # Stale voice replaced with instance default
-    assert prefs["default_speed"] == 1.0  # Out of bounds speed replaced
+    assert prefs["default_speed"] == 1.1  # Out of bounds speed replaced with valid KOKORO_SPEED
     assert prefs["default_mode"] == "standard"
 
-    # Case 2: AI not configured -> standard mode falls back to literal
+    # Case 2: Stored speed invalid AND instance KOKORO_SPEED also invalid (2.8) -> safe hard fallback 1.0
+    monkeypatch.setattr(settings, "KOKORO_SPEED", 2.8)
+    prefs_double_invalid = get_effective_user_preferences(db_session, 12345)
+    assert prefs_double_invalid["default_speed"] == 1.0
+
+    # Case 3: AI not configured -> standard mode falls back to literal
     monkeypatch.setattr(settings, "AI_PROVIDER", None)
     monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+    monkeypatch.setattr(settings, "KOKORO_SPEED", 1.0)
 
     prefs_no_ai = get_effective_user_preferences(db_session, 12345)
     assert prefs_no_ai["default_mode"] == "literal"

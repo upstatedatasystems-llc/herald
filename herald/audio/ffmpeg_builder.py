@@ -35,7 +35,9 @@ def check_free_disk_mb(path: Path) -> float:
         raise FFmpegExecutionError(f"Disk check failed: {e}")
 
 
-def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sample_rate: int = 24000) -> Path:
+def generate_silence_wav(
+    output_path: Path, duration_seconds: float = 0.5, sample_rate: int = 24000
+) -> Path:
     """Generate a silent WAV chunk for pause insertion between sections/paragraphs."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -52,10 +54,14 @@ def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sampl
     cmd = [
         "ffmpeg",
         "-y",
-        "-f", "lavfi",
-        "-i", f"anullsrc=r={sample_rate}:cl=mono:d={duration_seconds}",
-        "-ac", "1",
-        "-ar", str(sample_rate),
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=r={sample_rate}:cl=mono:d={duration_seconds}",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
         str(output_path),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
@@ -105,9 +111,12 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
         try:
             cmd = [
                 "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration,format_name:stream=codec_type",
-                "-of", "json",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration,format_name:stream=codec_type",
+                "-of",
+                "json",
                 str(file_path),
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
@@ -125,7 +134,9 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
             raise FFmpegExecutionError(f"FFprobe validation failed for '{file_path}': {e}")
 
     if not is_valid_container and duration_sec <= 0:
-        raise FFmpegExecutionError(f"Audio file '{file_path}' is invalid or contains no audio duration.")
+        raise FFmpegExecutionError(
+            f"Audio file '{file_path}' is invalid or contains no audio duration."
+        )
 
     return {
         "valid": True,
@@ -189,7 +200,9 @@ def join_and_normalize_audio(
     # Check low disk space before rendering (fail closed)
     free_mb = check_free_disk_mb(output_mp3_path.parent)
     if free_mb < settings.HERALD_MIN_DISK_MB:
-        raise FFmpegExecutionError(f"Insufficient free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB).")
+        raise FFmpegExecutionError(
+            f"Insufficient free disk space ({free_mb:.1f} MB available, required {settings.HERALD_MIN_DISK_MB} MB)."
+        )
 
     # Validate all input chunks before assembly
     for cp in chunk_paths:
@@ -209,7 +222,11 @@ def join_and_normalize_audio(
         for i, chunk in enumerate(chunk_paths):
             padded_chunks.append(chunk)
             if insert_pauses and i < len(chunk_paths) - 1:
-                is_sec_end = is_section_end_list[i] if (is_section_end_list and i < len(is_section_end_list)) else False
+                is_sec_end = (
+                    is_section_end_list[i]
+                    if (is_section_end_list and i < len(is_section_end_list))
+                    else False
+                )
                 pause_duration = 1.2 if is_sec_end else 0.5
                 pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", pause_duration)
                 padded_chunks.append(pause_wav)
@@ -232,20 +249,32 @@ def join_and_normalize_audio(
         cmd = [
             "ffmpeg",
             "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list_path),
-            "-af", loudnorm_str,
-            "-ac", str(settings.AUDIO_CHANNELS),
-            "-ar", str(settings.AUDIO_SAMPLE_RATE),
-            "-b:a", settings.AUDIO_OUTPUT_BITRATE,
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_path),
+            "-af",
+            loudnorm_str,
+            "-ac",
+            str(settings.AUDIO_CHANNELS),
+            "-ar",
+            str(settings.AUDIO_SAMPLE_RATE),
+            "-b:a",
+            settings.AUDIO_OUTPUT_BITRATE,
             str(output_mp3_path),
         ]
 
         if not shutil.which("ffmpeg"):
-            if os.environ.get("HERALD_MOCK_TTS") == "1" or getattr(settings, "HERALD_ENV", "").lower() == "test":
+            if (
+                os.environ.get("HERALD_MOCK_TTS") == "1"
+                or getattr(settings, "HERALD_ENV", "").lower() == "test"
+            ):
                 with open(output_mp3_path, "wb") as f:
-                    f.write(b"ID3\x03\x00\x00\x00\x00\x00\x00HERALD_MOCK_AUDIO_DATA_FOR_TESTING_1234567890")
+                    f.write(
+                        b"ID3\x03\x00\x00\x00\x00\x00\x00HERALD_MOCK_AUDIO_DATA_FOR_TESTING_1234567890"
+                    )
                 return {
                     "output_path": str(output_mp3_path),
                     "file_bytes": output_mp3_path.stat().st_size,
@@ -253,7 +282,6 @@ def join_and_normalize_audio(
                     "sha256": compute_file_sha256(output_mp3_path),
                 }
             raise FFmpegExecutionError("FFmpeg binary is not found in PATH.")
-
 
         from herald.concurrency import get_semaphores
 
@@ -266,15 +294,23 @@ def join_and_normalize_audio(
             logger.info(f"{job_log_prefix}FFmpeg process starting")
             t_ffmpeg_proc_start = datetime.now(UTC)
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout_sec)
+                res = subprocess.run(
+                    cmd, capture_output=True, text=True, check=False, timeout=timeout_sec
+                )
             except subprocess.TimeoutExpired as te:
-                logger.error(f"{job_log_prefix}FFmpeg process timed out after {timeout_sec} seconds")
+                logger.error(
+                    f"{job_log_prefix}FFmpeg process timed out after {timeout_sec} seconds"
+                )
                 if output_mp3_path.exists():
                     try:
                         output_mp3_path.unlink()
                     except Exception as e:
-                        logger.warning(f"Failed to remove partial output '{output_mp3_path}' after timeout: {e}")
-                raise FFmpegExecutionError(f"FFmpeg process timed out after {timeout_sec} seconds") from te
+                        logger.warning(
+                            f"Failed to remove partial output '{output_mp3_path}' after timeout: {e}"
+                        )
+                raise FFmpegExecutionError(
+                    f"FFmpeg process timed out after {timeout_sec} seconds"
+                ) from te
 
             ffmpeg_duration = (datetime.now(UTC) - t_ffmpeg_proc_start).total_seconds()
 
@@ -283,14 +319,22 @@ def join_and_normalize_audio(
                     try:
                         output_mp3_path.unlink()
                     except Exception as e:
-                        logger.warning(f"Failed to remove partial output '{output_mp3_path}' after failure: {e}")
-                raise FFmpegExecutionError(f"FFmpeg failed with exit code {res.returncode}: {res.stderr}")
+                        logger.warning(
+                            f"Failed to remove partial output '{output_mp3_path}' after failure: {e}"
+                        )
+                raise FFmpegExecutionError(
+                    f"FFmpeg failed with exit code {res.returncode}: {res.stderr}"
+                )
 
-            logger.info(f"{job_log_prefix}FFmpeg process completed in {ffmpeg_duration:.2f} seconds")
+            logger.info(
+                f"{job_log_prefix}FFmpeg process completed in {ffmpeg_duration:.2f} seconds"
+            )
 
         val_info = validate_audio_file(output_mp3_path)
         logger.info(f"{job_log_prefix}validation completed")
-        embed_id3_metadata(output_mp3_path, title=episode_title, description=episode_description, job_id=job_id)
+        embed_id3_metadata(
+            output_mp3_path, title=episode_title, description=episode_description, job_id=job_id
+        )
 
         checksum = compute_file_sha256(output_mp3_path)
         log_entry = {

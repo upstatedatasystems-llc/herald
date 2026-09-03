@@ -39,6 +39,7 @@ def test_extract_title_and_body():
 
 def test_literal_mode_generates_valid_script_without_ai(monkeypatch):
     """Point 8: Literal mode performs no AI call."""
+
     # Ensure any attempt to call Gemini will explode
     def mock_gemini_call(*args, **kwargs):
         raise RuntimeError("AI was called during literal mode!")

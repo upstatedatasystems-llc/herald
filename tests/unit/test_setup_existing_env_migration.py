@@ -1,5 +1,3 @@
-
-
 def test_setup_existing_env_migration_preserves_unrelated_and_infers_gemini(tmp_path):
     """
     Test that an existing pre-Telegram Herald .env:

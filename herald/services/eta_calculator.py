@@ -32,7 +32,11 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
 
     # Add ~1.5s pause allowance per segment boundary
     pause_allowance_sec = len(segments) * 1.5
-    predicted_seconds = int(round(((total_words / wpm_effective) * 60.0) + pause_allowance_sec)) if total_words > 0 else 300
+    predicted_seconds = (
+        int(round(((total_words / wpm_effective) * 60.0) + pause_allowance_sec))
+        if total_words > 0
+        else 300
+    )
     estimated_minutes = max(1, int(round(predicted_seconds / 60.0)))
 
     # Fallback to legacy estimated_minutes field if present without segments
@@ -62,6 +66,7 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
 
     try:
         from herald.db.models import JobProcessingMetric
+
         completed_jobs = (
             db.query(PodcastJob)
             .filter(
@@ -87,11 +92,18 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
             )
             # Filter for metrics representing full synthesis (not cache-reuse retries)
             valid_metrics = [
-                m for m in recent_tts_metrics
-                if m.duration_ms and (m.metadata_json is None or (m.metadata_json or {}).get("full_synthesis") is not False)
+                m
+                for m in recent_tts_metrics
+                if m.duration_ms
+                and (
+                    m.metadata_json is None
+                    or (m.metadata_json or {}).get("full_synthesis") is not False
+                )
             ]
             total_wall_ms = sum(m.duration_ms for m in valid_metrics if m.duration_ms)
-            total_audio_ms = sum(job_durations[m.job_id] * 1000 for m in valid_metrics if m.job_id in job_durations)
+            total_audio_ms = sum(
+                job_durations[m.job_id] * 1000 for m in valid_metrics if m.job_id in job_durations
+            )
 
             if total_audio_ms >= 10000 and total_wall_ms > 0:
                 realtime_factor = round(total_wall_ms / float(total_audio_ms), 3)
@@ -104,6 +116,31 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
     current_minutes = dur_info["estimated_minutes"]
     current_audio_seconds = float(dur_info["predicted_duration_seconds"])
 
+    # Target job remaining work based on actual stage and chunk completion
+    from herald.db.models import PodcastTTSChunk
+
+    target_remaining_audio_seconds = current_audio_seconds
+    if job.status == JobState.SYNTHESIZING.value:
+        t_total_chunks = db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == job.id).count()
+        t_completed_chunks = (
+            db.query(PodcastTTSChunk)
+            .filter(
+                PodcastTTSChunk.job_id == job.id,
+                PodcastTTSChunk.status == "COMPLETED",
+            )
+            .count()
+        )
+        if t_total_chunks > 0:
+            comp_ratio = min(1.0, max(0.0, t_completed_chunks / float(t_total_chunks)))
+            target_remaining_audio_seconds = current_audio_seconds * (1.0 - comp_ratio)
+    elif job.status in (
+        JobState.ENCODING.value,
+        JobState.COMPLETE.value,
+        JobState.AUDIO_READY.value,
+        JobState.DELIVERING.value,
+    ):
+        target_remaining_audio_seconds = 0.0
+
     # 2. Estimate queue work ahead (jobs created before current_job)
     queue_ahead_audio_seconds = 0.0
     jobs_ahead_count = 0
@@ -111,11 +148,13 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
     ahead_jobs = (
         db.query(PodcastJob)
         .filter(
-            PodcastJob.status.in_([
-                JobState.QUEUED_TTS.value,
-                JobState.SYNTHESIZING.value,
-                JobState.ENCODING.value,
-            ]),
+            PodcastJob.status.in_(
+                [
+                    JobState.QUEUED_TTS.value,
+                    JobState.SYNTHESIZING.value,
+                    JobState.ENCODING.value,
+                ]
+            ),
             PodcastJob.id != job.id,
             PodcastJob.created_at < job.created_at,
         )
@@ -128,12 +167,7 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
         j_audio_seconds = j_dur["predicted_duration_seconds"]
 
         if j.status == JobState.SYNTHESIZING.value:
-            from herald.db.models import PodcastTTSChunk
-            total_chunks = (
-                db.query(PodcastTTSChunk)
-                .filter(PodcastTTSChunk.job_id == j.id)
-                .count()
-            )
+            total_chunks = db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == j.id).count()
             completed_chunks = (
                 db.query(PodcastTTSChunk)
                 .filter(
@@ -154,7 +188,12 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
             queue_ahead_audio_seconds += j_audio_seconds
 
     predicted_tts_wall_time_seconds = int(round(current_audio_seconds * realtime_factor))
-    estimated_remaining_processing_seconds = int(round((queue_ahead_audio_seconds + current_audio_seconds) * realtime_factor + overhead_seconds))
+    estimated_remaining_processing_seconds = int(
+        round(
+            (queue_ahead_audio_seconds + target_remaining_audio_seconds) * realtime_factor
+            + overhead_seconds
+        )
+    )
 
     total_eta_seconds = estimated_remaining_processing_seconds
 

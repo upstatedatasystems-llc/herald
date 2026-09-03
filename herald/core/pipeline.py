@@ -45,6 +45,24 @@ def compute_content_hash(text: str, url: str | None = None) -> str:
     return hasher.hexdigest()
 
 
+def _resolve_response_title(
+    job: PodcastJob | None, custom_title: str | None = None, script_obj: dict | None = None
+) -> str:
+    """
+    Resolve authoritative display title for HeraldResponse:
+    custom_title (request or job) -> (script_json or {}).get("episode_title") -> "Herald Episode"
+    """
+    c_title = (custom_title or (job.custom_title if job else None) or "").strip()
+    if c_title:
+        return c_title
+    s = script_obj if script_obj is not None else ((job.script_json or {}) if job else {})
+    if isinstance(s, dict):
+        ep_t = (s.get("episode_title") or "").strip()
+        if ep_t:
+            return ep_t
+    return "Herald Episode"
+
+
 def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     """
     Transport-neutral pipeline entry point.
@@ -61,10 +79,18 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     elif raw_mode in [m.value for m in RequestMode]:
         mode_val = raw_mode
     else:
-        mode_val = RequestMode.LITERAL.value if not settings.is_ai_configured() else RequestMode.STANDARD.value
+        mode_val = (
+            RequestMode.LITERAL.value
+            if not settings.is_ai_configured()
+            else RequestMode.STANDARD.value
+        )
 
     # Validate AI provider requirement for non-literal modes
-    is_ai_mode = mode_val in (RequestMode.BRIEF.value, RequestMode.STANDARD.value, RequestMode.RESEARCH.value)
+    is_ai_mode = mode_val in (
+        RequestMode.BRIEF.value,
+        RequestMode.STANDARD.value,
+        RequestMode.RESEARCH.value,
+    )
     if is_ai_mode and not settings.is_ai_configured():
         return HeraldResponse(
             job_id="",
@@ -81,7 +107,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
 
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
     if req.transport == "telegram" and req.transport_message_id and req.delivery_target:
-        tg_chat = int(req.delivery_target) if str(req.delivery_target).lstrip("-").isdigit() else None
+        tg_chat = (
+            int(req.delivery_target) if str(req.delivery_target).lstrip("-").isdigit() else None
+        )
         tg_msg = int(req.transport_message_id) if str(req.transport_message_id).isdigit() else None
         if tg_chat is not None and tg_msg is not None:
             existing_msg_job = (
@@ -94,7 +122,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 .first()
             )
             if existing_msg_job:
-                ep_title = (existing_msg_job.script_json or {}).get("episode_title") or existing_msg_job.custom_title
+                ep_title = _resolve_response_title(existing_msg_job)
                 return HeraldResponse(
                     job_id=existing_msg_job.id,
                     status=existing_msg_job.status,
@@ -161,6 +189,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     resolved_title = (req.custom_title or canonical_title or "").strip()
     if not resolved_title and deduped_text:
         from herald.literal.script_generator import extract_title_and_body
+
         ext_title, _ = extract_title_and_body(deduped_text)
         if ext_title and ext_title != "Herald Episode":
             resolved_title = ext_title
@@ -193,7 +222,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         c_mode = c_job.request_mode
         c_depth = (c_job.research_depth or "").lower().strip()
         c_voice = (c_job.custom_voice or c_job.kokoro_voice or "").strip()
-        c_speed = round(float(c_job.custom_speed or c_job.kokoro_speed), 2) if (c_job.custom_speed or c_job.kokoro_speed) is not None else None
+        c_speed = (
+            round(float(c_job.custom_speed or c_job.kokoro_speed), 2)
+            if (c_job.custom_speed or c_job.kokoro_speed) is not None
+            else None
+        )
         c_title = (c_job.custom_title or "").strip()
         c_chunk = c_job.tts_chunk_chars if c_job.tts_chunk_chars is not None else 500
         c_verify = bool(c_job.verify_final_script)
@@ -220,7 +253,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 break
 
     if duplicate_job:
-        ep_title = (duplicate_job.script_json or {}).get("episode_title") or duplicate_job.custom_title
+        ep_title = _resolve_response_title(duplicate_job)
         return HeraldResponse(
             job_id=duplicate_job.id,
             status=duplicate_job.status,
@@ -235,17 +268,22 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     job_id = str(uuid.uuid4())
     telegram_chat = (
         int(req.delivery_target)
-        if req.transport == "telegram" and req.delivery_target and str(req.delivery_target).lstrip("-").isdigit()
+        if req.transport == "telegram"
+        and req.delivery_target
+        and str(req.delivery_target).lstrip("-").isdigit()
         else None
     )
     telegram_msg = (
         int(req.transport_message_id)
-        if req.transport == "telegram" and req.transport_message_id and str(req.transport_message_id).isdigit()
+        if req.transport == "telegram"
+        and req.transport_message_id
+        and str(req.transport_message_id).isdigit()
         else None
     )
     telegram_user = (
         int(str(req.requester_identity).replace("telegram:", ""))
-        if req.transport == "telegram" and str(req.requester_identity).replace("telegram:", "").isdigit()
+        if req.transport == "telegram"
+        and str(req.requester_identity).replace("telegram:", "").isdigit()
         else None
     )
 
@@ -288,7 +326,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 .first()
             )
             if existing:
-                ep_title = (existing.script_json or {}).get("episode_title") or existing.custom_title
+                ep_title = _resolve_response_title(existing)
                 return HeraldResponse(
                     job_id=existing.id,
                     status=existing.status,
@@ -401,7 +439,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-core")
 
         script_obj = job.script_json or {}
-        ep_title = script_obj.get("episode_title") or job.custom_title or "Herald Episode"
+        ep_title = _resolve_response_title(
+            job, custom_title=job.custom_title, script_obj=script_obj
+        )
         dur_info = calculate_script_duration(script_obj, job.custom_speed or settings.KOKORO_SPEED)
 
         if req.hold_for_approval:

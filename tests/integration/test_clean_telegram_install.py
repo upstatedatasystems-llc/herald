@@ -45,7 +45,12 @@ def test_clean_telegram_install_environment(tmp_path, monkeypatch):
         res = process_herald_request(db, req)
         assert res.job_id is not None
         assert res.request_mode == "literal"
-        assert res.status in (JobState.QUEUED_TTS.value, JobState.SCRIPT_READY.value, JobState.SCRIPTING.value, JobState.RECEIVED.value)
+        assert res.status in (
+            JobState.QUEUED_TTS.value,
+            JobState.SCRIPT_READY.value,
+            JobState.SCRIPTING.value,
+            JobState.RECEIVED.value,
+        )
 
         job = db.query(PodcastJob).filter_by(id=res.job_id).first()
         assert job is not None

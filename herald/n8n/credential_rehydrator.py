@@ -18,6 +18,7 @@ def rehydrate_workflow_credentials(
     Also resolves workflow errorWorkflow settings from workflow names to installed workflow IDs.
     """
     import copy
+
     updated_wf = copy.deepcopy(workflow_data)
     nodes = updated_wf.get("nodes", [])
 
@@ -33,9 +34,15 @@ def rehydrate_workflow_credentials(
             target_cred = installed_credentials.get(cred_type)
             if not target_cred:
                 # Check normalized credential type fallback (e.g. googleDriveOAuth2 <-> googleDriveOAuth2Api)
-                if cred_type == "googleDriveOAuth2Api" and "googleDriveOAuth2" in installed_credentials:
+                if (
+                    cred_type == "googleDriveOAuth2Api"
+                    and "googleDriveOAuth2" in installed_credentials
+                ):
                     target_cred = installed_credentials["googleDriveOAuth2"]
-                elif cred_type == "googleDriveOAuth2" and "googleDriveOAuth2Api" in installed_credentials:
+                elif (
+                    cred_type == "googleDriveOAuth2"
+                    and "googleDriveOAuth2Api" in installed_credentials
+                ):
                     target_cred = installed_credentials["googleDriveOAuth2Api"]
 
             if target_cred and isinstance(target_cred, dict):

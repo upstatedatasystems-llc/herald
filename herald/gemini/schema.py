@@ -21,9 +21,13 @@ class PodcastScriptResponse(BaseModel):
 
     episode_title: str = Field(..., description="Catchy descriptive title for podcast episode")
     episode_description: str = Field(..., description="Summary overview of the episode")
-    estimated_minutes: int | None = Field(default=None, description="Legacy estimated spoken duration in minutes")
+    estimated_minutes: int | None = Field(
+        default=None, description="Legacy estimated spoken duration in minutes"
+    )
     source_title: str | None = Field(default=None, description="Title of source article or email")
-    segments: list[PodcastSegment] = Field(..., min_length=1, description="Ordered narration segments")
+    segments: list[PodcastSegment] = Field(
+        ..., min_length=1, description="Ordered narration segments"
+    )
     warnings: list[str] = Field(..., description="Any content warnings or extraction notes")
 
     @field_validator("estimated_minutes")
@@ -52,7 +56,9 @@ class PodcastScriptResponse(BaseModel):
             seen_orders.add(seg.order)
 
             if seg.order != expected:
-                raise ValueError(f"Segment order error: expected sequential order starting at 1, but got {seg.order} at position {expected}")
+                raise ValueError(
+                    f"Segment order error: expected sequential order starting at 1, but got {seg.order} at position {expected}"
+                )
             expected += 1
         return v
 
@@ -72,9 +78,13 @@ class VerificationItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_claim: str = Field(..., description="Fact or claim from the primary source")
-    status: str = Field(..., description="Status: supported | contradicted | qualified | outdated | uncertain")
+    status: str = Field(
+        ..., description="Status: supported | contradicted | qualified | outdated | uncertain"
+    )
     notes: str = Field(..., description="Detailed verification notes and context")
-    source_ids: list[str] = Field(default_factory=list, description="List of source_ids from research_sources registry")
+    source_ids: list[str] = Field(
+        default_factory=list, description="List of source_ids from research_sources registry"
+    )
 
 
 class UsefulContextItem(BaseModel):
@@ -82,18 +92,30 @@ class UsefulContextItem(BaseModel):
 
     fact: str = Field(..., description="Additional verified fact or background context")
     why_it_matters: str = Field(..., description="Relevance and importance to the listener")
-    source_ids: list[str] = Field(default_factory=list, description="List of source_ids from research_sources registry")
+    source_ids: list[str] = Field(
+        default_factory=list, description="List of source_ids from research_sources registry"
+    )
 
 
 class ResearchDossierResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_summary: str = Field(..., description="Summary overview of original source")
-    verification: list[VerificationItem] = Field(default_factory=list, description="Claim verification entries")
-    useful_context: list[UsefulContextItem] = Field(default_factory=list, description="Enriched context entries")
-    outdated_or_uncertain: list[str] = Field(default_factory=list, description="Outdated claims or unresolved uncertainties")
-    research_sources: list[ResearchSource] = Field(default_factory=list, description="Canonical research sources registry")
-    material_sources: list[str] = Field(default_factory=list, description="List of source_ids materially used to support research")
+    verification: list[VerificationItem] = Field(
+        default_factory=list, description="Claim verification entries"
+    )
+    useful_context: list[UsefulContextItem] = Field(
+        default_factory=list, description="Enriched context entries"
+    )
+    outdated_or_uncertain: list[str] = Field(
+        default_factory=list, description="Outdated claims or unresolved uncertainties"
+    )
+    research_sources: list[ResearchSource] = Field(
+        default_factory=list, description="Canonical research sources registry"
+    )
+    material_sources: list[str] = Field(
+        default_factory=list, description="List of source_ids materially used to support research"
+    )
 
 
 class ResearchAuditResponse(BaseModel):
@@ -106,8 +128,12 @@ class ResearchAuditResponse(BaseModel):
     important_verified_information_omitted: list[str] = Field(default_factory=list)
     changed_numbers_or_units: list[str] = Field(default_factory=list)
     citation_mapping_failures: list[str] = Field(default_factory=list)
-    has_material_issues: bool = Field(..., description="True if material defects were found that require repair")
-    repair_instructions: str | None = Field(default=None, description="Specific instructions for script repair if material issues exist")
+    has_material_issues: bool = Field(
+        ..., description="True if material defects were found that require repair"
+    )
+    repair_instructions: str | None = Field(
+        default=None, description="Specific instructions for script repair if material issues exist"
+    )
 
 
 class FidelityAuditResponse(BaseModel):
@@ -120,6 +146,9 @@ class FidelityAuditResponse(BaseModel):
     important_omissions_material_meaning: list[str] = Field(default_factory=list)
     excessive_certainty: list[str] = Field(default_factory=list)
     accidental_invented_context: list[str] = Field(default_factory=list)
-    has_material_issues: bool = Field(..., description="True if material fidelity defects exist requiring repair")
-    repair_instructions: str | None = Field(default=None, description="Specific instructions for script repair if material issues exist")
-
+    has_material_issues: bool = Field(
+        ..., description="True if material fidelity defects exist requiring repair"
+    )
+    repair_instructions: str | None = Field(
+        default=None, description="Specific instructions for script repair if material issues exist"
+    )

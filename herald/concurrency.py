@@ -235,17 +235,24 @@ def get_effective_tts_global_slots() -> int:
     return max(1, config.tts_global_slots)
 
 
+TTS_ADVISORY_SLOT_BASE: int = 920000
+
+
 @contextmanager
-def tts_slot_lock(db=None, timeout_seconds: float | None = None):
+def tts_slot_lock(
+    db=None, local_semaphore: Semaphore | None = None, timeout_seconds: float | None = None
+):
     """
     Acquire a global TTS synthesis slot.
     On PostgreSQL, uses an advisory lock slot pool across all containers/processes.
-    On SQLite/test environments, uses the in-process global TTS semaphore.
+    On SQLite/test environments, uses the in-process global TTS semaphore (or supplied local_semaphore).
     """
     from herald.config import settings
 
     if timeout_seconds is None:
-        timeout_seconds = max(180.0, getattr(settings, "KOKORO_TIMEOUT_SECONDS", 180.0) * 1.5)
+        timeout_seconds = max(
+            180.0, float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180)) * 1.5
+        )
 
     is_postgres = False
     if db is not None:
@@ -259,7 +266,7 @@ def tts_slot_lock(db=None, timeout_seconds: float | None = None):
     if is_postgres and db is not None:
         from sqlalchemy import text as sa_text
 
-        base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", 920000)
+        base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", TTS_ADVISORY_SLOT_BASE)
         num_slots = get_effective_tts_global_slots()
         t_start = time.monotonic()
         acquired_key = None
@@ -268,7 +275,9 @@ def tts_slot_lock(db=None, timeout_seconds: float | None = None):
             for slot_idx in range(num_slots):
                 key = base_key + slot_idx
                 try:
-                    res = db.execute(sa_text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
+                    res = db.execute(
+                        sa_text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
+                    ).scalar()
                     if res is True or res == 1:
                         acquired_key = key
                         break
@@ -291,10 +300,12 @@ def tts_slot_lock(db=None, timeout_seconds: float | None = None):
             except Exception as e:
                 logger.warning(f"Failed to release pg_advisory_unlock for key {acquired_key}: {e}")
     else:
-        sem = get_semaphores().global_tts
+        sem = local_semaphore if local_semaphore is not None else get_semaphores().global_tts
         acquired = sem.acquire(timeout=timeout_seconds)
         if not acquired:
-            raise TimeoutError(f"Timed out waiting for local TTS semaphore after {timeout_seconds}s")
+            raise TimeoutError(
+                f"Timed out waiting for local TTS semaphore after {timeout_seconds}s"
+            )
         try:
             yield None
         finally:

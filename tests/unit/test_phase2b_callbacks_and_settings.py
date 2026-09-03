@@ -81,7 +81,9 @@ def test_callback_byte_length_limit(db_session):
         "data": oversized_65_ascii,
     }
     handle_telegram_callback_query(db_session, mock_client, cb_oversized)
-    mock_client.answer_callback_query.assert_called_with("cb-102", text="Error: Callback data too large.", show_alert=True)
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-102", text="Error: Callback data too large.", show_alert=True
+    )
 
     # 3. Multibyte string: character count <= 64 but byte length > 64 bytes -> rejected
     mock_client.reset_mock()
@@ -95,7 +97,9 @@ def test_callback_byte_length_limit(db_session):
         "data": multibyte_str,
     }
     handle_telegram_callback_query(db_session, mock_client, cb_multibyte)
-    mock_client.answer_callback_query.assert_called_with("cb-103", text="Error: Callback data too large.", show_alert=True)
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-103", text="Error: Callback data too large.", show_alert=True
+    )
 
 
 def test_callback_private_chat_and_auth_enforcement(db_session):
@@ -113,7 +117,9 @@ def test_callback_private_chat_and_auth_enforcement(db_session):
         "data": "h2:settings:confirm:on",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_group)
-    mock_client.answer_callback_query.assert_called_with("cb-201", text="Herald operates only in private chats.", show_alert=True)
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-201", text="Herald operates only in private chats.", show_alert=True
+    )
 
     # 2. Non-owner user -> rejected
     mock_client.reset_mock()
@@ -124,7 +130,9 @@ def test_callback_private_chat_and_auth_enforcement(db_session):
         "data": "h2:settings:confirm:on",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_unauth)
-    mock_client.answer_callback_query.assert_called_with("cb-202", text="Unauthorized: Access denied.", show_alert=True)
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-202", text="Unauthorized: Access denied.", show_alert=True
+    )
 
     # 3. Paired owner from WRONG private chat ID -> rejected
     mock_client.reset_mock()
@@ -135,7 +143,9 @@ def test_callback_private_chat_and_auth_enforcement(db_session):
         "data": "h2:settings:confirm:on",
     }
     handle_telegram_callback_query(db_session, mock_client, cb_wrong_chat)
-    mock_client.answer_callback_query.assert_called_with("cb-203", text="Unauthorized: Access denied.", show_alert=True)
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-203", text="Unauthorized: Access denied.", show_alert=True
+    )
 
 
 def test_callback_answers_before_message_edit(db_session):
@@ -145,8 +155,12 @@ def test_callback_answers_before_message_edit(db_session):
 
     call_order = []
     mock_client = MagicMock(spec=TelegramClient)
-    mock_client.answer_callback_query.side_effect = lambda *args, **kwargs: call_order.append("answerCallbackQuery")
-    mock_client.edit_message_text.side_effect = lambda *args, **kwargs: call_order.append("editMessageText")
+    mock_client.answer_callback_query.side_effect = lambda *args, **kwargs: call_order.append(
+        "answerCallbackQuery"
+    )
+    mock_client.edit_message_text.side_effect = lambda *args, **kwargs: call_order.append(
+        "editMessageText"
+    )
 
     cb_on = {
         "id": "cb-order-1",
@@ -175,15 +189,25 @@ def test_callback_edit_message_text_error_handling(db_session):
     }
 
     # 1. Benign "message is not modified" -> logs debug, not warning
-    mock_client.edit_message_text.side_effect = TelegramAPIError("Bad Request: message is not modified")
-    with patch("herald.telegram.bot.logger.warning") as mock_warn, patch("herald.telegram.bot.logger.debug") as mock_debug:
+    mock_client.edit_message_text.side_effect = TelegramAPIError(
+        "Bad Request: message is not modified"
+    )
+    with (
+        patch("herald.telegram.bot.logger.warning") as mock_warn,
+        patch("herald.telegram.bot.logger.debug") as mock_debug,
+    ):
         handle_telegram_callback_query(db_session, mock_client, cb)
         mock_warn.assert_not_called()
         mock_debug.assert_called()
 
     # 2. Real TelegramAPIError (e.g. Chat not found or Network error) -> logs warning
-    mock_client.edit_message_text.side_effect = TelegramAPIError("Forbidden: bot was blocked by the user")
-    with patch("herald.telegram.bot.logger.warning") as mock_warn, patch("herald.telegram.bot.logger.debug") as mock_debug:
+    mock_client.edit_message_text.side_effect = TelegramAPIError(
+        "Forbidden: bot was blocked by the user"
+    )
+    with (
+        patch("herald.telegram.bot.logger.warning") as mock_warn,
+        patch("herald.telegram.bot.logger.debug") as mock_debug,
+    ):
         handle_telegram_callback_query(db_session, mock_client, cb)
         mock_warn.assert_called_once()
         assert "Failed to update settings message markup" in mock_warn.call_args[0][0]
@@ -211,7 +235,9 @@ def test_callback_idempotency_set_semantics(db_session):
     handle_telegram_callback_query(db_session, mock_client, cb_on)
     prefs1 = get_effective_user_preferences(db_session, 12345)
     assert prefs1["confirm_before_tts"] is True
-    mock_client.answer_callback_query.assert_called_with("cb-on-1", text="Confirm Before TTS enabled.")
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-on-1", text="Confirm Before TTS enabled."
+    )
 
     # Second :on click (repeated/double click)
     mock_client.reset_mock()
@@ -219,7 +245,9 @@ def test_callback_idempotency_set_semantics(db_session):
     handle_telegram_callback_query(db_session, mock_client, cb_on)
     prefs2 = get_effective_user_preferences(db_session, 12345)
     assert prefs2["confirm_before_tts"] is True
-    mock_client.answer_callback_query.assert_called_with("cb-on-2", text="Confirm Before TTS enabled.")
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-on-2", text="Confirm Before TTS enabled."
+    )
 
     # First :off click
     mock_client.reset_mock()
@@ -232,7 +260,9 @@ def test_callback_idempotency_set_semantics(db_session):
     handle_telegram_callback_query(db_session, mock_client, cb_off)
     prefs3 = get_effective_user_preferences(db_session, 12345)
     assert prefs3["confirm_before_tts"] is False
-    mock_client.answer_callback_query.assert_called_with("cb-off-1", text="Confirm Before TTS disabled.")
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-off-1", text="Confirm Before TTS disabled."
+    )
 
     # Second :off click (repeated/double click)
     mock_client.reset_mock()
@@ -240,7 +270,9 @@ def test_callback_idempotency_set_semantics(db_session):
     handle_telegram_callback_query(db_session, mock_client, cb_off)
     prefs4 = get_effective_user_preferences(db_session, 12345)
     assert prefs4["confirm_before_tts"] is False
-    mock_client.answer_callback_query.assert_called_with("cb-off-2", text="Confirm Before TTS disabled.")
+    mock_client.answer_callback_query.assert_called_with(
+        "cb-off-2", text="Confirm Before TTS disabled."
+    )
 
 
 def test_edited_message_idempotency(db_session):
@@ -350,7 +382,17 @@ def test_set_my_commands_includes_settings():
     assert "settings" in registered_names
     assert "voices" in registered_names
     assert "download" in registered_names
-    assert {"start", "help", "status", "ai_check", "queue", "settings", "readme", "voices", "download"}.issubset(registered_names)
+    assert {
+        "start",
+        "help",
+        "status",
+        "ai_check",
+        "queue",
+        "settings",
+        "readme",
+        "voices",
+        "download",
+    }.issubset(registered_names)
 
 
 def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, monkeypatch):
@@ -360,7 +402,14 @@ def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, mo
     posted_calls = []
 
     def mock_post(url, *args, **kwargs):
-        posted_calls.append({"url": url, "data": kwargs.get("data"), "json": kwargs.get("json"), "files": kwargs.get("files")})
+        posted_calls.append(
+            {
+                "url": url,
+                "data": kwargs.get("data"),
+                "json": kwargs.get("json"),
+                "files": kwargs.get("files"),
+            }
+        )
         return MagicMock(json=lambda: {"ok": True, "result": {"message_id": 200}})
 
     monkeypatch.setattr("httpx.Client.post", mock_post)

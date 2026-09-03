@@ -21,11 +21,15 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
         return None, None
 
     if mode == RequestMode.RESEARCH.value:
-        model = getattr(job, "research_model", None) or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-2.5-flash")
+        model = getattr(job, "research_model", None) or getattr(
+            settings, "GEMINI_RESEARCH_MODEL", "gemini-2.5-flash"
+        )
         return "Gemini", model
 
     # Brief / Standard
-    model = getattr(job, "gemini_model", None) or getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
+    model = getattr(job, "gemini_model", None) or getattr(
+        settings, "GEMINI_MODEL", "gemini-3.5-flash"
+    )
     return "Gemini", model
 
 
@@ -164,7 +168,9 @@ def format_approval(
         mode_str += f" ({html.escape(job.research_depth.capitalize())})"
 
     source_words = len((job.source_text or "").split())
-    dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+    dur_data = calculate_script_duration(
+        script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0)
+    )
     narration_words = dur_data.get("narration_word_count", 0)
     pred_duration = format_duration_sec(dur_data.get("predicted_duration_seconds", 0))
 
@@ -175,7 +181,11 @@ def format_approval(
     short_id = html.escape(job.id[:8])
 
     ai_prov, ai_model = get_job_ai_identity(job)
-    ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
+    ai_line = (
+        f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
+        if ai_prov and ai_model
+        else ""
+    )
 
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
 
@@ -223,7 +233,9 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
         mode_str += f" ({html.escape(job.research_depth.capitalize())})"
 
     source_words = len((job.source_text or "").split())
-    dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+    dur_data = calculate_script_duration(
+        script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0)
+    )
     narration_words = dur_data.get("narration_word_count", 0)
     pred_duration = format_duration_sec(dur_data.get("predicted_duration_seconds", 0))
 
@@ -233,7 +245,9 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
     # Source type
     src_type_raw = job.source_type or "text"
     if job.source_url:
-        src_disp = f"URL ({html.escape(job.source_url[:35])}{'...' if len(job.source_url) > 35 else ''})"
+        src_disp = (
+            f"URL ({html.escape(job.source_url[:35])}{'...' if len(job.source_url) > 35 else ''})"
+        )
     elif src_type_raw == "email_body":
         src_disp = "Email body"
     else:
@@ -244,9 +258,17 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
     short_id = html.escape(job.id[:8])
 
     ai_prov, ai_model = get_job_ai_identity(job)
-    ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
+    ai_line = (
+        f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
+        if ai_prov and ai_model
+        else ""
+    )
 
-    queue_line = f"\n• <b>Queue Position:</b> {jobs_ahead} jobs ahead" if jobs_ahead > 0 else "\n• <b>Queue Position:</b> Next up"
+    queue_line = (
+        f"\n• <b>Queue Position:</b> {jobs_ahead} jobs ahead"
+        if jobs_ahead > 0
+        else "\n• <b>Queue Position:</b> Next up"
+    )
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
 
     return (
@@ -288,7 +310,9 @@ def format_completion(
 
     # Word counts
     source_words = len((job.source_text or "").split()) if job.source_text else 0
-    dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+    dur_data = calculate_script_duration(
+        script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0)
+    )
     narration_words = dur_data.get("narration_word_count", 0)
 
     # Active processing time calculation
@@ -305,12 +329,18 @@ def format_completion(
         proc_time_str = format_duration_sec(active_sec)
 
     chunks_str = f"{actual_chunks_count} chunks" if actual_chunks_count else ""
-    voice = html.escape(job.kokoro_voice or job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
+    voice = html.escape(
+        job.kokoro_voice or job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart")
+    )
     speed = float(job.kokoro_speed or job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
     short_id = html.escape(job.id[:8])
 
     ai_prov, ai_model = get_job_ai_identity(job)
-    ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
+    ai_line = (
+        f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
+        if ai_prov and ai_model
+        else ""
+    )
 
     # Truncate description safely to stay well within 1024 chars
     desc_clean = html.escape(desc[:120] + "..." if len(desc) > 120 else desc) if desc else ""
@@ -394,7 +424,9 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
         is_curr = vid == curr_clean
 
         marker = " 🟢 <i>(Default)</i>" if is_curr else ""
-        lines.append(f"• <b>{html.escape(dname)}</b> (<code>{html.escape(vid)}</code>) — <i>{html.escape(gender)}</i>{marker}\n  {html.escape(desc)}")
+        lines.append(
+            f"• <b>{html.escape(dname)}</b> (<code>{html.escape(vid)}</code>) — <i>{html.escape(gender)}</i>{marker}\n  {html.escape(desc)}"
+        )
 
         btn_sample = {
             "text": f"🔊 Sample {dname}",
@@ -406,7 +438,9 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
         }
         keyboard.append([btn_sample, btn_set])
 
-    lines.append("\n<i>Tip: You can also use <code>Voice: <name></code> at the top of any message.</i>")
+    lines.append(
+        "\n<i>Tip: You can also use <code>Voice: <name></code> at the top of any message.</i>"
+    )
     text = "\n".join(lines)
     reply_markup = {"inline_keyboard": keyboard}
 

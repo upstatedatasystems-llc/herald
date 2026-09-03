@@ -50,7 +50,9 @@ def test_all_alembic_revisions_fit_in_varchar_32():
     assert len(revisions) > 0
 
     for rev_id in revisions:
-        assert len(rev_id) <= 32, f"Revision identifier '{rev_id}' ({len(rev_id)} chars) exceeds VARCHAR(32) limit!"
+        assert len(rev_id) <= 32, (
+            f"Revision identifier '{rev_id}' ({len(rev_id)} chars) exceeds VARCHAR(32) limit!"
+        )
 
 
 def test_alembic_004_to_005_migration_with_existing_completed_jobs(tmp_path, monkeypatch):
@@ -137,7 +139,9 @@ def test_alembic_004_to_005_migration_with_existing_completed_jobs(tmp_path, mon
     assert "gemini_model" in cols
 
     job_row = session.execute(
-        sa_text("SELECT id, status, completed_chunk_index FROM podcast_jobs WHERE id='live-job-001'")
+        sa_text(
+            "SELECT id, status, completed_chunk_index FROM podcast_jobs WHERE id='live-job-001'"
+        )
     ).fetchone()
     assert job_row[0] == "live-job-001"
     assert job_row[1] == "COMPLETE"

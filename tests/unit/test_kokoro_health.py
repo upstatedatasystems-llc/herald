@@ -11,7 +11,10 @@ def test_kokoro_health_successful_probe():
     mock_resp = MagicMock()
     mock_resp.status_code = 200
 
-    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("httpx.Client.get", return_value=mock_resp):
+    with (
+        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+        patch("httpx.Client.get", return_value=mock_resp),
+    ):
         res = client.health_check()
         assert res["healthy"] is True
         assert res["kokoro_api"] is True
@@ -24,7 +27,10 @@ def test_kokoro_health_transient_inference_timeout():
     now = datetime.now(UTC)
     KokoroClient._last_successful_probe_at = now - timedelta(seconds=30)  # 30s ago (< 120s grace)
 
-    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("httpx.Client.get", side_effect=httpx.TimeoutException("Read timeout")):
+    with (
+        patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+        patch("httpx.Client.get", side_effect=httpx.TimeoutException("Read timeout")),
+    ):
         res = client.health_check()
         assert res["healthy"] is True
         assert res["kokoro_api"] is True

@@ -60,22 +60,32 @@ def sync_and_prepare_chunks(
         if db_chunk:
             # Check if text hash matches
             if db_chunk.text_hash == text_hash:
-                if db_chunk.status == "COMPLETED" and chunk_file.exists() and chunk_file.stat().st_size > 0:
+                if (
+                    db_chunk.status == "COMPLETED"
+                    and chunk_file.exists()
+                    and chunk_file.stat().st_size > 0
+                ):
                     try:
                         validate_audio_file(chunk_file)
-                        logger.info(f"Reusing existing valid chunk {chunk.index} for job '{job_id}'")
+                        logger.info(
+                            f"Reusing existing valid chunk {chunk.index} for job '{job_id}'"
+                        )
                         prepared.append(db_chunk)
                         continue
                     except Exception as ve:
-                        logger.warning(f"Existing chunk file for index {chunk.index} failed validation ({ve}). Resetting...")
-                
+                        logger.warning(
+                            f"Existing chunk file for index {chunk.index} failed validation ({ve}). Resetting..."
+                        )
+
                 # Reset to PENDING if not valid completed
                 db_chunk.status = "PENDING"
                 db_chunk.local_path = str(chunk_file)
                 db_chunk.error_detail = None
             else:
                 # Text hash changed - invalidate chunk audio and reset record
-                logger.info(f"Chunk {chunk.index} text hash changed for job '{job_id}'. Invalidating cached chunk.")
+                logger.info(
+                    f"Chunk {chunk.index} text hash changed for job '{job_id}'. Invalidating cached chunk."
+                )
                 if chunk_file.exists():
                     chunk_file.unlink(missing_ok=True)
                 db_chunk.text_hash = text_hash
@@ -99,7 +109,9 @@ def sync_and_prepare_chunks(
             if is_prev_completed:
                 try:
                     validate_audio_file(chunk_file)
-                    logger.info(f"Reusing existing valid chunk file {chunk.index} for job '{job_id}'")
+                    logger.info(
+                        f"Reusing existing valid chunk file {chunk.index} for job '{job_id}'"
+                    )
                     new_chunk = PodcastTTSChunk(
                         job_id=job_id,
                         chunk_index=chunk.index,
@@ -115,7 +127,9 @@ def sync_and_prepare_chunks(
                     prepared.append(new_chunk)
                     continue
                 except Exception as ve:
-                    logger.warning(f"Existing chunk file for index {chunk.index} failed validation ({ve})")
+                    logger.warning(
+                        f"Existing chunk file for index {chunk.index} failed validation ({ve})"
+                    )
 
             # New pending chunk record
             new_chunk = PodcastTTSChunk(
@@ -130,7 +144,6 @@ def sync_and_prepare_chunks(
             )
             db.add(new_chunk)
             prepared.append(new_chunk)
-
 
     # Clean up obsolete chunk records past current script length
     for idx, old_chunk in existing_by_index.items():
@@ -170,154 +183,179 @@ def synthesize_single_chunk(
     """
     chunk_file = chunks_dir / f"chunk_{chunk.index:04d}.wav"
 
-    # Acquire semaphores (job limit first, then global server-wide limit)
+    # Acquire per-job semaphore (global slot acquired dynamically during synthesis)
     with per_job_semaphore:
-        with global_semaphore:
-            db = session_factory()
-            try:
-                db_chunk = (
-                    db.query(PodcastTTSChunk)
-                    .filter(PodcastTTSChunk.job_id == job_id, PodcastTTSChunk.chunk_index == chunk.index)
-                    .first()
+        db = session_factory()
+        try:
+            db_chunk = (
+                db.query(PodcastTTSChunk)
+                .filter(
+                    PodcastTTSChunk.job_id == job_id, PodcastTTSChunk.chunk_index == chunk.index
                 )
-                if not db_chunk:
-                    raise KokoroTTSError(f"TTS Chunk record not found for index {chunk.index}")
+                .first()
+            )
+            if not db_chunk:
+                raise KokoroTTSError(f"TTS Chunk record not found for index {chunk.index}")
 
-                db_chunk.status = "SYNTHESIZING"
-                db_chunk.claimed_by = worker_id
-                db_chunk.started_at = datetime.now(UTC)
-                db_chunk.attempt_count += 1
-                db.commit()
+            db_chunk.status = "SYNTHESIZING"
+            db_chunk.claimed_by = worker_id
+            db_chunk.started_at = datetime.now(UTC)
+            db_chunk.attempt_count += 1
+            db.commit()
 
-                max_attempts = 2
-                chunk_success = False
-                last_error: Exception | None = None
+            max_attempts = 2
+            chunk_success = False
+            last_error: Exception | None = None
 
-                for attempt in range(1, max_attempts + 1):
-                    t0_utc = datetime.now(UTC)
-                    t0_mono = time.monotonic()
-                    try:
-                        logger.info(
-                            f"Worker '{worker_id}' synthesizing chunk {chunk.index}/{total_chunks} (attempt {attempt}): "
-                            f"{len(chunk.text)} chars | timeout: {synthesis_timeout}s"
+            for attempt in range(1, max_attempts + 1):
+                t0_utc = datetime.now(UTC)
+                t0_mono = time.monotonic()
+                try:
+                    logger.info(
+                        f"Worker '{worker_id}' synthesizing chunk {chunk.index}/{total_chunks} (attempt {attempt}): "
+                        f"{len(chunk.text)} chars | timeout: {synthesis_timeout}s"
+                    )
+                    with tts_slot_lock(
+                        db=db, local_semaphore=global_semaphore, timeout_seconds=synthesis_timeout
+                    ):
+                        kokoro_client.synthesize_chunk(
+                            text=chunk.text,
+                            output_path=chunk_file,
+                            voice=voice,
+                            speed=speed,
+                            timeout=synthesis_timeout,
                         )
-                        with tts_slot_lock(db=db):
-                            kokoro_client.synthesize_chunk(
-                                text=chunk.text,
-                                output_path=chunk_file,
-                                voice=voice,
-                                speed=speed,
-                                timeout=synthesis_timeout,
-                            )
-                        val_meta = validate_audio_file(chunk_file)
+                    val_meta = validate_audio_file(chunk_file)
 
-                        t1_mono = time.monotonic()
-                        t1_utc = datetime.now(UTC)
-                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                        output_bytes = val_meta.get("size_bytes", chunk_file.stat().st_size if chunk_file.exists() else 0)
-                        audio_dur_sec = val_meta.get("duration_seconds")
-                        audio_dur_ms = max(0, int(audio_dur_sec * 1000)) if (audio_dur_sec is not None and audio_dur_sec > 0) else None
-                        rtf_val = round((elapsed_ms / float(audio_dur_ms)) if audio_dur_ms and audio_dur_ms > 0 else 0.0, 3)
+                    t1_mono = time.monotonic()
+                    t1_utc = datetime.now(UTC)
+                    elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
+                    output_bytes = val_meta.get(
+                        "size_bytes", chunk_file.stat().st_size if chunk_file.exists() else 0
+                    )
+                    audio_dur_sec = val_meta.get("duration_seconds")
+                    audio_dur_ms = (
+                        max(0, int(audio_dur_sec * 1000))
+                        if (audio_dur_sec is not None and audio_dur_sec > 0)
+                        else None
+                    )
+                    rtf_val = round(
+                        (elapsed_ms / float(audio_dur_ms))
+                        if audio_dur_ms and audio_dur_ms > 0
+                        else 0.0,
+                        3,
+                    )
 
-                        record_stage_metric(
-                            job_id=job_id,
-                            stage="KOKORO_REQUEST",
-                            sequence_index=chunk.index,
-                            attempt=attempt,
-                            started_at=t0_utc,
-                            finished_at=t1_utc,
-                            duration_ms=elapsed_ms,
-                            status="success",
-                            input_chars=len(chunk.text),
-                            output_bytes=output_bytes,
-                            audio_duration_ms=audio_dur_ms,
-                            metadata_json={
-                                "voice": voice,
-                                "speed": speed,
-                                "rtf": rtf_val,
-                                "worker_id": worker_id,
-                                "timeout_seconds": synthesis_timeout,
-                            },
-                            is_attempt_metric=True,
-                        )
+                    record_stage_metric(
+                        job_id=job_id,
+                        stage="KOKORO_REQUEST",
+                        sequence_index=chunk.index,
+                        attempt=attempt,
+                        started_at=t0_utc,
+                        finished_at=t1_utc,
+                        duration_ms=elapsed_ms,
+                        status="success",
+                        input_chars=len(chunk.text),
+                        output_bytes=output_bytes,
+                        audio_duration_ms=audio_dur_ms,
+                        metadata_json={
+                            "voice": voice,
+                            "speed": speed,
+                            "rtf": rtf_val,
+                            "worker_id": worker_id,
+                            "timeout_seconds": synthesis_timeout,
+                        },
+                        is_attempt_metric=True,
+                    )
 
-                        # Update DB record to COMPLETED
-                        db_chunk.status = "COMPLETED"
-                        db_chunk.local_path = str(chunk_file)
-                        db_chunk.audio_duration = audio_dur_sec
-                        db_chunk.completed_at = t1_utc
-                        db_chunk.error_detail = None
-                        db.commit()
-
-                        # Update PodcastJob completed_chunk_index & heartbeat
-                        job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
-                        if job:
-                            max_completed = (
-                                db.query(PodcastTTSChunk)
-                                .filter(PodcastTTSChunk.job_id == job_id, PodcastTTSChunk.status == "COMPLETED")
-                                .count()
-                            )
-                            job.completed_chunk_index = max_completed
-                            job.last_heartbeat_at = datetime.now(UTC)
-                            job.heartbeat_at = datetime.now(UTC)
-                            db.commit()
-                            logger.info(f"Job '{job_id}' progress: {max_completed}/{total_chunks} chunks completed")
-
-                        logger.info(f"Chunk {chunk.index}/{total_chunks} completed successfully in {elapsed_ms / 1000.0:.1f}s")
-                        chunk_success = True
-                        break
-
-                    except Exception as ce:
-                        t1_mono = time.monotonic()
-                        t1_utc = datetime.now(UTC)
-                        elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
-                        last_error = ce
-                        if chunk_file.exists():
-                            chunk_file.unlink(missing_ok=True)
-
-                        is_timeout = isinstance(ce, KokoroTTSTimeoutError) or "timed out" in str(ce).lower()
-                        record_stage_metric(
-                            job_id=job_id,
-                            stage="KOKORO_REQUEST",
-                            sequence_index=chunk.index,
-                            attempt=attempt,
-                            started_at=t0_utc,
-                            finished_at=t1_utc,
-                            duration_ms=elapsed_ms,
-                            status="failed",
-                            input_chars=len(chunk.text),
-                            metadata_json={
-                                "voice": voice,
-                                "speed": speed,
-                                "worker_id": worker_id,
-                                "timeout_indicator": is_timeout,
-                                "error": str(ce),
-                            },
-                            is_attempt_metric=True,
-                        )
-                        logger.warning(f"Chunk {chunk.index} attempt {attempt} failed ({ce})")
-                        if attempt < max_attempts:
-                            time.sleep(1.0)
-
-                if not chunk_success:
-                    db_chunk.status = "FAILED"
-                    db_chunk.error_detail = str(last_error)
+                    # Update DB record to COMPLETED
+                    db_chunk.status = "COMPLETED"
+                    db_chunk.local_path = str(chunk_file)
+                    db_chunk.audio_duration = audio_dur_sec
+                    db_chunk.completed_at = t1_utc
+                    db_chunk.error_detail = None
                     db.commit()
 
-                    is_timeout = isinstance(last_error, KokoroTTSTimeoutError) or "timed out" in str(last_error).lower()
-                    if is_timeout:
-                        if isinstance(last_error, KokoroTTSTimeoutError):
-                            raise last_error
-                        raise KokoroTTSTimeoutError(str(last_error))
-                    if isinstance(last_error, KokoroTTSError):
+                    # Update PodcastJob completed_chunk_index & heartbeat
+                    job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+                    if job:
+                        max_completed = (
+                            db.query(PodcastTTSChunk)
+                            .filter(
+                                PodcastTTSChunk.job_id == job_id,
+                                PodcastTTSChunk.status == "COMPLETED",
+                            )
+                            .count()
+                        )
+                        job.completed_chunk_index = max_completed
+                        job.last_heartbeat_at = datetime.now(UTC)
+                        job.heartbeat_at = datetime.now(UTC)
+                        db.commit()
+                        logger.info(
+                            f"Job '{job_id}' progress: {max_completed}/{total_chunks} chunks completed"
+                        )
+
+                    logger.info(
+                        f"Chunk {chunk.index}/{total_chunks} completed successfully in {elapsed_ms / 1000.0:.1f}s"
+                    )
+                    chunk_success = True
+                    break
+
+                except Exception as ce:
+                    t1_mono = time.monotonic()
+                    t1_utc = datetime.now(UTC)
+                    elapsed_ms = max(0, int((t1_mono - t0_mono) * 1000))
+                    last_error = ce
+                    if chunk_file.exists():
+                        chunk_file.unlink(missing_ok=True)
+
+                    is_timeout = (
+                        isinstance(ce, KokoroTTSTimeoutError) or "timed out" in str(ce).lower()
+                    )
+                    record_stage_metric(
+                        job_id=job_id,
+                        stage="KOKORO_REQUEST",
+                        sequence_index=chunk.index,
+                        attempt=attempt,
+                        started_at=t0_utc,
+                        finished_at=t1_utc,
+                        duration_ms=elapsed_ms,
+                        status="failed",
+                        input_chars=len(chunk.text),
+                        metadata_json={
+                            "voice": voice,
+                            "speed": speed,
+                            "worker_id": worker_id,
+                            "timeout_indicator": is_timeout,
+                            "error": str(ce),
+                        },
+                        is_attempt_metric=True,
+                    )
+                    logger.warning(f"Chunk {chunk.index} attempt {attempt} failed ({ce})")
+                    if attempt < max_attempts:
+                        time.sleep(1.0)
+
+            if not chunk_success:
+                db_chunk.status = "FAILED"
+                db_chunk.error_detail = str(last_error)
+                db.commit()
+
+                is_timeout = (
+                    isinstance(last_error, KokoroTTSTimeoutError)
+                    or "timed out" in str(last_error).lower()
+                )
+                if is_timeout:
+                    if isinstance(last_error, KokoroTTSTimeoutError):
                         raise last_error
-                    raise KokoroTTSError(str(last_error))
+                    raise KokoroTTSTimeoutError(str(last_error))
+                if isinstance(last_error, KokoroTTSError):
+                    raise last_error
+                raise KokoroTTSError(str(last_error))
 
+            return chunk_file
 
-                return chunk_file
-
-            finally:
-                db.close()
+        finally:
+            db.close()
 
 
 def process_tts_chunks_parallel(
@@ -348,7 +386,6 @@ def process_tts_chunks_parallel(
     finally:
         db.close()
 
-
     # Index map for TTSChunk objects
     chunk_map = {c.index: c for c in script_chunks}
 
@@ -356,10 +393,14 @@ def process_tts_chunks_parallel(
     uncompleted_chunks = [c for c in prepared_chunks if c.status != "COMPLETED"]
 
     if uncompleted_chunks:
-        logger.info(f"Job '{job_id}' synthesis: {len(uncompleted_chunks)}/{len(script_chunks)} chunks pending (Workers limit: {max_workers})")
+        logger.info(
+            f"Job '{job_id}' synthesis: {len(uncompleted_chunks)}/{len(script_chunks)} chunks pending (Workers limit: {max_workers})"
+        )
 
         executor_workers = min(max_workers, len(uncompleted_chunks))
-        with ThreadPoolExecutor(max_workers=executor_workers, thread_name_prefix=f"tts-{job_id[:8]}") as executor:
+        with ThreadPoolExecutor(
+            max_workers=executor_workers, thread_name_prefix=f"tts-{job_id[:8]}"
+        ) as executor:
             future_to_idx = {}
             for db_c in uncompleted_chunks:
                 chunk_obj = chunk_map[db_c.chunk_index]
@@ -404,10 +445,14 @@ def process_tts_chunks_parallel(
         ordered_paths: list[Path] = []
         for db_c in final_chunks:
             if db_c.status != "COMPLETED" or not db_c.local_path:
-                raise KokoroTTSError(f"TTS Chunk {db_c.chunk_index} is not complete (status: {db_c.status})")
+                raise KokoroTTSError(
+                    f"TTS Chunk {db_c.chunk_index} is not complete (status: {db_c.status})"
+                )
             file_path = Path(db_c.local_path)
             if not file_path.exists() or file_path.stat().st_size == 0:
-                raise KokoroTTSError(f"TTS Chunk {db_c.chunk_index} file missing or empty: {file_path}")
+                raise KokoroTTSError(
+                    f"TTS Chunk {db_c.chunk_index} file missing or empty: {file_path}"
+                )
             validate_audio_file(file_path)
             ordered_paths.append(file_path)
 

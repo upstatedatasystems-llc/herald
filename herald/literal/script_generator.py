@@ -128,7 +128,11 @@ def generate_literal_script(
 
     for block in raw_blocks:
         # Check if block is a markdown or explicit heading
-        if (block.startswith("#") or block.lower().startswith("section") or block.lower().startswith("chapter")) and len(block) < 100:
+        if (
+            block.startswith("#")
+            or block.lower().startswith("section")
+            or block.lower().startswith("chapter")
+        ) and len(block) < 100:
             flush_segment()
             heading_clean = re.sub(r"^#+\s*", "", block).strip()
             current_heading = heading_clean or f"Section {segment_idx}"

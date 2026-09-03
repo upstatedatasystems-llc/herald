@@ -59,10 +59,10 @@ def format_acknowledgment_email(
         safe_depth = html.escape(depth_val)
         research_depth_text = f"Research Depth: {depth_val}\n"
         research_depth_row_html = (
-            f'<tr>\n'
+            f"<tr>\n"
             f'  <td style="padding: 10px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f1f5f9;">Research Depth</td>\n'
             f'  <td style="padding: 10px 0; font-size: 14px; color: #0f172a; font-weight: 600; border-bottom: 1px solid #f1f5f9;">{safe_depth}</td>\n'
-            f'</tr>\n'
+            f"</tr>\n"
         )
 
     text_body = (
@@ -213,10 +213,10 @@ def format_completion_email(
         safe_ver = html.escape(ver_text)
         verify_status_text = f"Verification: {ver_text}\n"
         verify_row_html = (
-            f'<tr>'
+            f"<tr>"
             f'<td style="padding: 6px 0; font-size: 14px; color: #64748b; border-bottom: 1px solid #f8fafc;">Verification</td>'
             f'<td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: 500; border-bottom: 1px solid #f8fafc;">{safe_ver}</td>'
-            f'</tr>'
+            f"</tr>"
         )
 
     # Completed timestamp formatting (omit if N/A or missing)

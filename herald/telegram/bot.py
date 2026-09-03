@@ -64,6 +64,7 @@ _START_TIME = datetime.now(UTC)
 _VOICE_SAMPLE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="voice-sample")
 _IN_FLIGHT_VOICE_SAMPLES: set[str] = set()
 _VOICE_SAMPLE_LOCK = Lock()
+_MAX_IN_FLIGHT_VOICE_SAMPLES = 10
 
 
 def parse_telegram_message_directives(text: str) -> dict[str, Any]:
@@ -124,7 +125,11 @@ def parse_telegram_message_directives(text: str) -> dict[str, Any]:
             elif lower_line in ("standard", "podcast: standard", "mode: standard"):
                 matched_mode = "standard"
                 continue
-            elif lower_line.startswith("research") or lower_line.startswith("podcast: research") or lower_line.startswith("detailed"):
+            elif (
+                lower_line.startswith("research")
+                or lower_line.startswith("podcast: research")
+                or lower_line.startswith("detailed")
+            ):
                 matched_mode = "research"
                 if "low" in lower_line:
                     matched_depth = "low"
@@ -137,7 +142,7 @@ def parse_telegram_message_directives(text: str) -> dict[str, Any]:
                 verify = True
                 continue
             elif lower_line.startswith("chunk-"):
-                val_str = lower_line[len("chunk-"):]
+                val_str = lower_line[len("chunk-") :]
                 if val_str.isdigit():
                     c_val = int(val_str)
                     if not (settings.TTS_CHUNK_MIN_CHARS <= c_val <= settings.TTS_CHUNK_MAX_CHARS):
@@ -230,7 +235,11 @@ def handle_telegram_command(
     """Handle Telegram bot slash commands."""
     chat = message.get("chat", {})
     chat_id = chat.get("id")
-    chat_type = chat.get("type") or ("private" if (isinstance(chat_id, int) and chat_id > 0) else ("group" if isinstance(chat_id, int) and chat_id < 0 else "private"))
+    chat_type = chat.get("type") or (
+        "private"
+        if (isinstance(chat_id, int) and chat_id > 0)
+        else ("group" if isinstance(chat_id, int) and chat_id < 0 else "private")
+    )
     user = message.get("from", {})
     user_id = user.get("id")
     msg_id = message.get("message_id")
@@ -271,10 +280,16 @@ def handle_telegram_command(
         escaped_reply = html.escape(reply_msg)
         if success:
             owner = get_paired_owner(db)
-            owner_name = (owner.first_name or owner.username or str(owner.telegram_user_id)) if owner else "Owner"
+            owner_name = (
+                (owner.first_name or owner.username or str(owner.telegram_user_id))
+                if owner
+                else "Owner"
+            )
             default_mode = settings.get_default_mode()
             ai_prov = settings.AI_PROVIDER or "None (Literal only)"
-            quickstart_msg = format_quickstart(owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov)
+            quickstart_msg = format_quickstart(
+                owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov
+            )
             client.send_message(
                 chat_id=chat_id,
                 text=f"✅ <b>{escaped_reply}</b>\n\n{quickstart_msg}",
@@ -310,10 +325,16 @@ def handle_telegram_command(
 
     if cmd_clean == "start":
         owner = get_paired_owner(db)
-        owner_name = (owner.first_name or owner.username or str(owner.telegram_user_id)) if owner else "Owner"
+        owner_name = (
+            (owner.first_name or owner.username or str(owner.telegram_user_id))
+            if owner
+            else "Owner"
+        )
         default_mode = settings.get_default_mode()
         ai_prov = settings.AI_PROVIDER or "None (Literal only)"
-        quickstart_msg = format_quickstart(owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov)
+        quickstart_msg = format_quickstart(
+            owner_name=owner_name, default_mode=default_mode, ai_provider=ai_prov
+        )
         client.send_message(
             chat_id=chat_id,
             text=quickstart_msg,
@@ -322,7 +343,9 @@ def handle_telegram_command(
         )
 
     elif cmd_clean == "help":
-        client.send_message(chat_id=chat_id, text=format_help(), reply_to_message_id=msg_id, parse_mode="HTML")
+        client.send_message(
+            chat_id=chat_id, text=format_help(), reply_to_message_id=msg_id, parse_mode="HTML"
+        )
 
     elif cmd_clean == "status":
         uptime_seconds = int((datetime.now(UTC) - _START_TIME).total_seconds())
@@ -351,15 +374,16 @@ def handle_telegram_command(
 
         # Queue counts across all nonterminal active states
         nonterminal_states = [
-            s.value for s in JobState
+            s.value
+            for s in JobState
             if s not in (JobState.COMPLETE, JobState.FAILED_FINAL, JobState.CANCELLED)
         ]
         active_count = (
-            db.query(PodcastJob)
-            .filter(PodcastJob.status.in_(nonterminal_states))
-            .count()
+            db.query(PodcastJob).filter(PodcastJob.status.in_(nonterminal_states)).count()
         )
-        completed_count = db.query(PodcastJob).filter(PodcastJob.status == JobState.COMPLETE.value).count()
+        completed_count = (
+            db.query(PodcastJob).filter(PodcastJob.status == JobState.COMPLETE.value).count()
+        )
 
         status_msg = (
             f"📊 <b>Herald System Status</b>\n\n"
@@ -370,7 +394,9 @@ def handle_telegram_command(
             f"• <b>Active Jobs:</b> {active_count}\n"
             f"• <b>Completed Jobs:</b> {completed_count}\n"
         )
-        client.send_message(chat_id=chat_id, text=status_msg, reply_to_message_id=msg_id, parse_mode="HTML")
+        client.send_message(
+            chat_id=chat_id, text=status_msg, reply_to_message_id=msg_id, parse_mode="HTML"
+        )
 
     elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
         ai_provider = get_ai_provider()
@@ -408,10 +434,12 @@ def handle_telegram_command(
 
     elif cmd_clean == "queue":
         owner = get_paired_owner(db)
-        is_owner = (owner is not None and int(user_id) == owner.telegram_user_id)
+        is_owner = owner is not None and int(user_id) == owner.telegram_user_id
 
         q = db.query(PodcastJob).filter(
-            PodcastJob.status.notin_([JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value])
+            PodcastJob.status.notin_(
+                [JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value]
+            )
         )
         if not is_owner:
             q = q.filter(
@@ -422,7 +450,12 @@ def handle_telegram_command(
 
         jobs = q.order_by(PodcastJob.created_at.asc()).limit(10).all()
         if not jobs:
-            client.send_message(chat_id=chat_id, text="📭 <b>Queue is currently empty.</b>", reply_to_message_id=msg_id, parse_mode="HTML")
+            client.send_message(
+                chat_id=chat_id,
+                text="📭 <b>Queue is currently empty.</b>",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
             return
 
         lines = ["📋 <b>Active Podcast Queue:</b>\n"]
@@ -432,7 +465,9 @@ def handle_telegram_command(
             st = html.escape(j.status)
             lines.append(f"• <b>{t}</b> [{mode}] — <code>{st}</code>")
 
-        client.send_message(chat_id=chat_id, text="\n".join(lines), reply_to_message_id=msg_id, parse_mode="HTML")
+        client.send_message(
+            chat_id=chat_id, text="\n".join(lines), reply_to_message_id=msg_id, parse_mode="HTML"
+        )
 
     elif cmd_clean == "settings":
         prefs = get_effective_user_preferences(db, user_id)
@@ -459,7 +494,13 @@ def handle_telegram_command(
         )
 
     elif cmd_clean == "download":
-        job = resolve_user_job(db, telegram_user_id=user_id, telegram_chat_id=chat_id, identifier=args, completed_only=True)
+        job = resolve_user_job(
+            db,
+            telegram_user_id=user_id,
+            telegram_chat_id=chat_id,
+            identifier=args,
+            completed_only=True,
+        )
         if not job:
             client.send_message(
                 chat_id=chat_id,
@@ -481,7 +522,9 @@ def handle_telegram_command(
                 reply_to_message_id=msg_id,
             )
         else:
-            client.send_message(chat_id=chat_id, text="README.md not found on server.", reply_to_message_id=msg_id)
+            client.send_message(
+                chat_id=chat_id, text="README.md not found on server.", reply_to_message_id=msg_id
+            )
 
     else:
         client.send_message(
@@ -500,7 +543,11 @@ def handle_telegram_content_message(
     """Handle plain text, forwarded message, or URL input from an authorized user."""
     chat = message.get("chat", {})
     chat_id = chat.get("id")
-    chat_type = chat.get("type") or ("private" if (isinstance(chat_id, int) and chat_id > 0) else ("group" if isinstance(chat_id, int) and chat_id < 0 else "private"))
+    chat_type = chat.get("type") or (
+        "private"
+        if (isinstance(chat_id, int) and chat_id > 0)
+        else ("group" if isinstance(chat_id, int) and chat_id < 0 else "private")
+    )
     user = message.get("from", {})
     user_id = user.get("id")
     msg_id = message.get("message_id")
@@ -557,9 +604,15 @@ def handle_telegram_content_message(
         return
 
     user_prefs = get_effective_user_preferences(db, user_id)
-    eff_mode = parsed.get("explicit_mode") or user_prefs.get("default_mode") or settings.get_default_mode()
+    eff_mode = (
+        parsed.get("explicit_mode") or user_prefs.get("default_mode") or settings.get_default_mode()
+    )
     eff_voice = parsed.get("voice") or user_prefs.get("default_voice") or settings.KOKORO_VOICE
-    eff_speed = parsed.get("speed") if parsed.get("speed") is not None else user_prefs.get("default_speed", settings.KOKORO_SPEED)
+    eff_speed = (
+        parsed.get("speed")
+        if parsed.get("speed") is not None
+        else user_prefs.get("default_speed", settings.KOKORO_SPEED)
+    )
     confirm_tts = bool(user_prefs.get("confirm_before_tts", False))
 
     req = HeraldRequest(
@@ -598,9 +651,14 @@ def handle_telegram_content_message(
         existing_job = db.query(PodcastJob).filter_by(id=response.job_id).first()
         if existing_job:
             # Recovery path: job is awaiting approval but card was never delivered
-            if existing_job.status == JobState.AWAITING_APPROVAL.value and not existing_job.telegram_approval_message_id:
+            if (
+                existing_job.status == JobState.AWAITING_APPROVAL.value
+                and not existing_job.telegram_approval_message_id
+            ):
                 eta_info = calculate_job_eta(db, existing_job)
-                app_text, reply_markup = format_approval(existing_job, existing_job.script_json, eta_info)
+                app_text, reply_markup = format_approval(
+                    existing_job, existing_job.script_json, eta_info
+                )
                 try:
                     sent_msg = client.send_message(
                         chat_id=chat_id,
@@ -614,23 +672,32 @@ def handle_telegram_content_message(
                         existing_job.approval_requested_at = datetime.now(UTC)
                         db.commit()
                 except Exception as e:
-                    logger.error(f"Failed to deliver recovery approval card for job '{existing_job.id}': {e}")
+                    logger.error(
+                        f"Failed to deliver recovery approval card for job '{existing_job.id}': {e}"
+                    )
                 return
 
-            if existing_job.status == JobState.COMPLETE.value and existing_job.local_audio_path and os.path.exists(existing_job.local_audio_path):
+            if (
+                existing_job.status == JobState.COMPLETE.value
+                and existing_job.local_audio_path
+                and os.path.exists(existing_job.local_audio_path)
+            ):
+                auth_title = get_job_display_title(existing_job)
+                auth_title_escaped = html.escape(auth_title)
                 client.send_message(
                     chat_id=chat_id,
-                    text=f"🎧 <b>Already Processed:</b> Re-delivering '{title_escaped}'...",
+                    text=f"🎧 <b>Already Processed:</b> Re-delivering '{auth_title_escaped}'...",
                     reply_to_message_id=msg_id,
                     parse_mode="HTML",
                 )
                 client.send_audio(
                     chat_id=chat_id,
                     audio_path=existing_job.local_audio_path,
-                    title=response.episode_title or "Herald Episode",
+                    title=auth_title,
                     performer="Herald",
-                    caption=f"🎙️ <b>{title_escaped}</b>\nFormat: {mode_escaped}\n(Re-delivered)",
+                    caption=f"🎙️ <b>{auth_title_escaped}</b>\nFormat: {mode_escaped}\n(Re-delivered)",
                     reply_to_message_id=msg_id,
+                    parse_mode="HTML",
                 )
                 return
 
@@ -717,7 +784,9 @@ def handle_telegram_callback_query(
 
     # Strict private chat guard
     if chat_type != "private":
-        client.answer_callback_query(cb_id, text="Herald operates only in private chats.", show_alert=True)
+        client.answer_callback_query(
+            cb_id, text="Herald operates only in private chats.", show_alert=True
+        )
         return
 
     # Owner authorization guard
@@ -771,10 +840,17 @@ def handle_telegram_callback_query(
         return
 
     elif raw_data.startswith("h2:approve:"):
-        job_id = raw_data[len("h2:approve:"):]
+        job_id = raw_data[len("h2:approve:") :]
         job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
-        if not job or job.telegram_user_id != user_id or job.telegram_chat_id != chat_id or job.transport != "telegram":
-            client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+        if (
+            not job
+            or job.telegram_user_id != user_id
+            or job.telegram_chat_id != chat_id
+            or job.transport != "telegram"
+        ):
+            client.answer_callback_query(
+                cb_id, text="Unauthorized: Access denied.", show_alert=True
+            )
             return
 
         now = datetime.now(UTC)
@@ -832,20 +908,33 @@ def handle_telegram_callback_query(
                 JobState.ENCODING.value,
                 JobState.COMPLETE.value,
             ):
-                client.answer_callback_query(cb_id, text="Job is already approved and synthesizing.")
+                client.answer_callback_query(
+                    cb_id, text="Job is already approved and synthesizing."
+                )
                 return
             elif job.status == JobState.CANCELLED.value:
-                client.answer_callback_query(cb_id, text="Job was already cancelled.", show_alert=True)
+                client.answer_callback_query(
+                    cb_id, text="Job was already cancelled.", show_alert=True
+                )
                 return
             else:
-                client.answer_callback_query(cb_id, text=f"Cannot approve job in state {job.status}.", show_alert=True)
+                client.answer_callback_query(
+                    cb_id, text=f"Cannot approve job in state {job.status}.", show_alert=True
+                )
                 return
 
     elif raw_data.startswith("h2:deny:"):
-        job_id = raw_data[len("h2:deny:"):]
+        job_id = raw_data[len("h2:deny:") :]
         job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
-        if not job or job.telegram_user_id != user_id or job.telegram_chat_id != chat_id or job.transport != "telegram":
-            client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+        if (
+            not job
+            or job.telegram_user_id != user_id
+            or job.telegram_chat_id != chat_id
+            or job.transport != "telegram"
+        ):
+            client.answer_callback_query(
+                cb_id, text="Unauthorized: Access denied.", show_alert=True
+            )
             return
 
         now = datetime.now(UTC)
@@ -902,17 +991,31 @@ def handle_telegram_callback_query(
                 JobState.ENCODING.value,
                 JobState.COMPLETE.value,
             ):
-                client.answer_callback_query(cb_id, text="Job is already synthesizing and cannot be cancelled.", show_alert=True)
+                client.answer_callback_query(
+                    cb_id,
+                    text="Job is already synthesizing and cannot be cancelled.",
+                    show_alert=True,
+                )
                 return
             else:
-                client.answer_callback_query(cb_id, text=f"Cannot cancel job in state {job.status}.", show_alert=True)
+                client.answer_callback_query(
+                    cb_id, text=f"Cannot cancel job in state {job.status}.", show_alert=True
+                )
                 return
 
     elif raw_data.startswith("h2:download:"):
-        job_id = raw_data[len("h2:download:"):]
-        job = resolve_user_job(db, telegram_user_id=user_id, telegram_chat_id=chat_id, identifier=job_id, completed_only=True)
+        job_id = raw_data[len("h2:download:") :]
+        job = resolve_user_job(
+            db,
+            telegram_user_id=user_id,
+            telegram_chat_id=chat_id,
+            identifier=job_id,
+            completed_only=True,
+        )
         if not job:
-            client.answer_callback_query(cb_id, text="Podcast not found or access denied.", show_alert=True)
+            client.answer_callback_query(
+                cb_id, text="Podcast not found or access denied.", show_alert=True
+            )
             return
 
         client.answer_callback_query(cb_id, text="Sending MP3 file...")
@@ -920,7 +1023,7 @@ def handle_telegram_callback_query(
         return
 
     elif raw_data.startswith("h2:voice:set:"):
-        v_name = raw_data[len("h2:voice:set:"):]
+        v_name = raw_data[len("h2:voice:set:") :]
         allowed = settings.get_allowed_voices_list()
         if v_name not in allowed:
             client.answer_callback_query(cb_id, text=f"Invalid voice '{v_name}'.", show_alert=True)
@@ -945,7 +1048,7 @@ def handle_telegram_callback_query(
         return
 
     elif raw_data.startswith("h2:voice:sample:"):
-        v_name = raw_data[len("h2:voice:sample:"):]
+        v_name = raw_data[len("h2:voice:sample:") :]
         allowed = settings.get_allowed_voices_list()
         if v_name not in allowed:
             client.answer_callback_query(cb_id, text=f"Invalid voice '{v_name}'.", show_alert=True)
@@ -981,7 +1084,7 @@ def handle_telegram_callback_query(
             )
             return
 
-        # Cache miss: non-blocking background generation with in-flight deduplication
+        # Cache miss: non-blocking background generation with in-flight deduplication & bounded queue
         with _VOICE_SAMPLE_LOCK:
             if v_name in _IN_FLIGHT_VOICE_SAMPLES:
                 client.answer_callback_query(
@@ -990,9 +1093,18 @@ def handle_telegram_callback_query(
                     show_alert=False,
                 )
                 return
+            if len(_IN_FLIGHT_VOICE_SAMPLES) >= _MAX_IN_FLIGHT_VOICE_SAMPLES:
+                client.answer_callback_query(
+                    cb_id,
+                    text="Voice preview queue is busy. Please try again shortly.",
+                    show_alert=False,
+                )
+                return
             _IN_FLIGHT_VOICE_SAMPLES.add(v_name)
 
-        client.answer_callback_query(cb_id, text=f"Preparing voice sample for {disp_name}... Herald will send it shortly.")
+        client.answer_callback_query(
+            cb_id, text=f"Preparing voice sample for {disp_name}... Herald will send it shortly."
+        )
 
         def _bg_generate_sample(target_voice: str, target_chat_id: int):
             try:
@@ -1021,7 +1133,10 @@ def handle_telegram_callback_query(
                     reply_markup=m_up,
                 )
             except Exception as e:
-                logger.error(f"Background voice sample generation failed for '{target_voice}': {e}", exc_info=True)
+                logger.error(
+                    f"Background voice sample generation failed for '{target_voice}': {e}",
+                    exc_info=True,
+                )
                 try:
                     client.send_message(
                         chat_id=target_chat_id,
@@ -1135,7 +1250,9 @@ def sweep_unpresented_approval_cards(db: Session, client: TelegramClient) -> int
         except Exception as e:
             job.attempt_count = (job.attempt_count or 0) + 1
             db.commit()
-            logger.warning(f"Failed retry to deliver approval card for job '{job.id}' (attempt {job.attempt_count}): {e}")
+            logger.warning(
+                f"Failed retry to deliver approval card for job '{job.id}' (attempt {job.attempt_count}): {e}"
+            )
     return delivered
 
 
@@ -1191,11 +1308,17 @@ def run_telegram_bot(poll_interval: float = 1.0) -> None:
                             last_offset = update_id
 
                         except Exception as e:
-                            logger.exception(f"Unexpected failure processing Telegram update {update_id}")
+                            logger.exception(
+                                f"Unexpected failure processing Telegram update {update_id}"
+                            )
                             db.rollback()
 
                             # Track failed update attempt durably
-                            fail_rec = db.query(TelegramUpdateFailure).filter_by(update_id=update_id).first()
+                            fail_rec = (
+                                db.query(TelegramUpdateFailure)
+                                .filter_by(update_id=update_id)
+                                .first()
+                            )
                             if not fail_rec:
                                 fail_rec = TelegramUpdateFailure(
                                     update_id=update_id,

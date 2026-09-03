@@ -40,7 +40,10 @@ def test_eta_excludes_jobs_behind(db_session):
         status=JobState.SYNTHESIZING.value,
         created_at=t0,
         completed_chunk_index=2,
-        script_json={"estimated_minutes": 5.0, "segments": [{"t": "1"}, {"t": "2"}, {"t": "3"}, {"t": "4"}]},
+        script_json={
+            "estimated_minutes": 5.0,
+            "segments": [{"t": "1"}, {"t": "2"}, {"t": "3"}, {"t": "4"}],
+        },
     )
     target_job = PodcastJob(
         gmail_message_id="eta-target",

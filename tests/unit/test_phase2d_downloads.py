@@ -97,15 +97,25 @@ def test_resolve_user_job_resolver_contract(db_session):
     assert latest_c.id == j_ambig.id
 
     # completed_only=True rejects explicit non-complete job
-    non_c = resolve_user_job(db_session, user_id, chat_id, identifier="11111111-2222-3333-4444-000000000000", completed_only=True)
+    non_c = resolve_user_job(
+        db_session,
+        user_id,
+        chat_id,
+        identifier="11111111-2222-3333-4444-000000000000",
+        completed_only=True,
+    )
     assert non_c is None
 
     # Ambiguous prefix "11111111" (matches both j_old and j_ambig) -> returns None
-    ambig_match = resolve_user_job(db_session, user_id, chat_id, identifier="11111111", completed_only=True)
+    ambig_match = resolve_user_job(
+        db_session, user_id, chat_id, identifier="11111111", completed_only=True
+    )
     assert ambig_match is None
 
     # Unambiguous prefix "11111111-9999" -> matches j_ambig
-    unique_match = resolve_user_job(db_session, user_id, chat_id, identifier="11111111-9999", completed_only=True)
+    unique_match = resolve_user_job(
+        db_session, user_id, chat_id, identifier="11111111-9999", completed_only=True
+    )
     assert unique_match is not None
     assert unique_match.id == j_ambig.id
 
@@ -114,10 +124,17 @@ def test_resolve_user_job_resolver_contract(db_session):
     assert resolve_user_job(db_session, user_id, chat_id, identifier="_") is None
     assert resolve_user_job(db_session, user_id, chat_id, identifier="1111%") is None
     assert resolve_user_job(db_session, user_id, chat_id, identifier="abc'; DROP TABLE") is None
-    assert resolve_user_job(db_session, user_id, chat_id, identifier="12") is None  # Too short (< 4 chars)
+    assert (
+        resolve_user_job(db_session, user_id, chat_id, identifier="12") is None
+    )  # Too short (< 4 chars)
 
     # Cross-tenant query rejected
-    assert resolve_user_job(db_session, user_id, chat_id, identifier="99999999-9999-9999-9999-999999999999") is None
+    assert (
+        resolve_user_job(
+            db_session, user_id, chat_id, identifier="99999999-9999-9999-9999-999999999999"
+        )
+        is None
+    )
 
 
 def test_deliver_job_download_priority_hierarchy(db_session, tmp_path):
@@ -250,7 +267,10 @@ def test_download_command_and_callback_share_service(db_session, tmp_path):
     db_session.commit()
 
     mock_client = MagicMock(spec=TelegramClient)
-    mock_client.send_document.return_value = {"message_id": 301, "document": {"file_id": "file_id_xyz"}}
+    mock_client.send_document.return_value = {
+        "message_id": 301,
+        "document": {"file_id": "file_id_xyz"},
+    }
 
     # Test /download command
     msg = {"chat": {"id": 12345, "type": "private"}, "from": {"id": 12345}, "message_id": 10}

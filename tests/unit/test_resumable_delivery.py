@@ -30,7 +30,11 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
         audio_sha256="sha123",
         created_at=now,
         audio_ready_at=now,
-        script_json={"episode_title": "Resumable Title", "estimated_minutes": 2.0, "segments": [{}]},
+        script_json={
+            "episode_title": "Resumable Title",
+            "estimated_minutes": 2.0,
+            "segments": [{}],
+        },
     )
     db_session.add(job)
     db_session.commit()
@@ -45,7 +49,9 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     assert job_data["needs_details_upload"] is True
 
     # 2. Attempting to fetch completion email before all Drive IDs exist fails with 400
-    res_premature_email = client.get(f"/api/v1/jobs/{job.id}/completion-email", headers=AUTH_HEADERS)
+    res_premature_email = client.get(
+        f"/api/v1/jobs/{job.id}/completion-email", headers=AUTH_HEADERS
+    )
     assert res_premature_email.status_code == 400
     assert "missing required Drive artifact IDs" in res_premature_email.json()["detail"]
 
@@ -53,7 +59,11 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     res_audio = client.post(
         f"/api/v1/jobs/{job.id}/drive-complete",
         headers=AUTH_HEADERS,
-        json={"artifact_type": "audio", "drive_file_id": "audio-drive-id-1", "drive_web_link": "http://drive/audio"},
+        json={
+            "artifact_type": "audio",
+            "drive_file_id": "audio-drive-id-1",
+            "drive_web_link": "http://drive/audio",
+        },
     )
     assert res_audio.status_code == 200
     assert res_audio.json()["drive_file_id"] == "audio-drive-id-1"
@@ -81,7 +91,11 @@ def test_resumable_delivery_partial_artifacts(db_session, monkeypatch):
     res_details = client.post(
         f"/api/v1/jobs/{job.id}/drive-complete",
         headers=AUTH_HEADERS,
-        json={"artifact_type": "details", "details_drive_file_id": "details-drive-id-2", "details_drive_web_link": "http://drive/details"},
+        json={
+            "artifact_type": "details",
+            "details_drive_file_id": "details-drive-id-2",
+            "details_drive_web_link": "http://drive/details",
+        },
     )
     assert res_details.status_code == 200
 

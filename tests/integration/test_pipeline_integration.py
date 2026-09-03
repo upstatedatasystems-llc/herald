@@ -52,8 +52,16 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
         "episode_description": "A quick overview of cloud ARM computing.",
         "estimated_minutes": 8,
         "segments": [
-            {"order": 1, "heading": "Introduction", "narration": "Welcome to Herald. Today we discuss cloud ARM computing."},
-            {"order": 2, "heading": "Efficiency", "narration": "Ampere A1 servers provide great efficiency for continuous jobs."},
+            {
+                "order": 1,
+                "heading": "Introduction",
+                "narration": "Welcome to Herald. Today we discuss cloud ARM computing.",
+            },
+            {
+                "order": 2,
+                "heading": "Efficiency",
+                "narration": "Ampere A1 servers provide great efficiency for continuous jobs.",
+            },
         ],
         "warnings": [],
     }
@@ -74,7 +82,9 @@ def test_full_mocked_pipeline_integration(db_session, tmp_path):
     chunk_2 = tmp_path / "chunk_0002.wav"
 
     client.synthesize_chunk("Welcome to Herald. Today we discuss cloud ARM computing.", chunk_1)
-    client.synthesize_chunk("Ampere A1 servers provide great efficiency for continuous jobs.", chunk_2)
+    client.synthesize_chunk(
+        "Ampere A1 servers provide great efficiency for continuous jobs.", chunk_2
+    )
 
     assert chunk_1.exists() and chunk_1.stat().st_size > 0
     assert chunk_2.exists() and chunk_2.stat().st_size > 0

@@ -26,7 +26,9 @@ def test_secret_redaction_in_emitted_logs():
 
     try:
         # 1. Log containing Telegram URL with token
-        test_logger.error(f"Failed to connect to https://api.telegram.org/bot{secret_bot_token}/sendMessage")
+        test_logger.error(
+            f"Failed to connect to https://api.telegram.org/bot{secret_bot_token}/sendMessage"
+        )
 
         # 2. Log containing Gemini API Key in header
         test_logger.warning(f"Request failed with x-goog-api-key: '{secret_gemini_key}'")
@@ -36,7 +38,9 @@ def test_secret_redaction_in_emitted_logs():
 
         # 4. Simulated exception
         try:
-            raise RuntimeError(f"Connection failed for key {secret_gemini_key} on bot {secret_bot_token}")
+            raise RuntimeError(
+                f"Connection failed for key {secret_gemini_key} on bot {secret_bot_token}"
+            )
         except Exception as e:
             test_logger.exception(e)
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
+import os
+import sys
 from pathlib import Path
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from herald.config import settings
-from herald.tts.kokoro_client import KokoroClient, KokoroTTSError
 from herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.config import settings
+from herald.tts.kokoro_client import KokoroClient
 
 
 def run_smoke_test(mock_if_missing: bool = False):
@@ -37,7 +37,9 @@ def run_smoke_test(mock_if_missing: bool = False):
     chunk_file = test_dir / "smoke_chunk.wav"
     output_mp3 = test_dir / "smoke_output.mp3"
 
-    sample_text = "Welcome to Herald. This is a synthetic audio test for email to podcast automation."
+    sample_text = (
+        "Welcome to Herald. This is a synthetic audio test for email to podcast automation."
+    )
 
     try:
         print("Synthesizing test audio chunk...")

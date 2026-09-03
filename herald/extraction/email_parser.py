@@ -85,13 +85,9 @@ REPLY_SEPARATOR_PATTERNS = [
     re.compile(r"^\s*Unsubscribe\b.*$", re.MULTILINE | re.IGNORECASE),
 ]
 
-URL_REGEX = re.compile(
-    r"https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s<>'\"\)]*)?"
-)
+URL_REGEX = re.compile(r"https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s<>'\"\)]*)?")
 
-PERMITTED_URL_LABELS = {
-    "article:", "link:", "source:", "url:", "article", "link", "source", "url"
-}
+PERMITTED_URL_LABELS = {"article:", "link:", "source:", "url:", "article", "link", "source", "url"}
 
 
 def parse_subject_directives(subject: str) -> tuple[RequestMode | None, str | None, int, bool]:
@@ -124,7 +120,7 @@ def parse_subject_directives(subject: str) -> tuple[RequestMode | None, str | No
         if normalized == prefix or normalized.startswith(prefix + " "):
             matched_mode = mode
             matched_depth = depth
-            remainder = clean[len(prefix):].strip()
+            remainder = clean[len(prefix) :].strip()
             break
 
     if not matched_mode:
@@ -143,24 +139,34 @@ def parse_subject_directives(subject: str) -> tuple[RequestMode | None, str | No
 
             if token_norm.startswith("chunk-"):
                 if seen_chunk_cmd:
-                    raise ValueError(f"Conflicting or duplicate chunk command '{token}' in subject line.")
+                    raise ValueError(
+                        f"Conflicting or duplicate chunk command '{token}' in subject line."
+                    )
                 seen_chunk_cmd = True
-                val_str = token_norm[len("chunk-"):]
+                val_str = token_norm[len("chunk-") :]
                 if not val_str.isdigit():
-                    raise ValueError(f"Malformed chunk command '{token}' in subject line. Expected format 'chunk-N' (e.g. chunk-500).")
+                    raise ValueError(
+                        f"Malformed chunk command '{token}' in subject line. Expected format 'chunk-N' (e.g. chunk-500)."
+                    )
                 c_val = int(val_str)
                 if not (min_chunk <= c_val <= max_chunk):
-                    raise ValueError(f"Invalid chunk size '{c_val}' in subject line. Chunk size must be between {min_chunk} and {max_chunk} characters.")
+                    raise ValueError(
+                        f"Invalid chunk size '{c_val}' in subject line. Chunk size must be between {min_chunk} and {max_chunk} characters."
+                    )
                 tts_chunk_chars = c_val
             elif token_norm == "verify":
                 verify_final_script = True
             else:
-                raise ValueError(f"Unknown or invalid subject command '{token}' in subject line. Allowed commands are 'verify' and 'chunk-N'.")
+                raise ValueError(
+                    f"Unknown or invalid subject command '{token}' in subject line. Allowed commands are 'verify' and 'chunk-N'."
+                )
 
     return matched_mode, matched_depth, tts_chunk_chars, verify_final_script
 
 
-def parse_subject_mode_and_depth(subject: str) -> tuple[RequestMode, str | None] | tuple[None, None]:
+def parse_subject_mode_and_depth(
+    subject: str,
+) -> tuple[RequestMode, str | None] | tuple[None, None]:
     """
     Parse email subject. Repeatedly strip leading Re:, Fwd:, FW: prefixes conservatively.
     Returns (RequestMode, depth_from_subject) or (None, None).
@@ -213,7 +219,9 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
                 seen_directives.add("voice")
                 val = m_voice.group(1).strip().lower()
                 if val not in allowed_voices:
-                    raise ValueError(f"Invalid directive 'Voice: {val}'. Voice must be one of: {allowed_voices}")
+                    raise ValueError(
+                        f"Invalid directive 'Voice: {val}'. Voice must be one of: {allowed_voices}"
+                    )
                 custom_voice = val
                 continue
 
@@ -225,7 +233,9 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
                 try:
                     s_val = float(m_speed.group(1))
                     if not (settings.MIN_SPEED <= s_val <= settings.MAX_SPEED):
-                        raise ValueError(f"Invalid directive 'Speed: {s_val}'. Speed must be between {settings.MIN_SPEED} and {settings.MAX_SPEED}.")
+                        raise ValueError(
+                            f"Invalid directive 'Speed: {s_val}'. Speed must be between {settings.MIN_SPEED} and {settings.MAX_SPEED}."
+                        )
                     custom_speed = s_val
                 except ValueError as ve:
                     raise ValueError(f"Invalid directive 'Speed: {m_speed.group(1)}': {ve}")
@@ -240,7 +250,9 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
                 if len(t_val) == 0:
                     raise ValueError("Directive 'Title:' cannot be empty.")
                 if len(t_val) > 255:
-                    raise ValueError(f"Directive 'Title:' exceeds maximum length of 255 characters (got {len(t_val)}).")
+                    raise ValueError(
+                        f"Directive 'Title:' exceeds maximum length of 255 characters (got {len(t_val)})."
+                    )
                 custom_title = t_val
                 continue
 
@@ -251,21 +263,42 @@ def parse_directives(text: str) -> tuple[str, str | None, float | None, str | No
                 seen_directives.add("research")
                 r_val = m_research.group(1).strip().lower()
                 if r_val not in ("low", "medium", "high"):
-                    raise ValueError(f"Invalid directive 'Research: {r_val}'. Research depth must be one of: low, medium, high")
+                    raise ValueError(
+                        f"Invalid directive 'Research: {r_val}'. Research depth must be one of: low, medium, high"
+                    )
                 custom_research_depth = r_val
                 continue
 
             m_generic = GENERIC_DIRECTIVE_PATTERN.match(stripped)
             if m_generic:
                 key = m_generic.group(1).strip()
-                if key.lower() not in ("voice", "speed", "title", "research", "http", "https", "article", "link", "source", "url"):
-                    raise ValueError(f"Unknown or invalid directive '{key}:'. Allowed directives are Voice:, Speed:, Title:, Research:")
+                if key.lower() not in (
+                    "voice",
+                    "speed",
+                    "title",
+                    "research",
+                    "http",
+                    "https",
+                    "article",
+                    "link",
+                    "source",
+                    "url",
+                ):
+                    raise ValueError(
+                        f"Unknown or invalid directive '{key}:'. Allowed directives are Voice:, Speed:, Title:, Research:"
+                    )
 
         in_header_zone = False
         remaining_lines.append(line)
 
     clean_text_without_directives = "\n".join(remaining_lines).strip()
-    return clean_text_without_directives, custom_voice, custom_speed, custom_title, custom_research_depth
+    return (
+        clean_text_without_directives,
+        custom_voice,
+        custom_speed,
+        custom_title,
+        custom_research_depth,
+    )
 
 
 def clean_email_text(text: str) -> str:
@@ -318,7 +351,9 @@ def extract_urls(text: str) -> list[str]:
     return clean_urls
 
 
-def classify_source_content(clean_text: str, urls: list[str]) -> tuple[SourceClassification, str | None]:
+def classify_source_content(
+    clean_text: str, urls: list[str]
+) -> tuple[SourceClassification, str | None]:
     """
     Classify source text into email_body, url, invalid_multiple_urls, or empty.
     """
@@ -377,7 +412,9 @@ def process_email_message(
     else:
         raw_content = body_text or ""
 
-    clean_content, custom_voice, custom_speed, custom_title, body_depth = parse_directives(raw_content)
+    clean_content, custom_voice, custom_speed, custom_title, body_depth = parse_directives(
+        raw_content
+    )
     clean_content = clean_email_text(clean_content)
     clean_content = clean_source_text(clean_content)
 
@@ -393,22 +430,30 @@ def process_email_message(
         if subject_depth:
             research_depth = subject_depth
             if body_depth and body_depth != subject_depth:
-                warnings.append(f"Explicit subject research depth '{subject_depth}' overrode body directive 'Research: {body_depth}'.")
+                warnings.append(
+                    f"Explicit subject research depth '{subject_depth}' overrode body directive 'Research: {body_depth}'."
+                )
         elif body_depth:
             research_depth = body_depth
         else:
             research_depth = "medium"
     else:
         if body_depth:
-            warnings.append(f"Body directive 'Research: {body_depth}' ignored for non-Research mode ({mode.value}).")
+            warnings.append(
+                f"Body directive 'Research: {body_depth}' ignored for non-Research mode ({mode.value})."
+            )
 
     urls = extract_urls(clean_content)
     classification, detected_url = classify_source_content(clean_content, urls)
 
     if classification == SourceClassification.INVALID_MULTIPLE_URLS:
-        raise ValueError("Multiple URLs submitted without substantive context. Please send one URL per request.")
+        raise ValueError(
+            "Multiple URLs submitted without substantive context. Please send one URL per request."
+        )
 
-    source_hash = compute_source_hash(clean_content, detected_url if classification == SourceClassification.URL else None)
+    source_hash = compute_source_hash(
+        clean_content, detected_url if classification == SourceClassification.URL else None
+    )
 
     return EmailParseResult(
         mode=mode,
@@ -424,4 +469,3 @@ def process_email_message(
         verify_final_script=verify_final_script,
         warnings=warnings,
     )
-

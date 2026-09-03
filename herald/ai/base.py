@@ -32,7 +32,9 @@ class AIProvider(ABC):
         """Generate structured podcast script from source text."""
 
     @abstractmethod
-    def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
+    def check_connection(
+        self, timeout_seconds: float = 5.0, force_refresh: bool = False
+    ) -> dict[str, Any]:
         """
         Check connectivity with the AI provider.
         Returns a dict: {"provider": str, "configured": bool, "connected": bool, "model": str, "error": str | None}

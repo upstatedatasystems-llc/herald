@@ -123,8 +123,8 @@ research high
              \               /
           [ PodcastJob Queue ]
                      ↓
-        [ Kokoro TTS Synthesis ]
-       (Sequential Chunk Synthesis)
+         [ Kokoro TTS Synthesis ]
+        (Concurrency-Controlled Chunk Synthesis)
                      ↓
         [ FFmpeg Audio Assembly ]
                      ↓

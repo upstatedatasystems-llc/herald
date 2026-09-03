@@ -9,7 +9,7 @@ from herald.telegram.delivery import deliver_pending_telegram_jobs, deliver_sing
 def test_completed_mp3_delivered_to_telegram(db_session, tmp_path):
     """Point 18: Completed MP3 is sent through Telegram."""
     audio_file = tmp_path / "test_ep.mp3"
-    audio_file.write_bytes(b"\xFF\xFB\x90\x44" * 100)  # fake MP3 header bytes
+    audio_file.write_bytes(b"\xff\xfb\x90\x44" * 100)  # fake MP3 header bytes
 
     job = PodcastJob(
         id="tg-job-001",
@@ -48,7 +48,7 @@ def test_completed_mp3_delivered_to_telegram(db_session, tmp_path):
 def test_delivery_retry_reuses_existing_mp3(db_session, tmp_path):
     """Point 19: Delivery retry reuses existing MP3 without re-synthesis."""
     audio_file = tmp_path / "persisted_ep.mp3"
-    audio_file.write_bytes(b"\xFF\xFB\x90\x44" * 200)
+    audio_file.write_bytes(b"\xff\xfb\x90\x44" * 200)
 
     job = PodcastJob(
         id="tg-job-retry-002",

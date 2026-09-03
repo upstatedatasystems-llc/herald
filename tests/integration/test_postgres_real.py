@@ -12,7 +12,7 @@ from apps.worker.main import (
     requeue_due_tts_retries,
 )
 from herald.db.connection import Base
-from herald.db.models import JobState, PodcastJob
+from herald.db.models import JobState, PodcastJob, PodcastTTSChunk
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +20,7 @@ def postgres_engine():
     pg_url = os.getenv("HERALD_TEST_DATABASE_URL")
     if not pg_url or "postgresql" not in pg_url:
         pytest.skip("HERALD_TEST_DATABASE_URL not set to a PostgreSQL connection string.")
-    
+
     engine = create_engine(pg_url)
     try:
         with engine.connect() as conn:
@@ -281,90 +281,186 @@ def test_postgres_concurrent_telegram_delivery_isolation(pg_session_factory, tmp
         Session2.close()
 
 
-def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch):
+def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, tmp_path):
     """
-    Prove real PostgreSQL advisory lock slot pool across independent database sessions.
+    Prove real PostgreSQL advisory lock slot pool across actual application paths:
+    - Worker chunk synthesis path (synthesize_single_chunk)
+    - Telegram voice sample synthesis path (ensure_voice_sample)
     Given effective global slots = 2:
-    - Session A acquires slot 1
-    - Session B acquires slot 2
-    - Session C cannot enter while both are held (times out)
-    - When Session A releases, Session C acquires
-    - Exceptions inside block automatically release advisory lock in finally
+    - Worker chunk synthesis occupies slot 1
+    - Voice sample generation occupies slot 2
+    - Third worker/sample inference attempt times out because all slots are busy
+    - Releasing one slot allows the waiting inference to proceed immediately
+    - Exceptions inside worker/sample blocks cleanly release advisory locks
     """
-    from herald.concurrency import tts_slot_lock
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from herald.concurrency import get_semaphores, reset_semaphores_for_tests, tts_slot_lock
     from herald.config import settings
+    from herald.services.voice_manager import ensure_voice_sample
+    from herald.tts.chunk_manager import TTSChunk, synthesize_single_chunk
+    from herald.tts.kokoro_client import KokoroClient
 
     monkeypatch.setattr(settings, "HERALD_TTS_GLOBAL_SLOTS", 2)
     monkeypatch.setattr(settings, "HERALD_TTS_SLOT_BASE", 930000)
+    reset_semaphores_for_tests()
 
-    SessionA = pg_session_factory()
-    SessionB = pg_session_factory()
-    SessionC = pg_session_factory()
+    SessionWorker = pg_session_factory()
+    SessionVoice = pg_session_factory()
+    SessionThird = pg_session_factory()
 
     try:
-        # A acquires slot 1
-        with tts_slot_lock(db=SessionA, timeout_seconds=5.0) as slotA:
-            assert slotA in (930000, 930001)
+        # Create test job and chunk record in DB
+        job = PodcastJob(
+            id="pg-slot-app-job-1",
+            transport="telegram",
+            source_hash="pg-sh-1",
+            source_text="Worker chunk text",
+        )
+        SessionWorker.add(job)
+        c1 = PodcastTTSChunk(
+            job_id=job.id,
+            chunk_index=1,
+            text_hash="pg-th-1",
+            status="PENDING",
+        )
+        SessionWorker.add(c1)
+        SessionWorker.commit()
 
-            # B acquires slot 2
-            with tts_slot_lock(db=SessionB, timeout_seconds=5.0) as slotB:
-                assert slotB in (930000, 930001)
-                assert slotA != slotB
+        worker_in_synth = threading.Event()
+        worker_can_finish = threading.Event()
+        voice_in_synth = threading.Event()
+        voice_can_finish = threading.Event()
 
-                # C attempts to acquire 3rd slot -> should time out because all 2 slots are busy!
-                with pytest.raises(TimeoutError, match="busy"):
-                    with tts_slot_lock(db=SessionC, timeout_seconds=0.3):
-                        pass
+        def mock_worker_synth(text, output_path, **kwargs):
+            worker_in_synth.set()
+            worker_can_finish.wait(timeout=10.0)
+            Path(output_path).write_bytes(
+                b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            )
 
-            # B has released slotB; C can now acquire
-            with tts_slot_lock(db=SessionC, timeout_seconds=2.0) as slotC:
-                assert slotC in (930000, 930001)
+        def mock_voice_synth(text, output_path, **kwargs):
+            voice_in_synth.set()
+            voice_can_finish.wait(timeout=10.0)
+            Path(output_path).write_bytes(
+                b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            )
 
-        # Failure inside block releases advisory lock
+        mock_kokoro_w = MagicMock(spec=KokoroClient)
+        mock_kokoro_w.synthesize_chunk.side_effect = mock_worker_synth
+
+        mock_kokoro_v = MagicMock(spec=KokoroClient)
+        mock_kokoro_v.synthesize_chunk.side_effect = mock_voice_synth
+
+        sems = get_semaphores()
+        chunk_item = TTSChunk(index=1, text="Worker chunk text", character_count=17)
+
+        # Thread 1: Worker executing synthesize_single_chunk with SessionWorker
+        def run_worker():
+            synthesize_single_chunk(
+                session_factory=pg_session_factory,
+                job_id=job.id,
+                chunk=chunk_item,
+                voice="af_heart",
+                speed=1.0,
+                synthesis_timeout=10.0,
+                chunks_dir=tmp_path,
+                kokoro_client=mock_kokoro_w,
+                global_semaphore=sems.global_tts,
+                per_job_semaphore=sems.create_per_job_tts_semaphore(),
+                worker_id="pg-worker-1",
+            )
+
+        # Thread 2: Voice sample synthesis with SessionVoice
+        def run_voice():
+            # Mock get_voice_sample_path to write to tmp_path
+            monkeypatch.setattr(
+                "herald.services.voice_manager.get_voice_sample_path",
+                lambda v: tmp_path / f"{v}.mp3",
+            )
+            monkeypatch.setattr(
+                "herald.services.voice_manager.convert_wav_to_mp3",
+                lambda src, dst: Path(dst).write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00dummy"),
+            )
+            monkeypatch.setattr(
+                "herald.services.voice_manager.is_valid_sample_audio",
+                lambda p: Path(p).exists() and Path(p).stat().st_size > 0,
+            )
+            ensure_voice_sample(voice="af_bella", kokoro_client=mock_kokoro_v, db=SessionVoice)
+
+        t_w = threading.Thread(target=run_worker)
+        t_v = threading.Thread(target=run_voice)
+
+        t_w.start()
+        assert worker_in_synth.wait(timeout=5.0)
+
+        t_v.start()
+        assert voice_in_synth.wait(timeout=5.0)
+
+        # Both slots (worker and voice sample) are now busy.
+        # A third session attempting inference MUST time out.
+        with pytest.raises(TimeoutError, match="busy"):
+            with tts_slot_lock(db=SessionThird, timeout_seconds=0.3):
+                pass
+
+        # Release worker slot -> Third session can now acquire immediately
+        worker_can_finish.set()
+        t_w.join(timeout=5.0)
+
+        with tts_slot_lock(db=SessionThird, timeout_seconds=2.0) as slotThird:
+            assert slotThird in (930000, 930001)
+
+        voice_can_finish.set()
+        t_v.join(timeout=5.0)
+
+        # Failure inside slot lock cleanly releases advisory lock
         try:
-            with tts_slot_lock(db=SessionA, timeout_seconds=2.0):
-                raise ValueError("Deliberate error inside TTS slot")
-        except ValueError:
+            with tts_slot_lock(db=SessionWorker, timeout_seconds=2.0):
+                raise RuntimeError("Test error in worker slot")
+        except RuntimeError:
             pass
 
-        # Session A can re-acquire immediately
-        with tts_slot_lock(db=SessionA, timeout_seconds=2.0) as slotNew:
-            assert slotNew in (930000, 930001)
+        with tts_slot_lock(db=SessionWorker, timeout_seconds=2.0) as slotReacquired:
+            assert slotReacquired in (930000, 930001)
     finally:
-        SessionA.close()
-        SessionB.close()
-        SessionC.close()
+        SessionWorker.close()
+        SessionVoice.close()
+        SessionThird.close()
+        reset_semaphores_for_tests()
 
 
 def test_postgres_approval_cas_race(pg_session_factory):
     """
-    Prove that simultaneous atomic Compare-And-Swap approval decisions across independent
-    PostgreSQL sessions result in exactly ONE winner and preserve strict state consistency.
+    Prove that simultaneous atomic Compare-And-Swap decisions (Approve vs Cancel)
+    across independent PostgreSQL sessions result in exactly ONE winner and preserve
+    strict state consistency and transition history.
     """
+    from herald.db.models import JobStateTransition
+
     SessionAdmin = pg_session_factory()
-    SessionUser1 = pg_session_factory()
-    SessionUser2 = pg_session_factory()
+    SessionApprove = pg_session_factory()
+    SessionCancel = pg_session_factory()
 
     try:
         # 1. Setup job awaiting approval
         job = PodcastJob(
-            id="pg-cas-job-1111-2222-333333333333",
+            id="pg-cas-job-race-1111-2222-333333333333",
             transport="telegram",
             telegram_user_id=777,
             telegram_chat_id=777,
             request_mode="standard",
-            source_hash="pg-cas-h1",
-            source_text="CAS test",
+            source_hash="pg-cas-h-race",
+            source_text="CAS Approve vs Cancel race test",
             status=JobState.AWAITING_APPROVAL.value,
         )
         SessionAdmin.add(job)
         SessionAdmin.commit()
 
-        # Race 1: SessionUser1 (Approve) vs SessionUser2 (Approve)
         barrier = threading.Barrier(2)
         results = {}
 
-        def approve_task(session, name):
+        def approve_task(session):
             barrier.wait()
             now = datetime.now(UTC)
             updated = (
@@ -375,27 +471,72 @@ def test_postgres_approval_cas_race(pg_session_factory):
                     PodcastJob.telegram_user_id == 777,
                     PodcastJob.telegram_chat_id == 777,
                 )
-                .update({"status": JobState.QUEUED_TTS.value, "approved_at": now}, synchronize_session=False)
+                .update(
+                    {"status": JobState.QUEUED_TTS.value, "approved_at": now},
+                    synchronize_session=False,
+                )
             )
+            if updated == 1:
+                t_rec = JobStateTransition(
+                    job_id=job.id,
+                    from_state=JobState.AWAITING_APPROVAL.value,
+                    to_state=JobState.QUEUED_TTS.value,
+                    component="telegram-approval",
+                    message="Approved by user",
+                    created_at=now,
+                )
+                session.add(t_rec)
             session.commit()
-            results[name] = updated
+            results["approve"] = updated
 
-        t1 = threading.Thread(target=approve_task, args=(SessionUser1, "u1"))
-        t2 = threading.Thread(target=approve_task, args=(SessionUser2, "u2"))
+        def cancel_task(session):
+            barrier.wait()
+            now = datetime.now(UTC)
+            updated = (
+                session.query(PodcastJob)
+                .filter(
+                    PodcastJob.id == job.id,
+                    PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                    PodcastJob.telegram_user_id == 777,
+                    PodcastJob.telegram_chat_id == 777,
+                )
+                .update(
+                    {"status": JobState.CANCELLED.value, "updated_at": now},
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                t_rec = JobStateTransition(
+                    job_id=job.id,
+                    from_state=JobState.AWAITING_APPROVAL.value,
+                    to_state=JobState.CANCELLED.value,
+                    component="telegram-approval",
+                    message="Cancelled by user",
+                    created_at=now,
+                )
+                session.add(t_rec)
+            session.commit()
+            results["cancel"] = updated
+
+        t1 = threading.Thread(target=approve_task, args=(SessionApprove,))
+        t2 = threading.Thread(target=cancel_task, args=(SessionCancel,))
         t1.start()
         t2.start()
         t1.join()
         t2.join()
 
-        # Exactly ONE session updated the row from AWAITING_APPROVAL to QUEUED_TTS
-        assert results["u1"] + results["u2"] == 1
+        # Exactly ONE session won the race
+        assert results["approve"] + results["cancel"] == 1
 
-        # Verify DB state
+        # Verify DB state and transition history
         SessionAdmin.expire_all()
         db_job = SessionAdmin.query(PodcastJob).filter_by(id=job.id).first()
-        assert db_job.status == JobState.QUEUED_TTS.value
+        assert db_job.status in (JobState.QUEUED_TTS.value, JobState.CANCELLED.value)
+
+        transitions = SessionAdmin.query(JobStateTransition).filter_by(job_id=job.id).all()
+        assert len(transitions) == 1
+        assert transitions[0].to_state == db_job.status
     finally:
         SessionAdmin.close()
-        SessionUser1.close()
-        SessionUser2.close()
-
+        SessionApprove.close()
+        SessionCancel.close()

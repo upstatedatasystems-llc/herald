@@ -51,7 +51,9 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
     fake_script = PodcastScriptResponse(
         episode_title="Test Episode",
         episode_description="Test episode description",
-        segments=[PodcastSegment(order=1, heading="Introduction", narration="Test segment narration.")],
+        segments=[
+            PodcastSegment(order=1, heading="Introduction", narration="Test segment narration.")
+        ],
         warnings=[],
     )
     fake_research_dossier = {
@@ -102,7 +104,11 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
 
         job = db_session.query(PodcastJob).filter_by(telegram_message_id=msg_id).first()
         assert job is not None, f"Job was not created for message_id {msg_id}"
-        assert job.request_mode == expected_mode, f"Expected request_mode '{expected_mode}', got '{job.request_mode}'"
-        assert job.research_depth == expected_depth, f"Expected research_depth '{expected_depth}', got '{job.research_depth}'"
+        assert job.request_mode == expected_mode, (
+            f"Expected request_mode '{expected_mode}', got '{job.request_mode}'"
+        )
+        assert job.research_depth == expected_depth, (
+            f"Expected research_depth '{expected_depth}', got '{job.research_depth}'"
+        )
 
     reset_ai_provider()

@@ -40,7 +40,9 @@ def test_allowlisted_user_creates_row_and_persists_prefs(db_session, monkeypatch
     assert not has_owner(db_session)
 
     # 1. Setting preference automatically creates row
-    success = set_user_confirm_before_tts(db_session, user_id=user_id, chat_id=chat_id, enabled=True)
+    success = set_user_confirm_before_tts(
+        db_session, user_id=user_id, chat_id=chat_id, enabled=True
+    )
     assert success is True
 
     # 2. Row exists with role='user'
@@ -75,7 +77,9 @@ def test_allowlisted_user_wrong_chat_rejected(db_session, monkeypatch):
     wrong_chat_id = 888888
 
     # Setting preference fails
-    success = set_user_confirm_before_tts(db_session, user_id=user_id, chat_id=wrong_chat_id, enabled=True)
+    success = set_user_confirm_before_tts(
+        db_session, user_id=user_id, chat_id=wrong_chat_id, enabled=True
+    )
     assert success is False
 
     user = db_session.query(TelegramUser).filter_by(telegram_user_id=user_id).first()
@@ -85,7 +89,9 @@ def test_allowlisted_user_wrong_chat_rejected(db_session, monkeypatch):
 def test_existing_row_wrong_chat_rejected(db_session, monkeypatch):
     """Existing paired user cannot have preferences modified from a different chat ID."""
     code = generate_pairing_code(db_session)
-    verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="real_owner")
+    verify_and_claim_pairing_code(
+        db_session, code, user_id=12345, chat_id=12345, username="real_owner"
+    )
 
     # Mismatching chat ID
     success = set_user_confirm_before_tts(db_session, user_id=12345, chat_id=99999, enabled=True)
@@ -112,7 +118,9 @@ def test_allowlisted_user_promoted_to_owner_on_pairing(db_session, monkeypatch):
 
     # Now owner pairs using code
     code = generate_pairing_code(db_session)
-    ok, msg = verify_and_claim_pairing_code(db_session, code, user_id=user_id, chat_id=chat_id, username="promoted_owner")
+    ok, msg = verify_and_claim_pairing_code(
+        db_session, code, user_id=user_id, chat_id=chat_id, username="promoted_owner"
+    )
     assert ok is True
     assert "Pairing successful" in msg
 

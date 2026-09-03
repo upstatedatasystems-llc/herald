@@ -61,7 +61,7 @@ def test_telegram_end_to_end_literal_pipeline(db_session, tmp_path, monkeypatch)
     )
 
     fake_mp3 = tmp_path / "output.mp3"
-    fake_mp3.write_bytes(b"\xFF\xFB\x90\x44" * 500)
+    fake_mp3.write_bytes(b"\xff\xfb\x90\x44" * 500)
 
     monkeypatch.setattr(
         "apps.worker.main.join_and_normalize_audio",

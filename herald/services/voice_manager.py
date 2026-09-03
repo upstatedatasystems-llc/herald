@@ -141,7 +141,8 @@ def ensure_voice_sample(
     temp_wav = sample_mp3.with_name(f"{sample_mp3.stem}_{unique_suffix}.tmp.wav")
     temp_mp3 = sample_mp3.with_name(f"{sample_mp3.stem}_{unique_suffix}.tmp.mp3")
 
-    with tts_slot_lock(db=db):
+    synth_timeout = float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0))
+    with tts_slot_lock(db=db, timeout_seconds=synth_timeout):
         if is_valid_sample_audio(sample_mp3):
             return sample_mp3
 
@@ -151,11 +152,13 @@ def ensure_voice_sample(
                 output_path=temp_wav,
                 voice=v_clean,
                 speed=1.0,
-                timeout=getattr(settings, "KOKORO_TIMEOUT_SECONDS", 180.0),
+                timeout=synth_timeout,
             )
             convert_wav_to_mp3(temp_wav, temp_mp3)
             if not is_valid_sample_audio(temp_mp3):
-                raise RuntimeError(f"Synthesized voice sample for '{v_clean}' failed audio validation.")
+                raise RuntimeError(
+                    f"Synthesized voice sample for '{v_clean}' failed audio validation."
+                )
 
             os.replace(temp_mp3, sample_mp3)
             logger.info(f"Generated and cached voice sample for '{v_clean}' at '{sample_mp3}'")

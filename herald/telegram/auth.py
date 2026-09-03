@@ -46,7 +46,9 @@ def generate_pairing_code(db: Session, expires_in_minutes: int = 15) -> str:
     return code
 
 
-def get_or_create_active_pairing_record(db: Session, expires_in_minutes: int = 15) -> TelegramPairingCode | None:
+def get_or_create_active_pairing_record(
+    db: Session, expires_in_minutes: int = 15
+) -> TelegramPairingCode | None:
     """
     Return an existing valid, unexpired, unused pairing code record or generate a fresh one.
     If an owner already exists, returns None.
@@ -133,16 +135,12 @@ def verify_and_claim_pairing_code(
     pairing_entry.used_at = now
 
     # Invalidate all pending codes
-    db.query(TelegramPairingCode).filter(
-        TelegramPairingCode.is_used.is_(False)
-    ).update({"is_used": True})
+    db.query(TelegramPairingCode).filter(TelegramPairingCode.is_used.is_(False)).update(
+        {"is_used": True}
+    )
 
     # Save or update owner
-    existing_user = (
-        db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == user_id)
-        .first()
-    )
+    existing_user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == user_id).first()
     if existing_user:
         existing_user.telegram_chat_id = chat_id
         existing_user.username = username
@@ -239,7 +237,9 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
             .first()
         )
 
-    confirm = bool(user.confirm_before_tts) if user and user.confirm_before_tts is not None else False
+    confirm = (
+        bool(user.confirm_before_tts) if user and user.confirm_before_tts is not None else False
+    )
 
     # 1. Voice validation against current allowed voices
     allowed_voices = settings.get_allowed_voices_list()
@@ -248,7 +248,11 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
         voice = stored_voice
     else:
         inst_voice = getattr(settings, "KOKORO_VOICE", "af_heart").strip().lower()
-        voice = inst_voice if inst_voice in allowed_voices else (allowed_voices[0] if allowed_voices else "af_heart")
+        voice = (
+            inst_voice
+            if inst_voice in allowed_voices
+            else (allowed_voices[0] if allowed_voices else "af_heart")
+        )
 
     # 2. Speed validation against runtime bounds
     min_spd = getattr(settings, "MIN_SPEED", 0.8)
@@ -257,7 +261,14 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
     if stored_speed is not None and min_spd <= float(stored_speed) <= max_spd:
         speed = float(stored_speed)
     else:
-        speed = float(getattr(settings, "KOKORO_SPEED", 1.0))
+        try:
+            inst_speed = float(getattr(settings, "KOKORO_SPEED", 1.0))
+            if min_spd <= inst_speed <= max_spd:
+                speed = inst_speed
+            else:
+                speed = 1.0
+        except (ValueError, TypeError):
+            speed = 1.0
 
     # 3. Mode validation against recognized modes and AI provider status
     allowed_modes = {"standard", "brief", "literal", "research"}
@@ -304,11 +315,7 @@ def ensure_telegram_user(
         return None
 
     # Check if user already exists
-    user = (
-        db.query(TelegramUser)
-        .filter(TelegramUser.telegram_user_id == uid_int)
-        .first()
-    )
+    user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == uid_int).first()
     if user:
         if user.telegram_chat_id != cid_int or not user.is_active:
             return None
@@ -334,15 +341,13 @@ def ensure_telegram_user(
     try:
         db.commit()
         db.refresh(new_user)
-        logger.info(f"Created persistent allowlisted Telegram user '{uid_int}' (Chat: '{cid_int}') with role='user'.")
+        logger.info(
+            f"Created persistent allowlisted Telegram user '{uid_int}' (Chat: '{cid_int}') with role='user'."
+        )
         return new_user
     except IntegrityError:
         db.rollback()
-        user = (
-            db.query(TelegramUser)
-            .filter(TelegramUser.telegram_user_id == uid_int)
-            .first()
-        )
+        user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == uid_int).first()
         if user and user.telegram_chat_id == cid_int and user.is_active:
             return user
         return None
@@ -363,7 +368,9 @@ def set_user_confirm_before_tts(
     user.confirm_before_tts = bool(enabled)
     user.updated_at = datetime.now(UTC)
     db.commit()
-    logger.info(f"Updated confirm_before_tts={enabled} for Telegram user '{user.telegram_user_id}'.")
+    logger.info(
+        f"Updated confirm_before_tts={enabled} for Telegram user '{user.telegram_user_id}'."
+    )
     return True
 
 
@@ -407,7 +414,9 @@ def set_user_default_speed(
     if speed is not None:
         s_float = float(speed)
         if not (settings.MIN_SPEED <= s_float <= settings.MAX_SPEED):
-            raise ValueError(f"Speed {s_float} out of range ({settings.MIN_SPEED} to {settings.MAX_SPEED})")
+            raise ValueError(
+                f"Speed {s_float} out of range ({settings.MIN_SPEED} to {settings.MAX_SPEED})"
+            )
         user.default_speed = s_float
     else:
         user.default_speed = None

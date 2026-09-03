@@ -56,7 +56,6 @@ def test_atomic_worker_claiming_skip_locked(db_session: Session, test_job: Podca
     assert claimed_2 is None
 
 
-
 def test_recover_stale_claims(db_session: Session, test_job: PodcastJob):
     # Simulate worker crash: job stuck in SYNTHESIZING with expired lease
     past_time = datetime.now(UTC) - timedelta(minutes=20)
@@ -75,7 +74,9 @@ def test_recover_stale_claims(db_session: Session, test_job: PodcastJob):
     assert test_job.status == JobState.QUEUED_TTS.value
 
 
-def test_durable_chunk_tracking_and_resume(db_session: Session, test_job: PodcastJob, tmp_path: Path):
+def test_durable_chunk_tracking_and_resume(
+    db_session: Session, test_job: PodcastJob, tmp_path: Path
+):
     chunks_dir = tmp_path / "chunks"
     chunks_dir.mkdir()
 
@@ -124,7 +125,9 @@ def test_chunk_hash_invalidation(db_session: Session, test_job: PodcastJob, tmp_
 
     # Change text of chunk 0
     modified_chunks = [TTSChunk(index=0, text="Modified text text", is_section_end=False)]
-    res = sync_and_prepare_chunks(db_session, test_job.id, modified_chunks, "af_heart", 1.0, chunks_dir)
+    res = sync_and_prepare_chunks(
+        db_session, test_job.id, modified_chunks, "af_heart", 1.0, chunks_dir
+    )
 
     # Chunk should be invalidated back to PENDING because text_hash changed
     assert res[0].status == "PENDING"
@@ -132,7 +135,9 @@ def test_chunk_hash_invalidation(db_session: Session, test_job: PodcastJob, tmp_
 
 
 class MockKokoroClient:
-    def synthesize_chunk(self, text: str, output_path: Path, voice: str, speed: float, timeout: float):
+    def synthesize_chunk(
+        self, text: str, output_path: Path, voice: str, speed: float, timeout: float
+    ):
         generate_silence_wav(output_path, duration_seconds=0.2)
 
 

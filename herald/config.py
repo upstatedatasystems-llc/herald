@@ -1,4 +1,3 @@
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,8 +24,7 @@ class Settings(BaseSettings):
     HERALD_FFMPEG_CONCURRENCY: int | None = None
     HERALD_FFMPEG_TIMEOUT_SECONDS: int = 300
     HERALD_N8N_CONCURRENCY: int | None = None
-
-
+    HERALD_TTS_SLOT_BASE: int = 920000
 
     # Database
     POSTGRES_HOST: str = "postgres"
@@ -117,7 +115,11 @@ class Settings(BaseSettings):
     def get_allowed_senders_list(self) -> list[str]:
         if not self.EMAIL_ALLOWED_SENDERS:
             return []
-        return [email.strip().lower() for email in self.EMAIL_ALLOWED_SENDERS.split(",") if email.strip()]
+        return [
+            email.strip().lower()
+            for email in self.EMAIL_ALLOWED_SENDERS.split(",")
+            if email.strip()
+        ]
 
     def get_allowed_voices_list(self) -> list[str]:
         if not self.ALLOWED_VOICES:
@@ -130,7 +132,11 @@ class Settings(BaseSettings):
 
     def is_production_valid(self) -> bool:
         if self.HERALD_ENV.lower() == "production":
-            is_email_active = bool(self.ENABLE_EMAIL_TRANSPORT or self.EMAIL_ALLOWED_SENDERS.strip() or self.GOOGLE_DRIVE_FOLDER_ID.strip())
+            is_email_active = bool(
+                self.ENABLE_EMAIL_TRANSPORT
+                or self.EMAIL_ALLOWED_SENDERS.strip()
+                or self.GOOGLE_DRIVE_FOLDER_ID.strip()
+            )
             if is_email_active:
                 if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
                     return False
@@ -144,6 +150,7 @@ class Settings(BaseSettings):
 
     def get_concurrency_config(self):
         from herald.concurrency import resolve_concurrency_settings
+
         return resolve_concurrency_settings(
             profile=self.HERALD_CONCURRENCY_PROFILE,
             worker_concurrency=self.HERALD_WORKER_CONCURRENCY,
@@ -156,4 +163,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

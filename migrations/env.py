@@ -1,15 +1,16 @@
 import os
 import sys
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+
 from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 # Append root dir to sys.path so top-level herald package can be imported
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import herald.db.models  # noqa
 from herald.config import settings
 from herald.db.connection import Base
-import herald.db.models  # noqa
 
 config = context.config
 
