@@ -434,10 +434,10 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                 )
                 included_files.append("research/audit.json")
 
-        # Check total staged size before manifest and compress if exceeding budget
+        # Multi-stage progressive size reduction when exceeding budget
         staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
         if staged_bytes > TARGET_DIAGNOSTIC_BYTES:
-            # Step 1: Reduce events to last 200
+            # Stage 1: Reduce events to last 200
             if len(events) > 200:
                 events = events[-200:]
                 event_lines = [
@@ -458,10 +458,60 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     truncated_files.append("diagnostic-events.jsonl")
                 truncations_detail.append({
                     "file": "diagnostic-events.jsonl",
-                    "reason": "target_budget_reduction",
+                    "stage": 1,
+                    "reason": "target_budget_reduction_events",
                     "original_count": orig_events_count,
                     "retained_count": len(events),
                 })
+                staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
+
+            # Stage 2: Strip request/response evidence in AI interactions
+            if staged_bytes > TARGET_DIAGNOSTIC_BYTES and ai_list:
+                for item in ai_list:
+                    item["request_evidence"] = None
+                    item["response_evidence"] = None
+                (staging_dir / "ai-interactions.json").write_text(json.dumps(ai_list, indent=2), encoding="utf-8")
+                if "ai-interactions.json" not in truncated_files:
+                    truncated_files.append("ai-interactions.json")
+                truncations_detail.append({
+                    "file": "ai-interactions.json",
+                    "stage": 2,
+                    "reason": "stripped_ai_request_response_evidence",
+                })
+                staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
+
+            # Stage 3: Truncate AI interaction rows to last 50
+            if staged_bytes > TARGET_DIAGNOSTIC_BYTES and len(ai_list) > 50:
+                ai_list = ai_list[-50:]
+                (staging_dir / "ai-interactions.json").write_text(json.dumps(ai_list, indent=2), encoding="utf-8")
+                if "ai-interactions.json" not in truncated_files:
+                    truncated_files.append("ai-interactions.json")
+                truncations_detail.append({
+                    "file": "ai-interactions.json",
+                    "stage": 3,
+                    "reason": "ai_interaction_row_limit",
+                    "original_count": orig_ai_count,
+                    "retained_count": len(ai_list),
+                })
+                staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
+
+            # Stage 4: Truncate large source text / research data
+            if staged_bytes > TARGET_DIAGNOSTIC_BYTES:
+                source_file = staging_dir / "source.txt"
+                if source_file.exists() and source_file.stat().st_size > 50000:
+                    orig_src_size = source_file.stat().st_size
+                    truncated_text = sanitized_source[:50000] + "\n\n[TRUNCATED SOURCE TEXT DUE TO SIZE BUDGET]"
+                    source_file.write_text(truncated_text, encoding="utf-8")
+                    if "source.txt" not in truncated_files:
+                        truncated_files.append("source.txt")
+                    truncations_detail.append({
+                        "file": "source.txt",
+                        "stage": 4,
+                        "reason": "source_text_budget_reduction",
+                        "original_bytes": orig_src_size,
+                        "retained_bytes": len(truncated_text.encode("utf-8")),
+                    })
+                    staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
 
         # 13. manifest.json
         manifest_data = build_manifest_dict(job, db, included_files, truncated_files, truncations_detail)

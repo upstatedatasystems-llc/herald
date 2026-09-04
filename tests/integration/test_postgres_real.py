@@ -718,3 +718,25 @@ def test_postgres_migration_014_telemetry_and_cascade(pg_session_factory):
         assert session.query(JobDiagnosticEvent).filter_by(job_id=job.id).count() == 0
     finally:
         session.close()
+
+
+def test_postgres_alembic_migration_013_to_014_roundtrip(postgres_engine):
+    """
+    Prove that Alembic migration 013 -> 014 -> 013 -> 014 upgrades and downgrades cleanly
+    on real PostgreSQL without schema errors or dangling constraints.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", str(postgres_engine.url))
+
+    # Upgrade to head (014)
+    command.upgrade(alembic_cfg, "head")
+
+    # Downgrade to 013 (013_telegram_phase2_cycle1_hardening)
+    command.downgrade(alembic_cfg, "013")
+
+    # Re-upgrade to head (014)
+    command.upgrade(alembic_cfg, "head")
+

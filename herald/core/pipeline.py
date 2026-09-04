@@ -22,10 +22,12 @@ from herald.extraction.url_extractor import (
 from herald.gemini.client import (
     GeminiError,
     audit_research_script,
+    audit_script_fidelity,
     generate_grounded_research,
     generate_podcast_script,
     normalize_research_dossier,
     repair_research_script,
+    repair_script_fidelity,
 )
 from herald.literal.script_generator import generate_literal_script
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
@@ -123,6 +125,20 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 ),
                 error_category="AI_PROVIDER_NOT_CONFIGURED",
             )
+
+    # Validate Gemini requirement for script verification
+    if req.verify_final_script and not settings.GEMINI_API_KEY:
+        return HeraldResponse(
+            job_id="",
+            status=JobState.FAILED_FINAL.value,
+            request_mode=mode_val,
+            source_type=SourceType.TEXT.value,
+            is_duplicate=False,
+            message=(
+                "Script verification (`verify_final_script=True` / `/verify` / `/doublecheck`) requires Gemini to be configured with GEMINI_API_KEY."
+            ),
+            error_category="VERIFY_PROVIDER_NOT_CONFIGURED",
+        )
 
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
     if req.transport == "telegram" and req.transport_message_id and req.delivery_target:
@@ -497,6 +513,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_title=job.custom_title,
                 job_id=job.id,
             )
+            job.script_json = script_resp.model_dump()
             m_val = getattr(provider, "configured_model", None) or getattr(provider, "model_name", None) or settings.GEMINI_MODEL
             job.gemini_model = m_val if isinstance(m_val, str) else settings.GEMINI_MODEL
             db.commit()
@@ -508,6 +525,84 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 status="success",
                 input_chars=len(job.source_text or ""),
             )
+
+        # Fidelity verification for non-research modes when verify_final_script=True
+        if mode_val != RequestMode.RESEARCH.value and job.verify_final_script:
+            if not job.verify_audit_json:
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "verification",
+                    "VERIFY_AUDIT_BEGIN",
+                    "Starting script fidelity audit against source text",
+                    db=db,
+                )
+                try:
+                    v_audit = audit_script_fidelity(
+                        source_text=job.source_text,
+                        script_dict=job.script_json,
+                        job_id=job.id,
+                    )
+                    job.verify_audit_json = v_audit.model_dump()
+                    db.commit()
+                    record_job_diagnostic_event(
+                        job.id,
+                        "INFO",
+                        "verification",
+                        "VERIFY_AUDIT_COMPLETE",
+                        f"Script fidelity audit complete (has_material_issues={bool(v_audit.has_material_issues)})",
+                        metadata={"has_material_issues": bool(v_audit.has_material_issues)},
+                        db=db,
+                    )
+                except Exception as ve:
+                    logger.warning(f"Fidelity audit failed for job '{job.id}': {ve}")
+                    record_job_diagnostic_event(
+                        job.id,
+                        "WARNING",
+                        "verification",
+                        "VERIFY_AUDIT_FAILED",
+                        f"Fidelity audit failed non-fatally: {ve}",
+                        db=db,
+                    )
+
+            v_data = job.verify_audit_json or {}
+            if v_data.get("has_material_issues") and (job.verify_repair_count or 0) == 0:
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "verification",
+                    "VERIFY_REPAIR_BEGIN",
+                    "Repairing script based on fidelity audit findings",
+                    db=db,
+                )
+                try:
+                    repaired_v = repair_script_fidelity(
+                        source_text=job.source_text,
+                        script_dict=job.script_json,
+                        audit_result=v_data,
+                        job_id=job.id,
+                    )
+                    job.script_json = repaired_v.model_dump()
+                    job.verify_repair_count = 1
+                    db.commit()
+                    record_job_diagnostic_event(
+                        job.id,
+                        "INFO",
+                        "verification",
+                        "VERIFY_REPAIR_COMPLETE",
+                        "Script fidelity repair completed",
+                        db=db,
+                    )
+                except Exception as re_err:
+                    logger.warning(f"Fidelity repair failed for job '{job.id}': {re_err}")
+                    record_job_diagnostic_event(
+                        job.id,
+                        "WARNING",
+                        "verification",
+                        "VERIFY_REPAIR_FAILED",
+                        f"Fidelity repair failed non-fatally: {re_err}",
+                        db=db,
+                    )
 
         transition_job_state(db, job, JobState.SCRIPT_READY.value, component="herald-core")
         record_job_diagnostic_event(

@@ -103,7 +103,12 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         start_t = job.created_at.replace(tzinfo=UTC) if job.created_at.tzinfo is None else job.created_at
         end_t = job.completed_at or datetime.now(UTC)
         end_t = end_t.replace(tzinfo=UTC) if end_t.tzinfo is None else end_t
-        total_proc_seconds = round((end_t - start_t).total_seconds(), 2)
+        hold_seconds = 0.0
+        if getattr(job, "approved_at", None) and getattr(job, "approval_requested_at", None):
+            app_t = job.approved_at.replace(tzinfo=UTC) if job.approved_at.tzinfo is None else job.approved_at
+            req_t = job.approval_requested_at.replace(tzinfo=UTC) if job.approval_requested_at.tzinfo is None else job.approval_requested_at
+            hold_seconds = max(0.0, (app_t - req_t).total_seconds())
+        total_proc_seconds = round(max(0.0, (end_t - start_t).total_seconds() - hold_seconds), 2)
 
     source_words = len((job.source_text or "").split())
     dur_info = calculate_script_duration(script, job.kokoro_speed or job.custom_speed or 1.0)
@@ -195,6 +200,30 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     if is_research and getattr(job, "research_model", None):
         lines.append(f"- **Gemini Research Model**: `{job.research_model}`")
 
+    tts_chunks_count = getattr(job, "completed_chunk_index", 0) or 0
+    if db is not None:
+        try:
+            from herald.db.models import PodcastTTSChunk
+            cnt = db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == job.id).count()
+            if cnt > 0:
+                tts_chunks_count = cnt
+        except Exception:
+            pass
+    elif hasattr(job, "chunks") and job.chunks:
+        tts_chunks_count = len(job.chunks)
+    else:
+        try:
+            db_c = SessionLocal()
+            try:
+                from herald.db.models import PodcastTTSChunk
+                cnt = db_c.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == job.id).count()
+                if cnt > 0:
+                    tts_chunks_count = cnt
+            finally:
+                db_c.close()
+        except Exception:
+            pass
+
     lines.extend([
         f"- **Kokoro Voice / Speed**: `{job.kokoro_voice or job.custom_voice or 'af_heart'}` @ `{job.kokoro_speed or job.custom_speed or 1.0}x`",
         f"- **Configured TTS Chunk Size**: `{getattr(job, 'tts_chunk_chars', 500) or 500} chars`",
@@ -202,7 +231,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         f"- **Audio Duration**: {dur_str}",
         f"- **Audio File Size**: {size_str}",
         f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-        f"- **TTS Chunks Count**: {job.completed_chunk_index or 0}",
+        f"- **TTS Chunks Count**: {tts_chunks_count}",
         f"- **Synthesis Attempt Count**: {job.synthesis_attempt_count or 0}",
         f"- **Total Processing Time**: {total_proc_seconds}s" if total_proc_seconds else "- **Total Processing Time**: N/A",
     ])

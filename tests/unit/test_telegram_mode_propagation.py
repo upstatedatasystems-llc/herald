@@ -75,6 +75,14 @@ def test_telegram_mode_directives_propagate_to_created_jobs(db_session, monkeypa
         "herald.gemini.client.normalize_research_dossier",
         lambda *args, **kwargs: MagicMock(model_dump=lambda: fake_research_dossier),
     )
+    monkeypatch.setattr(
+        "herald.gemini.client.audit_research_script",
+        lambda *args, **kwargs: MagicMock(model_dump=lambda: {"has_material_issues": False}),
+    )
+    monkeypatch.setattr(
+        "herald.gemini.client.audit_script_fidelity",
+        lambda *args, **kwargs: MagicMock(has_material_issues=False, model_dump=lambda: {"has_material_issues": False}),
+    )
 
     mock_client = MagicMock(spec=TelegramClient)
 

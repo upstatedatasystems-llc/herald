@@ -648,3 +648,45 @@ def test_application_diagnostic_events_flow(tmp_path):
     deliv_types = [e.event_type for e in deliv_events]
     assert "TELEGRAM_DELIVERY_BEGIN" in deliv_types
     assert "TELEGRAM_DELIVERY_COMPLETE" in deliv_types
+
+
+def test_episode_details_and_manifest_metric_consistency(tmp_path):
+    """Verify episode-details.md and manifest.json agree on TTS chunk count and processing time excluding hold time."""
+    from herald.audio.artifact_generator import ensure_details_artifact
+
+    db = setup_in_memory_db()
+    now = datetime.now(UTC)
+
+    job = PodcastJob(
+        id="metric-agree-uuid-5555",
+        transport="telegram",
+        telegram_user_id=1,
+        telegram_chat_id=1,
+        source_hash="sha",
+        source_text="Agreement test text content.",
+        status=JobState.COMPLETE.value,
+        request_mode="standard",
+        created_at=now - timedelta(seconds=200),
+        approval_requested_at=now - timedelta(seconds=180),
+        approved_at=now - timedelta(seconds=120),  # Held for 60s
+        completed_at=now,
+    )
+    db.add(job)
+
+    # 4 chunks in podcast_tts_chunks table
+    for i in range(4):
+        db.add(PodcastTTSChunk(job_id=job.id, chunk_index=i, text_hash=f"h_{i}", status="COMPLETED"))
+    db.commit()
+
+    manifest = build_manifest_dict(job, db, included_files=[], truncated_files=[])
+    details_path = ensure_details_artifact(job, target_dir=tmp_path, db=db)
+    details_text = details_path.read_text(encoding="utf-8")
+
+    # Manifest checks: active time is 200 - 60 = 140s, chunk count is 4
+    assert manifest["total_processing_seconds"] == 140
+    assert manifest["actual_tts_chunk_count"] == 4
+
+    # Details.md checks:
+    assert "- **Total Processing Time**: 140.0s" in details_text or "- **Total Processing Time**: 140s" in details_text
+    assert "- **TTS Chunks Count**: 4" in details_text
+
