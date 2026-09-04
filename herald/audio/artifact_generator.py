@@ -91,7 +91,6 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     segments = script.get("segments", [])
     warnings = script.get("warnings", [])
     dossier = job.research_json or {}
-    audit = job.research_audit_json or {}
     is_research = (job.request_mode or "").lower() == "research"
 
     created_iso = job.created_at.isoformat() if job.created_at else "N/A"
@@ -120,7 +119,17 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     if actual_duration and actual_duration > 0 and narration_words > 0:
         actual_wpm = round(narration_words / (actual_duration / 60.0), 2)
 
-    audit_pass = "PASS" if not audit.get("has_material_issues") else "FAIL (Repaired)"
+    raw_res_audit = getattr(job, "research_audit_json", None)
+    if not is_research:
+        audit_pass = "N/A"
+    elif raw_res_audit is None:
+        audit_pass = "NOT COMPLETED / UNAVAILABLE"
+    elif not raw_res_audit.get("has_material_issues"):
+        audit_pass = "PASS"
+    elif (job.research_repair_count or 0) > 0:
+        audit_pass = f"REPAIRED ({job.research_repair_count} pass)"
+    else:
+        audit_pass = "FLAGGED (UNREPAIRED)"
 
     if actual_duration:
         mins, secs = divmod(actual_duration, 60)
@@ -243,11 +252,17 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     except Exception:
         pass
 
-    v_audit = getattr(job, "verify_audit_json", None) or {}
-
+    raw_v_audit = getattr(job, "verify_audit_json", None)
     v_rep_count = getattr(job, "verify_repair_count", 0) or 0
     if getattr(job, "verify_final_script", False):
-        v_status = "PASS" if not v_audit.get("has_material_issues") else f"REPAIRED ({v_rep_count} pass)"
+        if raw_v_audit is None:
+            v_status = "NOT COMPLETED / UNAVAILABLE"
+        elif not raw_v_audit.get("has_material_issues"):
+            v_status = "PASS"
+        elif v_rep_count > 0:
+            v_status = f"REPAIRED ({v_rep_count} pass)"
+        else:
+            v_status = "FLAGGED (UNREPAIRED)"
         lines.append(f"- **Fidelity Verify Status**: `{v_status}`")
 
     if is_research:

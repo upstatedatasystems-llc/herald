@@ -808,7 +808,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 )
                 t1 = datetime.now(UTC)
                 job.research_json = dossier.model_dump()
-                job.research_model = getattr(research_prov, "configured_model", settings.GEMINI_RESEARCH_MODEL)
+                job.research_model = getattr(research_prov, "research_model", None) or settings.GEMINI_RESEARCH_MODEL
                 db.commit()
                 record_stage_metric(
                     job_id=job.id,

@@ -109,3 +109,82 @@ def test_details_artifact_completeness_and_secrets_exclusion(tmp_path):
     # Verify secrets and auth credentials excluded
     assert "api_key" not in md_text.lower()
     assert "auth_token" not in md_text.lower()
+
+
+def test_verify_and_research_audit_status_truthfulness(tmp_path):
+    # Case 1: verify requested, but no verify_audit_json -> NOT COMPLETED / UNAVAILABLE
+    job1 = PodcastJob(
+        id="job-truth-1",
+        request_mode=RequestMode.STANDARD.value,
+        verify_final_script=True,
+        verify_audit_json=None,
+        script_json={"episode_title": "T1", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p1 = ensure_details_artifact(job1, tmp_path)
+    text1 = p1.read_text(encoding="utf-8")
+    assert "- **Fidelity Verify Status**: `NOT COMPLETED / UNAVAILABLE`" in text1
+
+    # Case 2: verify requested, audit has no material issues -> PASS
+    job2 = PodcastJob(
+        id="job-truth-2",
+        request_mode=RequestMode.STANDARD.value,
+        verify_final_script=True,
+        verify_audit_json={"has_material_issues": False},
+        script_json={"episode_title": "T2", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p2 = ensure_details_artifact(job2, tmp_path)
+    text2 = p2.read_text(encoding="utf-8")
+    assert "- **Fidelity Verify Status**: `PASS`" in text2
+
+    # Case 3: verify requested, audit has material issues, repair_count=1 -> REPAIRED (1 pass)
+    job3 = PodcastJob(
+        id="job-truth-3",
+        request_mode=RequestMode.STANDARD.value,
+        verify_final_script=True,
+        verify_audit_json={"has_material_issues": True},
+        verify_repair_count=1,
+        script_json={"episode_title": "T3", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p3 = ensure_details_artifact(job3, tmp_path)
+    text3 = p3.read_text(encoding="utf-8")
+    assert "- **Fidelity Verify Status**: `REPAIRED (1 pass)`" in text3
+
+    # Case 4: Research mode, no research_audit_json -> NOT COMPLETED / UNAVAILABLE
+    job4 = PodcastJob(
+        id="job-truth-4",
+        request_mode=RequestMode.RESEARCH.value,
+        research_audit_json=None,
+        script_json={"episode_title": "T4", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p4 = ensure_details_artifact(job4, tmp_path)
+    text4 = p4.read_text(encoding="utf-8")
+    assert "- **Research Audit Status**: `NOT COMPLETED / UNAVAILABLE`" in text4
+
+    # Case 5: Research mode, research_audit_json with no material issues -> PASS
+    job5 = PodcastJob(
+        id="job-truth-5",
+        request_mode=RequestMode.RESEARCH.value,
+        research_audit_json={"has_material_issues": False},
+        script_json={"episode_title": "T5", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p5 = ensure_details_artifact(job5, tmp_path)
+    text5 = p5.read_text(encoding="utf-8")
+    assert "- **Research Audit Status**: `PASS`" in text5
+
+    # Case 6: Research mode, research_audit_json with material issues and repair_count=1 -> REPAIRED (1 pass)
+    job6 = PodcastJob(
+        id="job-truth-6",
+        request_mode=RequestMode.RESEARCH.value,
+        research_audit_json={"has_material_issues": True},
+        research_repair_count=1,
+        script_json={"episode_title": "T6", "segments": []},
+        created_at=datetime.now(UTC),
+    )
+    p6 = ensure_details_artifact(job6, tmp_path)
+    text6 = p6.read_text(encoding="utf-8")
+    assert "- **Research Audit Status**: `REPAIRED (1 pass)`" in text6

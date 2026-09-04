@@ -324,11 +324,12 @@ fi
 if [ "$AI_VALID" = false ]; then
     echo "⚠️  Configured AI provider was not verified. Falling back to Literal mode to ensure pipeline stability."
     set_env_val "AI_PROVIDER" "none"
+    AI_PROVIDER="none"
 fi
 
 # Validate optional Gemini Research configuration if present
 RES_PROV=$(get_env_val "RESEARCH_PROVIDER")
-if [ "$RES_PROV" = "gemini" ] && [ "$AI_PROVIDER" != "gemini" ]; then
+if [ "$RES_PROV" = "gemini" ]; then
     G_RES_K=$(get_env_val "GEMINI_API_KEY")
     G_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
     G_RES_M=${G_RES_M:-"gemini-2.5-flash"}

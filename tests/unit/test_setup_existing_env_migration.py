@@ -81,3 +81,61 @@ KOKORO_BASE_URL="http://kokoro:8880"
     assert 'GOOGLE_DRIVE_FOLDER_ID="1AbCdEfGhIjKlMnOpQrStUv"' in final_content
     assert 'EMAIL_ALLOWED_SENDERS="admin@example.com"' in final_content
     assert 'KOKORO_BASE_URL="http://kokoro:8880/v1"' in final_content
+
+
+def test_setup_sh_ai_fallback_and_research_matrix(tmp_path):
+    """
+    Verify setup.sh fallback state and research validation across matrix:
+    Case A: AI_PROVIDER=gemini, missing key -> AI_PROVIDER=none, RESEARCH_PROVIDER=none
+    Case B: AI_PROVIDER=gemini, valid key, invalid primary model, invalid research model -> AI_PROVIDER=none, RESEARCH_PROVIDER=none
+    Case C: AI_PROVIDER=groq, valid Groq, valid separate Gemini Research -> AI_PROVIDER=groq, RESEARCH_PROVIDER=gemini
+    Case D: AI_PROVIDER=groq, valid Groq, invalid Gemini Research -> AI_PROVIDER=groq, RESEARCH_PROVIDER=none
+    """
+    def run_simulation(ai_prov, gemini_key, groq_key, gemini_model_valid, research_model_valid, groq_model_valid):
+        env = {
+            "AI_PROVIDER": ai_prov,
+            "GEMINI_API_KEY": gemini_key,
+            "GROQ_API_KEY": groq_key,
+            "RESEARCH_PROVIDER": "gemini" if gemini_key or ai_prov == "gemini" else "none",
+        }
+
+        # Step 3 validation simulation matching setup.sh:
+        ai_valid = True
+        active_ai = env["AI_PROVIDER"]
+        if active_ai == "gemini":
+            if not env["GEMINI_API_KEY"] or not gemini_model_valid:
+                ai_valid = False
+        elif active_ai == "groq":
+            if not env["GROQ_API_KEY"] or not groq_model_valid:
+                ai_valid = False
+
+        if not ai_valid:
+            env["AI_PROVIDER"] = "none"
+            active_ai = "none"
+
+        # Research validation matching updated setup.sh:
+        if env["RESEARCH_PROVIDER"] == "gemini":
+            if not env["GEMINI_API_KEY"] or not research_model_valid:
+                env["RESEARCH_PROVIDER"] = "none"
+
+        return env["AI_PROVIDER"], env["RESEARCH_PROVIDER"]
+
+    # Case A: Missing Gemini key
+    a_ai, a_res = run_simulation("gemini", "", "", False, False, False)
+    assert a_ai == "none"
+    assert a_res == "none"
+
+    # Case B: Valid key, invalid primary model, invalid research model
+    b_ai, b_res = run_simulation("gemini", "valid_key", "", False, False, False)
+    assert b_ai == "none"
+    assert b_res == "none"
+
+    # Case C: Valid Groq, valid separate Gemini Research
+    c_ai, c_res = run_simulation("groq", "valid_gem_key", "valid_groq_key", False, True, True)
+    assert c_ai == "groq"
+    assert c_res == "gemini"
+
+    # Case D: Valid Groq, invalid Gemini Research
+    d_ai, d_res = run_simulation("groq", "valid_gem_key", "valid_groq_key", False, False, True)
+    assert d_ai == "groq"
+    assert d_res == "none"

@@ -38,6 +38,10 @@ class GeminiProvider(AIProvider):
         return settings.GEMINI_MODEL
 
     @property
+    def research_model(self) -> str:
+        return settings.GEMINI_RESEARCH_MODEL
+
+    @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
             script_brief=True,

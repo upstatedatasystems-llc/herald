@@ -311,3 +311,105 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
     assert updated_job.script_json is not None
     assert updated_job.research_audit_json is not None
 
+
+def test_api_and_pipeline_research_model_attribution(monkeypatch, tmp_path):
+    """
+    Verify that when GEMINI_MODEL='custom-script-model' and GEMINI_RESEARCH_MODEL='custom-research-model',
+    both API-created and pipeline Research jobs store research_model='custom-research-model',
+    and manifest/diagnostics truthfully reflect it.
+    """
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from apps.api.main import app, get_db, verify_api_key
+    from herald.core.models import HeraldRequest
+    from herald.core.pipeline import process_herald_request
+    from herald.db.connection import Base
+    from herald.db.models import JobState
+    from herald.gemini.schema import (
+        PodcastScriptResponse,
+        ResearchAuditResponse,
+        ResearchDossierResponse,
+    )
+    from herald.services.diagnostics_export import build_manifest_dict
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    mock_dossier = ResearchDossierResponse(
+        source_summary="Summary",
+        verification=[],
+        useful_context=[],
+        outdated_or_uncertain=[],
+        research_sources=[],
+    )
+    mock_script = PodcastScriptResponse(
+        episode_title="Research Model Test",
+        episode_description="Desc",
+        estimated_minutes=2,
+        segments=[{"order": 1, "heading": "H1", "narration": "Narr"}],
+        warnings=[],
+    )
+    mock_audit = ResearchAuditResponse(has_material_issues=False)
+
+    with patch.object(settings, "GEMINI_API_KEY", "valid_key"), \
+         patch.object(settings, "GEMINI_MODEL", "custom-script-model"), \
+         patch.object(settings, "GEMINI_RESEARCH_MODEL", "custom-research-model"), \
+         patch("herald.core.pipeline.generate_grounded_research", return_value={"raw_text": "t", "grounding_metadata": {}, "search_count": 1, "source_count": 1, "research_sources": []}), \
+         patch("herald.core.pipeline.normalize_research_dossier", return_value=mock_dossier), \
+         patch("herald.core.pipeline.generate_podcast_script", return_value=mock_script), \
+         patch("herald.core.pipeline.audit_research_script", return_value=mock_audit), \
+         patch("apps.api.main.generate_grounded_research", return_value={"raw_text": "t", "grounding_metadata": {}, "search_count": 1, "source_count": 1, "research_sources": []}), \
+         patch("apps.api.main.normalize_research_dossier", return_value=mock_dossier), \
+         patch("apps.api.main.generate_podcast_script", return_value=mock_script), \
+         patch("apps.api.main.audit_research_script", return_value=mock_audit):
+
+        # 1. Pipeline test
+        req = HeraldRequest(
+            transport="telegram",
+            requester_identity="telegram:101",
+            delivery_target="101",
+            request_mode="research",
+            source_text="Test pipeline source for research attribution.",
+        )
+        resp = process_herald_request(db, req)
+        pipe_job = db.query(PodcastJob).filter_by(id=resp.job_id).first()
+        assert pipe_job is not None
+        assert pipe_job.research_model == "custom-research-model"
+
+        # 2. API test
+        api_job = PodcastJob(
+            id="api-research-model-job",
+            transport="api",
+            request_mode="research",
+            source_hash="sha_api_res",
+            source_text="Test API source for research attribution.",
+            status=JobState.SOURCE_READY.value,
+            created_at=datetime.now(UTC),
+        )
+        db.add(api_job)
+        db.commit()
+
+        app.dependency_overrides[get_db] = lambda: db
+        app.dependency_overrides[verify_api_key] = lambda: True
+        client = TestClient(app)
+        api_res = client.post("/api/v1/script/generate", json={"job_id": api_job.id})
+        assert api_res.status_code == 200
+        app.dependency_overrides.clear()
+
+        db.refresh(api_job)
+        assert api_job.research_model == "custom-research-model"
+
+        # 3. Diagnostics manifest attribution check
+        manifest = build_manifest_dict(api_job, db, included_files=[], truncated_files=[])
+        assert manifest["research_model"] == "custom-research-model"
