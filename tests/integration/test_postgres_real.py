@@ -744,7 +744,7 @@ def test_postgres_alembic_migration_013_to_014_roundtrip(postgres_engine):
         query_params["options"] = f"-csearch_path={schema_name}"
         schema_url_obj = base_url.set(query=query_params)
         url_with_schema = schema_url_obj.render_as_string(hide_password=False)
-        alembic_cfg.set_main_option("sqlalchemy.url", url_with_schema)
+        alembic_cfg.set_main_option("sqlalchemy.url", url_with_schema.replace("%", "%%"))
 
         # 1. Upgrade from scratch up to 013_ai_interactions
         command.upgrade(alembic_cfg, "013_ai_interactions")
