@@ -103,8 +103,16 @@ class Settings(BaseSettings):
     MISTRAL_MODEL: str = "mistral-large-latest"
     CLOUDFLARE_API_TOKEN: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""
-    CLOUDFLARE_AI_MODEL: str = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-    CLOUDFLARE_MODEL: str | None = None  # Backward-compatible alias
+    CLOUDFLARE_AI_MODEL: str = ""
+    CLOUDFLARE_MODEL: str = ""  # Backward-compatible alias
+
+    @property
+    def effective_cloudflare_ai_model(self) -> str:
+        return (
+            (self.CLOUDFLARE_AI_MODEL or "").strip()
+            or (self.CLOUDFLARE_MODEL or "").strip()
+            or "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+        )
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-3-7-sonnet-20250219"
     OPENAI_API_KEY: str = ""

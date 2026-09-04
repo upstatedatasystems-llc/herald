@@ -37,14 +37,14 @@ class CloudflareProvider(AIProvider):
         api_token: str | None = None,
         account_id: str | None = None,
         model: str | None = None,
+        model_name: str | None = None,
     ):
         self._api_token = api_token or settings.CLOUDFLARE_API_TOKEN
         self._account_id = account_id or settings.CLOUDFLARE_ACCOUNT_ID
         self._model = (
             model
-            or getattr(settings, "CLOUDFLARE_AI_MODEL", None)
-            or getattr(settings, "CLOUDFLARE_MODEL", None)
-            or "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+            or model_name
+            or settings.effective_cloudflare_ai_model
         )
 
     @property
@@ -90,6 +90,25 @@ class CloudflareProvider(AIProvider):
             with httpx.Client(timeout=timeout_seconds) as client:
                 resp = client.get(url, headers=headers)
             if resp.status_code == 200:
+                resp_json = resp.json() if resp.text else {}
+                result_list = resp_json.get("result", []) if isinstance(resp_json, dict) else []
+                model_names = set()
+                for item in result_list:
+                    if isinstance(item, dict):
+                        if "name" in item:
+                            model_names.add(item["name"])
+                        if "id" in item:
+                            model_names.add(item["id"])
+
+                target_model = self.configured_model.strip()
+                if result_list is not None and target_model not in model_names:
+                    return {
+                        "provider": self.provider_name,
+                        "configured": True,
+                        "connected": False,
+                        "model": self.configured_model,
+                        "error": "configured model unavailable",
+                    }
                 return {
                     "provider": self.provider_name,
                     "configured": True,
@@ -123,12 +142,13 @@ class CloudflareProvider(AIProvider):
                 "error": "connection timed out",
             }
         except Exception as e:
+            _, safe_err = sanitize_error(e)
             return {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": sanitize_error(str(e)),
+                "error": f"network error: {safe_err}",
             }
 
     def generate_script(
@@ -206,7 +226,8 @@ Generate the podcast script JSON response now.
                     metadata={"attempt": attempt, "mode": mode_clean},
                 )
                 if attempt == max_attempts:
-                    raise RuntimeError(f"Cloudflare Workers AI network failure: {sanitize_error(str(net_err))}")
+                    _, safe_net_err = sanitize_error(net_err)
+                    raise RuntimeError(f"Cloudflare Workers AI network failure: {safe_net_err}")
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
@@ -342,7 +363,8 @@ Generate the podcast script JSON response now.
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_network_failure"},
                     )
                     if attempt == max_attempts:
-                        raise RuntimeError(f"Cloudflare Workers AI repair network failure: {sanitize_error(str(rep_net_err))}")
+                        _, safe_rep_err = sanitize_error(rep_net_err)
+                        raise RuntimeError(f"Cloudflare Workers AI repair network failure: {safe_rep_err}")
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue

@@ -766,7 +766,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         elif req_mode == "research":
             from herald.ai.factory import get_research_provider
             research_prov = get_research_provider()
-            if not research_prov:
+            if not research_prov or not research_prov.is_configured() or not research_prov.capabilities.research_grounding:
                 r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
                 raise HTTPException(
                     status_code=400,
@@ -937,25 +937,17 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 t0 = datetime.now(UTC)
                 from herald.ai.factory import get_ai_provider
                 provider = get_ai_provider()
-                if not provider:
+                if not provider or not provider.is_configured():
                     raise HTTPException(
                         status_code=400,
                         detail=f"AI provider '{settings.AI_PROVIDER}' is not configured. Configure an AI API key or use literal mode.",
                     )
-                if provider.provider_name == "Gemini":
-                    script_resp = generate_podcast_script(
-                        source_text=job.source_text,
-                        request_mode=req_mode,
-                        source_title=job.custom_title,
-                        job_id=job.id,
-                    )
-                else:
-                    script_resp = provider.generate_script(
-                        source_text=job.source_text,
-                        request_mode=req_mode,
-                        source_title=job.custom_title,
-                        job_id=job.id,
-                    )
+                script_resp = provider.generate_script(
+                    source_text=job.source_text,
+                    request_mode=req_mode,
+                    source_title=job.custom_title,
+                    job_id=job.id,
+                )
                 t1 = datetime.now(UTC)
                 job.script_json = script_resp.model_dump()
                 job.gemini_model = provider.configured_model

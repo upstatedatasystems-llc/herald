@@ -197,7 +197,6 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "CLOUDFLARE_API_TOKEN" "$CF_TOKEN"
             set_env_val "CLOUDFLARE_ACCOUNT_ID" "$CF_ACCT"
             set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-            set_env_val "CLOUDFLARE_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
             ;;
         *)
             AI_PROVIDER="none"
@@ -233,7 +232,10 @@ if [ "$AI_PROVIDER" = "gemini" ]; then
     G_KEY=$(get_env_val "GEMINI_API_KEY")
     G_MOD=$(get_env_val "GEMINI_MODEL")
     G_MOD=${G_MOD:-"gemini-3.5-flash"}
-    if [ -n "$G_KEY" ]; then
+    if [ -z "$G_KEY" ]; then
+        echo "⚠️  Gemini API key is missing."
+        AI_VALID=false
+    else
         GEM_RESP=$(curl -s -H "x-goog-api-key: ${G_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/${G_MOD}" || true)
         if echo "$GEM_RESP" | grep -q '"name":'; then
             echo "✅ Gemini API connection and model '${G_MOD}' verified."
@@ -246,7 +248,10 @@ elif [ "$AI_PROVIDER" = "groq" ]; then
     GR_KEY=$(get_env_val "GROQ_API_KEY")
     GR_MOD=$(get_env_val "GROQ_MODEL")
     GR_MOD=${GR_MOD:-"llama-3.3-70b-versatile"}
-    if [ -n "$GR_KEY" ]; then
+    if [ -z "$GR_KEY" ]; then
+        echo "⚠️  Groq API key is missing."
+        AI_VALID=false
+    else
         GR_RESP=$(curl -s -H "Authorization: Bearer ${GR_KEY}" "https://api.groq.com/openai/v1/models/${GR_MOD}" || true)
         if echo "$GR_RESP" | grep -q '"id":'; then
             echo "✅ Groq Cloud connection and model '${GR_MOD}' verified."
@@ -259,7 +264,10 @@ elif [ "$AI_PROVIDER" = "openrouter" ]; then
     OR_K=$(get_env_val "OPENROUTER_API_KEY")
     OR_MOD=$(get_env_val "OPENROUTER_MODEL")
     OR_MOD=${OR_MOD:-"meta-llama/llama-3.3-70b-instruct"}
-    if [ -n "$OR_K" ]; then
+    if [ -z "$OR_K" ]; then
+        echo "⚠️  OpenRouter API key is missing."
+        AI_VALID=false
+    else
         OR_RESP=$(curl -s -H "Authorization: Bearer ${OR_K}" "https://openrouter.ai/api/v1/models" || true)
         if echo "$OR_RESP" | grep -q "${OR_MOD}"; then
             echo "✅ OpenRouter connection and model '${OR_MOD}' verified."
@@ -272,7 +280,10 @@ elif [ "$AI_PROVIDER" = "mistral" ]; then
     M_K=$(get_env_val "MISTRAL_API_KEY")
     M_MOD=$(get_env_val "MISTRAL_MODEL")
     M_MOD=${M_MOD:-"mistral-large-latest"}
-    if [ -n "$M_K" ]; then
+    if [ -z "$M_K" ]; then
+        echo "⚠️  Mistral API key is missing."
+        AI_VALID=false
+    else
         M_RESP=$(curl -s -H "Authorization: Bearer ${M_K}" "https://api.mistral.ai/v1/models/${M_MOD}" || true)
         if echo "$M_RESP" | grep -q '"id":'; then
             echo "✅ Mistral AI connection and model '${M_MOD}' verified."
@@ -287,9 +298,12 @@ elif [ "$AI_PROVIDER" = "cloudflare" ]; then
     CF_MOD=$(get_env_val "CLOUDFLARE_AI_MODEL")
     CF_MOD=${CF_MOD:-$(get_env_val "CLOUDFLARE_MODEL")}
     CF_MOD=${CF_MOD:-"@cf/meta/llama-3.3-70b-instruct-fp8-fast"}
-    if [ -n "$CF_T" ] && [ -n "$CF_A" ]; then
+    if [ -z "$CF_T" ] || [ -z "$CF_A" ]; then
+        echo "⚠️  Cloudflare API Token or Account ID is missing."
+        AI_VALID=false
+    else
         CF_RESP=$(curl -s -H "Authorization: Bearer ${CF_T}" "https://api.cloudflare.com/client/v4/accounts/${CF_A}/ai/models/search?search=${CF_MOD}" || true)
-        if echo "$CF_RESP" | grep -q '"success":true'; then
+        if echo "$CF_RESP" | grep -q '"success":true' && echo "$CF_RESP" | grep -q "${CF_MOD}"; then
             echo "✅ Cloudflare Workers AI connection and model '${CF_MOD}' verified."
         else
             echo "⚠️  Cloudflare verification for '${CF_MOD}' failed."
@@ -312,12 +326,16 @@ if [ "$RES_PROV" = "gemini" ] && [ "$AI_PROVIDER" != "gemini" ]; then
     G_RES_K=$(get_env_val "GEMINI_API_KEY")
     G_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
     G_RES_M=${G_RES_M:-"gemini-2.5-flash"}
-    if [ -n "$G_RES_K" ]; then
+    if [ -z "$G_RES_K" ]; then
+        echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
+        set_env_val "RESEARCH_PROVIDER" ""
+    else
         G_RES_RESP=$(curl -s -H "x-goog-api-key: ${G_RES_K}" "https://generativelanguage.googleapis.com/v1beta/models/${G_RES_M}" || true)
         if echo "$G_RES_RESP" | grep -q '"name":'; then
             echo "✅ Gemini Research model '${G_RES_M}' verified."
         else
-            echo "⚠️  Gemini Research verification for '${G_RES_M}' failed."
+            echo "⚠️  Gemini Research verification for '${G_RES_M}' failed. Disabling RESEARCH_PROVIDER."
+            set_env_val "RESEARCH_PROVIDER" ""
         fi
     fi
 fi

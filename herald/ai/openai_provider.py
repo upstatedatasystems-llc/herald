@@ -84,6 +84,24 @@ class OpenAIProvider(AIProvider):
             with httpx.Client(timeout=timeout_seconds) as client:
                 resp = client.get(url, headers=headers)
             if resp.status_code == 200:
+                resp_json = resp.json() if resp.text else {}
+                data_list = resp_json.get("data", []) if isinstance(resp_json, dict) else []
+                model_ids = set()
+                for m in data_list:
+                    if isinstance(m, dict) and "id" in m:
+                        model_ids.add(m["id"])
+                    elif isinstance(m, str):
+                        model_ids.add(m)
+
+                target_model = self.configured_model.strip()
+                if data_list is not None and target_model not in model_ids:
+                    return {
+                        "provider": self.provider_name,
+                        "configured": True,
+                        "connected": False,
+                        "model": self.configured_model,
+                        "error": "configured model unavailable",
+                    }
                 return {
                     "provider": self.provider_name,
                     "configured": True,
@@ -117,12 +135,13 @@ class OpenAIProvider(AIProvider):
                 "error": "connection timed out",
             }
         except Exception as e:
+            _, safe_err = sanitize_error(e)
             return {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": sanitize_error(str(e)),
+                "error": f"network error: {safe_err}",
             }
 
     def generate_script(
@@ -203,7 +222,8 @@ Generate the podcast script JSON response now.
                     metadata={"attempt": attempt, "mode": mode_clean},
                 )
                 if attempt == max_attempts:
-                    raise RuntimeError(f"{self.provider_name} network failure: {sanitize_error(str(net_err))}")
+                    _, safe_net_err = sanitize_error(net_err)
+                    raise RuntimeError(f"{self.provider_name} network failure: {safe_net_err}")
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
@@ -349,7 +369,8 @@ Generate the podcast script JSON response now.
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_network_failure"},
                     )
                     if attempt == max_attempts:
-                        raise RuntimeError(f"{self.provider_name} repair network failure: {sanitize_error(str(rep_net_err))}")
+                        _, safe_rep_err = sanitize_error(rep_net_err)
+                        raise RuntimeError(f"{self.provider_name} repair network failure: {safe_rep_err}")
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue

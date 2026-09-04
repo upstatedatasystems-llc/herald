@@ -12,6 +12,7 @@ from herald.db.models import JobState, PodcastJob
 @pytest.fixture
 def api_client(monkeypatch):
     monkeypatch.setattr(settings, "HERALD_ENV", "testing")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "mock-gemini-key")
     return TestClient(app)
 
 
@@ -109,7 +110,7 @@ def test_standard_verify_processing_order_preserved(api_client, db_session: Sess
         execution_order.append("VERIFY_AUDIT")
         return mock_audit
 
-    with patch("apps.api.main.generate_podcast_script", side_effect=mock_gen_script), \
+    with patch("herald.gemini.client.generate_podcast_script", side_effect=mock_gen_script), \
          patch("apps.api.main.audit_script_fidelity", side_effect=mock_audit_script):
 
         r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
@@ -145,7 +146,7 @@ def test_ack_gmail_failure_does_not_gate_script_generation(api_client, db_sessio
         "segments": [{"speaker": "Speaker 1", "text": "Testing script generation without gating."}],
     }
 
-    with patch("apps.api.main.generate_podcast_script", return_value=mock_script):
+    with patch("herald.gemini.client.generate_podcast_script", return_value=mock_script):
         r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
         assert r2.status_code == 200
         assert r2.json()["status"] == JobState.QUEUED_TTS.value
@@ -187,7 +188,7 @@ def test_replay_at_source_ready_resumes_job_without_new_ack(api_client, db_sessi
         "segments": [{"speaker": "Speaker 1", "text": "Resumed from SOURCE_READY."}],
     }
 
-    with patch("apps.api.main.generate_podcast_script", return_value=mock_script):
+    with patch("herald.gemini.client.generate_podcast_script", return_value=mock_script):
         r3 = api_client.post("/api/v1/script/generate", json={"job_id": job_id_1})
         assert r3.status_code == 200
         assert r3.json()["status"] == JobState.QUEUED_TTS.value
@@ -215,14 +216,14 @@ def test_replay_when_queued_tts_does_not_regenerate_script(api_client, db_sessio
     }
 
     # Initial script generation
-    with patch("apps.api.main.generate_podcast_script", return_value=mock_script) as mock_gen:
+    with patch("herald.gemini.client.generate_podcast_script", return_value=mock_script) as mock_gen:
         r2 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
         assert r2.status_code == 200
         assert r2.json()["status"] == JobState.QUEUED_TTS.value
         assert mock_gen.call_count == 1
 
     # Replayed script generation call on job already in QUEUED_TTS
-    with patch("apps.api.main.generate_podcast_script") as mock_gen_2:
+    with patch("herald.gemini.client.generate_podcast_script") as mock_gen_2:
         r3 = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
         assert r3.status_code == 200
         assert "already exists" in r3.json()["message"]
@@ -259,7 +260,7 @@ def test_replay_when_scripting_synthesizing_later_states_does_not_regenerate_or_
         assert d_intake["acknowledgment_email_html"] is None
 
         # Replay script generation call
-        with patch("apps.api.main.generate_podcast_script") as mock_gen:
+        with patch("herald.gemini.client.generate_podcast_script") as mock_gen:
             r_script = api_client.post("/api/v1/script/generate", json={"job_id": job_id})
             assert r_script.status_code == 200
             assert mock_gen.call_count == 0

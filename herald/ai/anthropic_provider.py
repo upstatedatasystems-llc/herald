@@ -108,12 +108,13 @@ class AnthropicProvider(AIProvider):
             }
         except Exception as e:
             from herald.services.redaction import sanitize_error
+            _, safe_err = sanitize_error(e)
             return {
                 "provider": self.provider_name,
                 "configured": True,
                 "connected": False,
                 "model": self.configured_model,
-                "error": sanitize_error(str(e)),
+                "error": f"network error: {safe_err}",
             }
 
     def generate_script(

@@ -222,6 +222,8 @@ def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch
     from herald.gemini.schema import PodcastScriptResponse, ResearchAuditResponse
 
     monkeypatch.setattr(settings, "HERALD_ENV", "testing")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "fake-gemini-key")
+    monkeypatch.setattr(settings, "RESEARCH_PROVIDER", "gemini")
 
     job_id = "job-api-research-test-001"
     job = PodcastJob(

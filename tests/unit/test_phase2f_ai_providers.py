@@ -133,7 +133,7 @@ def test_provider_health_sanitization_matrix():
     assert groq.is_configured() is True
 
     # Healthy
-    with patch("httpx.Client.get", return_value=MagicMock(status_code=200, json=lambda: {"data": []})):
+    with patch("httpx.Client.get", return_value=MagicMock(status_code=200, json=lambda: {"data": [{"id": "llama-3.3-70b-versatile"}]})):
         res = groq.check_connection(timeout_seconds=2.0)
         assert res["connected"] is True
         assert res["error"] is None
@@ -405,3 +405,84 @@ def test_api_provider_neutral_routing():
     db_job = db.query(PodcastJob).filter(PodcastJob.id == job.id).first()
     assert db_job.gemini_model == "llama-3.3-70b-versatile"
     assert db_job.script_json["episode_title"] == "AI Provider Expansion"
+
+
+def test_cloudflare_model_precedence_and_validation():
+    """Verify Cloudflare settings precedence: CLOUDFLARE_AI_MODEL -> CLOUDFLARE_MODEL -> default."""
+    from herald.config import Settings
+
+    # Case 1: Neither set -> default
+    s1 = Settings(CLOUDFLARE_AI_MODEL="", CLOUDFLARE_MODEL="")
+    assert s1.effective_cloudflare_ai_model == "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+    # Case 2: Only CLOUDFLARE_MODEL set -> returns CLOUDFLARE_MODEL
+    s2 = Settings(CLOUDFLARE_AI_MODEL="", CLOUDFLARE_MODEL="@cf/meta/llama-3.1-8b-instruct")
+    assert s2.effective_cloudflare_ai_model == "@cf/meta/llama-3.1-8b-instruct"
+
+    # Case 3: Both set -> CLOUDFLARE_AI_MODEL takes precedence
+    s3 = Settings(CLOUDFLARE_AI_MODEL="@cf/meta/llama-3.3-70b-instruct-fp8-fast", CLOUDFLARE_MODEL="@cf/meta/llama-3.1-8b-instruct")
+    assert s3.effective_cloudflare_ai_model == "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+    # Cloudflare Provider check_connection inspects model availability
+    cf = CloudflareProvider(
+        account_id="cf_acct_123",
+        api_token="cf_token_456",
+        model_name="@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    )
+    # Available
+    with patch("httpx.Client.get", return_value=MagicMock(status_code=200, json=lambda: {"result": [{"name": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"}]})):
+        res = cf.check_connection(timeout_seconds=2.0)
+        assert res["connected"] is True
+        assert res["error"] is None
+
+    # Configured model missing from search results
+    with patch("httpx.Client.get", return_value=MagicMock(status_code=200, json=lambda: {"result": [{"name": "@cf/other-model"}]})):
+        res = cf.check_connection(timeout_seconds=2.0)
+        assert res["connected"] is False
+        assert res["error"] == "configured model unavailable"
+
+
+def test_api_research_endpoint_validation():
+    """Verify apps/api/main.py /api/v1/research rejects when research provider is unconfigured or incompatible."""
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app, get_db, verify_api_key
+
+    db = setup_in_memory_db()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[verify_api_key] = lambda: True
+    client = TestClient(app)
+
+    job = PodcastJob(
+        id="api-research-job-1",
+        transport="api",
+        request_mode="research",
+        source_hash="sha256_mock_res",
+        status=JobState.SOURCE_READY.value,
+        source_text="Research source content",
+        created_at=datetime.now(UTC),
+    )
+    db.add(job)
+    db.commit()
+
+    # Case 1: Research provider not configured
+    with patch("herald.ai.factory.get_research_provider", return_value=None):
+        resp = client.post("/api/v1/script/generate", json={"job_id": job.id})
+        assert resp.status_code == 400
+        assert "Google Search Grounding" in resp.json()["detail"]
+
+    # Reset job status for Case 2
+    job.status = JobState.SOURCE_READY.value
+    db.commit()
+
+    # Case 2: Research provider configured but lacks capabilities.research_grounding
+    mock_prov = MagicMock()
+    mock_prov.is_configured.return_value = True
+    mock_prov.capabilities.research_grounding = False
+    with patch("herald.ai.factory.get_research_provider", return_value=mock_prov):
+        resp = client.post("/api/v1/script/generate", json={"job_id": job.id})
+        assert resp.status_code == 400
+        assert "Google Search Grounding" in resp.json()["detail"]
+
+    app.dependency_overrides.clear()
+
