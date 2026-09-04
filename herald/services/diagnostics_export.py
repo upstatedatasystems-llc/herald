@@ -495,22 +495,27 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                 })
                 staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
 
-            # Stage 4: Truncate large source text / research data
+            # Stage 4: Truncate optional research artifacts if budget exceeded
             if staged_bytes > TARGET_DIAGNOSTIC_BYTES:
-                source_file = staging_dir / "source.txt"
-                if source_file.exists() and source_file.stat().st_size > 50000:
-                    orig_src_size = source_file.stat().st_size
-                    truncated_text = sanitized_source[:50000] + "\n\n[TRUNCATED SOURCE TEXT DUE TO SIZE BUDGET]"
-                    source_file.write_text(truncated_text, encoding="utf-8")
-                    if "source.txt" not in truncated_files:
-                        truncated_files.append("source.txt")
-                    truncations_detail.append({
-                        "file": "source.txt",
-                        "stage": 4,
-                        "reason": "source_text_budget_reduction",
-                        "original_bytes": orig_src_size,
-                        "retained_bytes": len(truncated_text.encode("utf-8")),
-                    })
+                research_dir = staging_dir / "research"
+                if research_dir.exists():
+                    for res_name in ("grounding.json", "dossier.json", "audit.json"):
+                        res_file = research_dir / res_name
+                        if res_file.exists() and res_file.stat().st_size > 10000:
+                            orig_res_size = res_file.stat().st_size
+                            res_file.write_text(
+                                json.dumps({"_notice": "[TRUNCATED RESEARCH DATA DUE TO SIZE BUDGET]"}, indent=2),
+                                encoding="utf-8",
+                            )
+                            rel_name = f"research/{res_name}"
+                            if rel_name not in truncated_files:
+                                truncated_files.append(rel_name)
+                            truncations_detail.append({
+                                "file": rel_name,
+                                "stage": 4,
+                                "reason": "research_data_budget_reduction",
+                                "original_bytes": orig_res_size,
+                            })
                     staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
 
         # 13. manifest.json

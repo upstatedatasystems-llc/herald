@@ -248,6 +248,8 @@ def sanitize_error(error: Exception | str | None) -> tuple[str, str]:
         cat = "SCHEMA_VALIDATION_ERROR"
     elif "network" in lower_msg or "connection" in lower_msg or "connect" in lower_msg:
         cat = "NETWORK_ERROR"
+    elif "candidate" in lower_msg or "empty" in lower_msg or "no response" in lower_msg:
+        cat = "EMPTY_RESPONSE"
 
     return cat, sanitized_msg
 

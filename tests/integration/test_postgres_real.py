@@ -723,20 +723,129 @@ def test_postgres_migration_014_telemetry_and_cascade(pg_session_factory):
 def test_postgres_alembic_migration_013_to_014_roundtrip(postgres_engine):
     """
     Prove that Alembic migration 013 -> 014 -> 013 -> 014 upgrades and downgrades cleanly
-    on real PostgreSQL without schema errors or dangling constraints.
+    on real PostgreSQL in an isolated schema without schema errors, data loss, or dangling constraints.
     """
+    import uuid
+
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy import text
 
-    alembic_cfg = Config("alembic.ini")
-    alembic_cfg.set_main_option("sqlalchemy.url", str(postgres_engine.url))
+    schema_name = f"test_schema_mig_{uuid.uuid4().hex[:8]}"
 
-    # Upgrade to head (014)
-    command.upgrade(alembic_cfg, "head")
+    with postgres_engine.connect() as conn:
+        conn.execute(text(f"CREATE SCHEMA {schema_name}"))
+        conn.commit()
 
-    # Downgrade to 013 (013_telegram_phase2_cycle1_hardening)
-    command.downgrade(alembic_cfg, "013")
+    try:
+        alembic_cfg = Config("alembic.ini")
+        url_with_schema = f"{postgres_engine.url}?options=-csearch_path%3D{schema_name}"
+        alembic_cfg.set_main_option("sqlalchemy.url", url_with_schema)
 
-    # Re-upgrade to head (014)
-    command.upgrade(alembic_cfg, "head")
+        # 1. Upgrade from scratch up to 013_ai_interactions
+        command.upgrade(alembic_cfg, "013_ai_interactions")
+
+        # 2. Insert PodcastJob + pre-014 AIInteraction in isolated schema
+        job_id = f"job-mig-{uuid.uuid4().hex[:8]}"
+        int_id = f"int-mig-{uuid.uuid4().hex[:8]}"
+        with postgres_engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {schema_name}"))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO podcast_jobs (
+                        id, gmail_message_id, sender_email, request_mode, source_type,
+                        source_hash, source_text, status, created_at, updated_at
+                    ) VALUES (
+                        :id, 'msg-mig-013', 'user@example.com', 'standard', 'text',
+                        'hash-mig', 'source mig text', 'COMPLETE', NOW(), NOW()
+                    )
+                    """
+                ),
+                {"id": job_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ai_interactions (
+                        id, job_id, provider, model, operation, started_at, success
+                    ) VALUES (
+                        :id, :job_id, 'groq', 'llama-3.3-70b-versatile', 'script_generation', NOW(), true
+                    )
+                    """
+                ),
+                {"id": int_id, "job_id": job_id},
+            )
+            conn.commit()
+
+        # 3. Upgrade to 014_diag_events
+        command.upgrade(alembic_cfg, "014_diag_events")
+
+        # 4. Verify pre-existing data survived, new 014 columns accept data, JobDiagnosticEvent insert works, ON DELETE CASCADE works
+        event_id = f"evt-mig-{uuid.uuid4().hex[:8]}"
+        with postgres_engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {schema_name}"))
+            # Pre-existing survived
+            res_int = conn.execute(
+                text("SELECT id, provider, http_status FROM ai_interactions WHERE id = :id"),
+                {"id": int_id},
+            ).fetchone()
+            assert res_int is not None
+            assert res_int[1] == "groq"
+            assert res_int[2] is None
+
+            # Update new 014 column on pre-existing row
+            conn.execute(
+                text(
+                    """
+                    UPDATE ai_interactions
+                    SET http_status = 200, request_json_sanitized = '{"mode": "standard"}'::json
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int_id},
+            )
+            conn.commit()
+
+            # Insert JobDiagnosticEvent
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO job_diagnostic_events (
+                        id, job_id, timestamp, level, component, event_type, message, metadata_json_sanitized
+                    ) VALUES (
+                        :id, :job_id, NOW(), 'INFO', 'test', 'EXTRACTION_COMPLETE', 'Test mig msg', '{"k": "v"}'::json
+                    )
+                    """
+                ),
+                {"id": event_id, "job_id": job_id},
+            )
+            conn.commit()
+
+            res_evt = conn.execute(
+                text("SELECT id, event_type, metadata_json_sanitized FROM job_diagnostic_events WHERE id = :id"),
+                {"id": event_id},
+            ).fetchone()
+            assert res_evt is not None
+            assert res_evt[1] == "EXTRACTION_COMPLETE"
+
+            # Verify FK ON DELETE CASCADE
+            conn.execute(text("DELETE FROM podcast_jobs WHERE id = :job_id"), {"job_id": job_id})
+            conn.commit()
+
+            cnt_int = conn.execute(text("SELECT count(*) FROM ai_interactions WHERE job_id = :job_id"), {"job_id": job_id}).scalar()
+            cnt_evt = conn.execute(text("SELECT count(*) FROM job_diagnostic_events WHERE job_id = :job_id"), {"job_id": job_id}).scalar()
+            assert cnt_int == 0
+            assert cnt_evt == 0
+
+        # 5. Downgrade to 013_ai_interactions
+        command.downgrade(alembic_cfg, "013_ai_interactions")
+
+        # 6. Re-upgrade to 014_diag_events (roundtrip)
+        command.upgrade(alembic_cfg, "014_diag_events")
+
+    finally:
+        with postgres_engine.connect() as conn:
+            conn.execute(text(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+            conn.commit()
 
