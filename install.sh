@@ -17,6 +17,15 @@ MODE="normal" # normal, update, reinstall
 NON_INTERACTIVE=false
 FORCE=false
 IS_INTERNAL_DOCKER_STAGE=false
+INSTALL_ENV_BACKUP=""
+
+cleanup_install_backup() {
+    if [ -n "$INSTALL_ENV_BACKUP" ] && [ -f "$INSTALL_ENV_BACKUP" ]; then
+        rm -f "$INSTALL_ENV_BACKUP"
+        INSTALL_ENV_BACKUP=""
+    fi
+}
+trap cleanup_install_backup EXIT INT TERM
 
 usage() {
     cat <<EOF
@@ -348,11 +357,11 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
         fi
 
         # Backup .env safely before any destructive git clean/reset
-        ENV_BACKUP=""
+        INSTALL_ENV_BACKUP=""
         if [ -f ".env" ]; then
-            ENV_BACKUP=$(mktemp)
-            chmod 600 "$ENV_BACKUP"
-            cp -p ".env" "$ENV_BACKUP"
+            INSTALL_ENV_BACKUP=$(mktemp)
+            chmod 600 "$INSTALL_ENV_BACKUP"
+            cp -p ".env" "$INSTALL_ENV_BACKUP"
         fi
 
         echo "🔄 Restoring repository source to commit ${RESOLVED_SHA}..."
@@ -361,12 +370,13 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
         git clean -fd
 
         # Restore .env if needed and ensure 0600 permissions
-        if [ -n "$ENV_BACKUP" ]; then
+        if [ -n "$INSTALL_ENV_BACKUP" ]; then
             if [ ! -f ".env" ]; then
-                cp -p "$ENV_BACKUP" ".env"
+                cp -p "$INSTALL_ENV_BACKUP" ".env"
             fi
             chmod 600 ".env" 2>/dev/null || true
-            rm -f "$ENV_BACKUP"
+            rm -f "$INSTALL_ENV_BACKUP"
+            INSTALL_ENV_BACKUP=""
         fi
 
         # Verify clean Git working tree (only ignored files like .env should remain)
@@ -448,7 +458,7 @@ if ! docker info >/dev/null 2>&1; then
             echo "🔄 Activating docker group session..."
             export HERALD_SG_ACTIVE=1
             # Re-execute the ON-DISK script with original arguments
-            exec sg docker -c "\"$HERALD_INSTALL_DIR/install.sh\" --internal-docker-stage $(printf '%q ' "${ORIGINAL_ARGS[@]}")"
+            exec sg docker -c "$(printf '%q ' "$HERALD_INSTALL_DIR/install.sh" --internal-docker-stage "${ORIGINAL_ARGS[@]}")"
         fi
     fi
 

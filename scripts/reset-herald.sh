@@ -128,15 +128,30 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-# 1. Authoritative Image Capture (for COLD reset) before containers stop
-BUILT_IMAGE_IDS=""
+# 1. Authoritative Image Tag Capture (for COLD reset) before containers stop
+BUILT_IMAGE_TAGS=""
 if [ "$RESET_MODE" = "cold" ]; then
-    echo "🔍 Enumerating locally built Herald Docker images..."
-    if ! RAW_IMAGE_IDS=$(docker compose images -q herald-migration herald-worker telegram-bot herald-api 2>&1); then
-        echo "❌ Error: Failed to enumerate Herald Docker images: ${RAW_IMAGE_IDS}" >&2
+    echo "🔍 Enumerating locally built Herald Docker image tags..."
+    if ! RAW_COMPOSE_IMAGES=$(docker compose images herald-migration herald-worker telegram-bot herald-api 2>&1); then
+        echo "❌ Error: Failed to enumerate Herald Docker images: ${RAW_COMPOSE_IMAGES}" >&2
         exit 1
     fi
-    BUILT_IMAGE_IDS=$(echo "$RAW_IMAGE_IDS" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+
+    # Extract non-empty repository:tag references (ignoring <none>, headers, and empty lines)
+    BUILT_IMAGE_TAGS=$(echo "$RAW_COMPOSE_IMAGES" | awk '
+        # Skip header
+        $1 == "CONTAINER" && $2 == "REPOSITORY" { next }
+        # Tabular output: CONTAINER REPOSITORY TAG IMAGE_ID ...
+        NF >= 3 && $2 != "<none>" && $3 != "<none>" && $2 != "REPOSITORY" {
+            print $2 ":" $3
+            next
+        }
+        # Direct formatted REPOSITORY:TAG output
+        NF == 1 && $1 ~ /.+:.+/ && $1 !~ /<none>/ {
+            print $1
+            next
+        }
+    ' | grep -v '^$' | sort -u || true)
 fi
 
 # 2. Stop Containers and Remove Compose Volumes (Scoped strictly to project)
@@ -146,26 +161,26 @@ if ! docker compose down -v --remove-orphans; then
     exit 1
 fi
 
-# 3. Handle COLD Reset Image Cleanup
+# 3. Handle COLD Reset Image Tag Cleanup
 if [ "$RESET_MODE" = "cold" ]; then
-    echo "🧹 Removing locally built Herald Docker images..."
-    if [ -n "$BUILT_IMAGE_IDS" ]; then
-        for img_id in $BUILT_IMAGE_IDS; do
-            if [ -n "$img_id" ]; then
-                echo "Removing image: ${img_id}"
-                if ! docker rmi "$img_id" >/dev/null 2>&1; then
-                    echo "❌ Error: Failed to remove image '${img_id}'." >&2
+    echo "🧹 Removing locally built Herald Docker image tags..."
+    if [ -n "$BUILT_IMAGE_TAGS" ]; then
+        for tag in $BUILT_IMAGE_TAGS; do
+            if [ -n "$tag" ]; then
+                echo "Removing image tag: ${tag}"
+                if ! docker image rm "$tag" >/dev/null 2>&1; then
+                    echo "❌ Error: Failed to remove image tag '${tag}'." >&2
                     exit 1
                 fi
-                if docker image inspect "$img_id" >/dev/null 2>&1; then
-                    echo "❌ Error: Image '${img_id}' is still locally addressable after removal." >&2
+                if docker image inspect "$tag" >/dev/null 2>&1; then
+                    echo "❌ Error: Image tag '${tag}' is still locally addressable after removal." >&2
                     exit 1
                 fi
             fi
         done
-        echo "✅ Locally built Herald images removed."
+        echo "✅ Locally built Herald image tags removed."
     else
-        echo "ℹ️  No built Herald images found to remove."
+        echo "ℹ️  No built Herald image tags found to remove."
     fi
     echo "ℹ️  Upstream images (postgres, kokoro) preserved."
 fi

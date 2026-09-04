@@ -638,3 +638,244 @@ def test_install_acceptance_failure_propagates(tmp_path):
     )
     assert res.returncode != 0
     assert "Herald installation and acceptance checks passed!" not in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_backup_cleaned_up_on_success_and_failure(tmp_path):
+    """Verify reinstall temporary .env backup is removed on success and on git operation failure."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    # Create bare upstream repo
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    # Create local clone
+    repo_dir = tmp_path / "herald_reinstall_cleanup_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    (repo_dir / ".gitignore").write_text(".env\n")
+    (repo_dir / "compose.yaml").write_text("services: {}\n")
+    (repo_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (repo_dir / "scripts").mkdir()
+    (repo_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1.0", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    env_file = repo_dir / ".env"
+    env_file.write_text('SECRET_TOKEN="very_secret_12345"\n')
+
+    isolated_tmp = tmp_path / "custom_tmp"
+    isolated_tmp.mkdir(parents=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    # 1. Successful reinstall -> no temp backup remains in TMPDIR, .env preserved
+    res = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(repo_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "TMPDIR": isolated_tmp.as_posix(),
+            "PATH": path_env,
+        },
+    )
+    assert res.returncode == 0
+    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert env_file.exists()
+    assert "very_secret_12345" in env_file.read_text()
+    assert list(isolated_tmp.iterdir()) == []
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_backup_cleaned_up_on_git_reset_or_clean_failure(tmp_path):
+    """Verify reinstall temporary .env backup is cleaned up via trap when git reset or clean fails."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    repo_dir = tmp_path / "herald_fail_cleanup_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    (repo_dir / ".gitignore").write_text(".env\n")
+    (repo_dir / "compose.yaml").write_text("services: {}\n")
+    (repo_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (repo_dir / "scripts").mkdir()
+    (repo_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1.0", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    env_file = repo_dir / ".env"
+    env_file.write_text('SECRET_TOKEN="secret_before_git_failure"\n')
+
+    isolated_tmp = tmp_path / "custom_tmp_fail"
+    isolated_tmp.mkdir(parents=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+
+    real_git = shutil.which("git")
+    posix_real_git = to_posix_path(real_git) if real_git else "git"
+    (fake_bin / "git").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"reset\" ] && [ \"$2\" = \"--hard\" ]; then\n"
+        f"    echo 'Simulated git reset fatal error' >&2\n"
+        f"    exit 1\n"
+        f"fi\n"
+        f"exec \"{posix_real_git}\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    res = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(repo_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "TMPDIR": isolated_tmp.as_posix(),
+            "PATH": path_env,
+        },
+    )
+    assert res.returncode != 0
+    # Trap must have removed the temporary backup file
+    assert list(isolated_tmp.iterdir()) == []
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_docker_group_continuation_via_sg(tmp_path):
+    """Verify install.sh seamlessly re-execs via sg docker when first invocation gets permission denied,
+    and preserves all arguments including ref, non-interactive, and install paths containing spaces.
+    """
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    # Upstream bare repo
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    # Seed source repo
+    seed_dir = tmp_path / "seed_repo"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    # Copy actual install.sh into seed repo so on-disk re-execution runs the real script
+    shutil.copy2(INSTALL_SCRIPT_PATH, seed_dir / "install.sh")
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Setup successfully called' >> setup_ran.log\n"
+        "exit 0\n"
+    )
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Acceptance passed' >> acceptance_ran.log\n"
+        "exit 0\n"
+    )
+
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    # Target dir containing SPACES
+    target_dir = tmp_path / "my install target" / "herald"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    sg_log = tmp_path / "sg_invocations.log"
+
+    # Fake docker: fails permission check unless HERALD_SG_ACTIVE is set
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"info\" ]; then\n"
+        "    if [ \"${HERALD_SG_ACTIVE:-}\" = \"1\" ]; then\n"
+        "        exit 0\n"
+        "    else\n"
+        "        echo 'permission denied while trying to connect to the Docker daemon socket' >&2\n"
+        "        exit 1\n"
+        "    fi\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    # Fake sg: logs invocation and executes the command string
+    (fake_bin / "sg").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo \"$*\" >> \"{sg_log.as_posix()}\"\n"
+        f"if [ \"$1\" = \"docker\" ] && [ \"$2\" = \"-c\" ]; then\n"
+        f"    shift 2\n"
+        f"    eval \"$@\"\n"
+        f"fi\n",
+        encoding="utf-8",
+    )
+
+    # Fake id: reports current user belongs to docker group
+    (fake_bin / "id").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"-un\" ]; then echo 'heralduser'; exit 0; fi\n"
+        "if [ \"$1\" = \"-nG\" ]; then echo 'heralduser docker sudo'; exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    res = run_install_script(
+        args=[
+            "--install-dir", str(target_dir),
+            "--ref", "main",
+            "--repo", str(bare_remote),
+            "--non-interactive",
+        ],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode == 0
+    assert "Activating docker group session..." in res.stdout
+    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert (target_dir / "setup_ran.log").exists()
+    assert (target_dir / "acceptance_ran.log").exists()
+
+    sg_calls = sg_log.read_text()
+    assert "docker -c" in sg_calls
+    assert "--internal-docker-stage" in sg_calls
+    assert "my\\ install\\ target" in sg_calls or "my install target" in sg_calls
+    assert "--non-interactive" in sg_calls

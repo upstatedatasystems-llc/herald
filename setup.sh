@@ -640,8 +640,35 @@ else
     exit 1
 fi
 
-# 6. Retrieve active pairing status & display setup complete summary
-PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli 2>/dev/null || true)
+# 6. Retrieve active pairing status & validate setup completion gate
+echo "🔍 Validating Telegram pairing state..."
+RAW_PAIRING_OUTPUT=""
+if ! RAW_PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli 2>&1); then
+    echo "❌ Error: Failed to inspect Telegram pairing status from telegram-bot container." >&2
+    echo "Action: Verify telegram-bot container health and database connectivity." >&2
+    echo "Recent telegram-bot logs:" >&2
+    docker compose logs --tail=20 telegram-bot 2>&1 | sed -E 's/(bot[0-9]+:)[A-Za-z0-9_-]+/\1[REDACTED]/g' >&2 || true
+    exit 1
+fi
+
+PAIRING_OUTPUT=$(echo "$RAW_PAIRING_OUTPUT" | tr -d '\r' | awk 'NR==1{print $0}')
+
+if [ "$PAIRING_OUTPUT" = "PAIRED" ]; then
+    PAIRING_MODE="PAIRED"
+elif echo "$PAIRING_OUTPUT" | grep -qE '^UNPAIRED:[A-Za-z0-9_-]+:[0-9]+$'; then
+    PAIR_CODE=$(echo "$PAIRING_OUTPUT" | cut -d':' -f2)
+    PAIR_EXP=$(echo "$PAIRING_OUTPUT" | cut -d':' -f3)
+    if [ -z "$PAIR_CODE" ]; then
+        echo "❌ Error: Pairing CLI returned an empty pairing code." >&2
+        exit 1
+    fi
+    PAIRING_MODE="UNPAIRED"
+else
+    echo "❌ Error: Invalid or unexpected pairing status returned by telegram-bot: ${PAIRING_OUTPUT}" >&2
+    echo "Action: Check 'docker compose logs telegram-bot' for details." >&2
+    docker compose logs --tail=20 telegram-bot 2>&1 | sed -E 's/(bot[0-9]+:)[A-Za-z0-9_-]+/\1[REDACTED]/g' >&2 || true
+    exit 1
+fi
 
 echo ""
 echo "========================================================"
@@ -650,13 +677,11 @@ echo "========================================================"
 echo ""
 echo "Telegram Bot: @${BOT_NAME:-HeraldBot}"
 
-if [ "$PAIRING_OUTPUT" = "PAIRED" ]; then
+if [ "$PAIRING_MODE" = "PAIRED" ]; then
     echo "Owner:        Owner already paired"
     echo ""
     echo "Your Telegram account is already paired as the authorized owner."
-elif echo "$PAIRING_OUTPUT" | grep -q "^UNPAIRED:"; then
-    PAIR_CODE=$(echo "$PAIRING_OUTPUT" | cut -d':' -f2)
-    PAIR_EXP=$(echo "$PAIRING_OUTPUT" | cut -d':' -f3)
+elif [ "$PAIRING_MODE" = "UNPAIRED" ]; then
     echo "Pairing Code: ${PAIR_CODE}"
     echo "Pairing expires in: ${PAIR_EXP:-30} minutes"
     echo ""
@@ -664,8 +689,6 @@ elif echo "$PAIRING_OUTPUT" | grep -q "^UNPAIRED:"; then
     echo "1. Open a private chat with @${BOT_NAME:-HeraldBot}"
     echo "2. Send:"
     echo "   /pair ${PAIR_CODE}"
-else
-    echo "Status:       Stack running (check 'docker compose logs telegram-bot' for pairing)"
 fi
 
 echo ""
@@ -676,15 +699,16 @@ echo "- Put \"research high\" above a URL/text for deep research."
 echo "- Put \"literal\" above text for zero-AI narration."
 echo ""
 echo "TELEGRAM COMMANDS"
-echo "/start     - Quick-start guide"
-echo "/help      - Full usage and directive reference"
-echo "/voices    - Browse voices and preview samples"
-echo "/download  - Download completed podcast MP3 document"
-echo "/status    - System health, queue depth, and uptime"
-echo "/ai_check  - AI provider connection test"
-echo "/queue     - Pending and processing jobs"
-echo "/settings  - Preferences and pre-TTS confirmation toggle"
-echo "/readme    - Project documentation"
+echo "/start        - Quick-start guide"
+echo "/help         - Full usage and directive reference"
+echo "/voices       - Browse voices and preview samples"
+echo "/download     - Download completed podcast MP3 document"
+echo "/status       - System health, queue depth, and uptime"
+echo "/ai_check     - AI provider connection test"
+echo "/queue        - Pending and processing jobs"
+echo "/settings     - Preferences and pre-TTS confirmation toggle"
+echo "/diagnostics  - View job diagnostics and download the sanitized support bundle"
+echo "/readme       - Project documentation"
 echo ""
 echo "SERVER COMMANDS"
 echo "Live logs: docker compose logs -f --tail=100"

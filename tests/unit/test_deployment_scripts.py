@@ -193,23 +193,38 @@ def test_reset_warm_exact_compose_down_and_preserves_env(tmp_path):
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
-def test_reset_cold_removes_herald_images_and_verifies_removal(tmp_path):
-    """Verify reset-herald.sh --cold captures Herald built images, deletes them with docker rmi, and verifies removal."""
+def test_reset_cold_shared_image_id_removes_tags_preserves_unrelated(tmp_path):
+    """Verify reset-herald.sh --cold captures Herald built image tags, removes them via docker image rm,
+    preserves unrelated tags sharing the same image ID, and preserves upstream images.
+    """
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(parents=True)
-    log_file = tmp_path / "docker_calls.log"
+    calls_log = tmp_path / "docker_calls.log"
+    removals_log = tmp_path / "removals.log"
+    deleted_tags_file = tmp_path / "deleted_tags.txt"
 
     (fake_bin / "docker").write_text(
         f"#!/usr/bin/env bash\n"
-        f"echo \"$*\" >> \"{log_file.as_posix()}\"\n"
+        f"echo \"$*\" >> \"{calls_log.as_posix()}\"\n"
         f"if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"images\" ]; then\n"
-        f"    echo \"sha256:mig123\"\n"
-        f"    echo \"sha256:worker456\"\n"
+        f"    echo \"CONTAINER            REPOSITORY                 TAG       IMAGE ID\"\n"
+        f"    echo \"herald-migration     herald-herald-migration   latest    sha256:shared123\"\n"
+        f"    echo \"herald-telegram-bot  herald-telegram-bot       latest    sha256:shared123\"\n"
+        f"    echo \"herald-api           herald-herald-api         latest    sha256:shared123\"\n"
+        f"    echo \"herald-worker        herald-herald-worker      latest    sha256:worker456\"\n"
+        f"    exit 0\n"
+        f"fi\n"
+        f"if [ \"$1\" = \"image\" ] && [ \"$2\" = \"rm\" ]; then\n"
+        f"    echo \"$3\" >> \"{removals_log.as_posix()}\"\n"
+        f"    echo \"$3\" >> \"{deleted_tags_file.as_posix()}\"\n"
         f"    exit 0\n"
         f"fi\n"
         f"if [ \"$1\" = \"image\" ] && [ \"$2\" = \"inspect\" ]; then\n"
-        f"    # Image is gone after rmi\n"
-        f"    exit 1\n"
+        f"    tag=\"$3\"\n"
+        f"    if [ -f \"{deleted_tags_file.as_posix()}\" ] && grep -qx \"$tag\" \"{deleted_tags_file.as_posix()}\"; then\n"
+        f"        exit 1\n"
+        f"    fi\n"
+        f"    exit 0\n"
         f"fi\n"
         f"exit 0\n",
         encoding="utf-8",
@@ -223,9 +238,49 @@ def test_reset_cold_removes_herald_images_and_verifies_removal(tmp_path):
     )
     assert res.returncode == 0
     assert "Herald cold reset complete." in res.stdout
-    calls = log_file.read_text()
-    assert "rmi sha256:mig123" in calls
-    assert "rmi sha256:worker456" in calls
+
+    removals = removals_log.read_text().splitlines() if removals_log.exists() else []
+    assert "herald-herald-migration:latest" in removals
+    assert "herald-telegram-bot:latest" in removals
+    assert "herald-herald-api:latest" in removals
+    assert "herald-herald-worker:latest" in removals
+
+    # Unrelated external tag and upstream images must NOT be removed
+    assert "unrelated-app:latest" not in removals
+    assert "postgres:16-alpine" not in removals
+    assert "ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1" not in removals
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reset_cold_image_tag_removal_failure_propagates(tmp_path):
+    """Verify reset-herald.sh --cold fails if removing an image tag fails."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"images\" ]; then\n"
+        "    echo 'CONTAINER REPOSITORY TAG IMAGE_ID'\n"
+        "    echo 'herald-worker herald-worker latest sha256:w123'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = \"image\" ] && [ \"$2\" = \"rm\" ]; then\n"
+        "    echo 'Error response from daemon: conflict' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    res = run_script(
+        RESET_SCRIPT_PATH,
+        args=["--cold", "--yes"],
+        env={"PATH": f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"},
+        cwd=tmp_path,
+    )
+    assert res.returncode != 0
+    assert "Failed to remove image tag" in res.stderr
+    assert "reset complete" not in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -706,6 +761,203 @@ def test_setup_telegram_bot_missing_propagates(tmp_path):
     )
     assert res.returncode != 0
     assert "Telegram Bot container is not running" in res.stderr
+    assert "Herald Setup Complete!" not in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_setup_pairing_success_when_paired(tmp_path):
+    """Verify setup.sh completes successfully and displays owner paired status when pairing_cli returns PAIRED."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '{\"ok\":true, \"result\":{\"username\":\"TestBot\"}}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ]; then\n"
+        "    if [ \"$2\" = \"exec\" ]; then echo 'PAIRED'; exit 0; fi\n"
+        "    if [ \"$2\" = \"ps\" ]; then\n"
+        "        if [ \"$3\" = \"-q\" ]; then echo \"cid_ok\"; exit 0; fi\n"
+        "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"
+        "        echo \"herald-worker\"\n"
+        "        echo \"telegram-bot\"\n"
+        "        exit 0\n"
+        "    fi\n"
+        "fi\n"
+        "if [ \"$1\" = \"inspect\" ]; then echo '\"healthy\"'; exit 0; fi\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_12345"\n'
+        'HERALD_API_KEY="custom_api_key_12345"\n'
+        'AI_PROVIDER="none"\n'
+    )
+
+    res = run_script(
+        SETUP_SCRIPT_PATH,
+        args=["--non-interactive"],
+        env={"PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        cwd=tmp_path,
+    )
+    assert res.returncode == 0
+    assert "Herald Setup Complete!" in res.stdout
+    assert "Owner already paired" in res.stdout
+    assert "/diagnostics" in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_setup_pairing_success_when_unpaired_code_shown(tmp_path):
+    """Verify setup.sh completes successfully and displays pairing code when pairing_cli returns UNPAIRED:123456:30."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '{\"ok\":true, \"result\":{\"username\":\"TestBot\"}}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ]; then\n"
+        "    if [ \"$2\" = \"exec\" ]; then echo 'UNPAIRED:PAIR999:25'; exit 0; fi\n"
+        "    if [ \"$2\" = \"ps\" ]; then\n"
+        "        if [ \"$3\" = \"-q\" ]; then echo \"cid_ok\"; exit 0; fi\n"
+        "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"
+        "        echo \"herald-worker\"\n"
+        "        echo \"telegram-bot\"\n"
+        "        exit 0\n"
+        "    fi\n"
+        "fi\n"
+        "if [ \"$1\" = \"inspect\" ]; then echo '\"healthy\"'; exit 0; fi\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_12345"\n'
+        'HERALD_API_KEY="custom_api_key_12345"\n'
+        'AI_PROVIDER="none"\n'
+    )
+
+    res = run_script(
+        SETUP_SCRIPT_PATH,
+        args=["--non-interactive"],
+        env={"PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        cwd=tmp_path,
+    )
+    assert res.returncode == 0
+    assert "Herald Setup Complete!" in res.stdout
+    assert "Pairing Code: PAIR999" in res.stdout
+    assert "Pairing expires in: 25 minutes" in res.stdout
+    assert "/pair PAIR999" in res.stdout
+    assert "/diagnostics" in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_setup_pairing_failure_when_cli_nonzero(tmp_path):
+    """Verify setup.sh fails and does NOT print Setup Complete when pairing_cli exits non-zero."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '{\"ok\":true, \"result\":{\"username\":\"TestBot\"}}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ]; then\n"
+        "    if [ \"$2\" = \"exec\" ]; then echo 'Fatal DB Error' >&2; exit 1; fi\n"
+        "    if [ \"$2\" = \"ps\" ]; then\n"
+        "        if [ \"$3\" = \"-q\" ]; then echo \"cid_ok\"; exit 0; fi\n"
+        "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"
+        "        echo \"herald-worker\"\n"
+        "        echo \"telegram-bot\"\n"
+        "        exit 0\n"
+        "    fi\n"
+        "    if [ \"$2\" = \"logs\" ]; then echo 'telegram-bot log trace'; exit 0; fi\n"
+        "fi\n"
+        "if [ \"$1\" = \"inspect\" ]; then echo '\"healthy\"'; exit 0; fi\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_12345"\n'
+        'HERALD_API_KEY="custom_api_key_12345"\n'
+        'AI_PROVIDER="none"\n'
+    )
+
+    res = run_script(
+        SETUP_SCRIPT_PATH,
+        args=["--non-interactive"],
+        env={"PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        cwd=tmp_path,
+    )
+    assert res.returncode != 0
+    assert "Failed to inspect Telegram pairing status" in res.stderr
+    assert "Herald Setup Complete!" not in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_setup_pairing_failure_when_cli_returns_error_or_malformed(tmp_path):
+    """Verify setup.sh fails when pairing_cli returns ERROR:... or malformed output."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '{\"ok\":true, \"result\":{\"username\":\"TestBot\"}}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"compose\" ]; then\n"
+        "    if [ \"$2\" = \"exec\" ]; then echo 'ERROR:Could not generate pairing code'; exit 0; fi\n"
+        "    if [ \"$2\" = \"ps\" ]; then\n"
+        "        if [ \"$3\" = \"-q\" ]; then echo \"cid_ok\"; exit 0; fi\n"
+        "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"
+        "        echo \"herald-worker\"\n"
+        "        echo \"telegram-bot\"\n"
+        "        exit 0\n"
+        "    fi\n"
+        "fi\n"
+        "if [ \"$1\" = \"inspect\" ]; then echo '\"healthy\"'; exit 0; fi\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_12345"\n'
+        'HERALD_API_KEY="custom_api_key_12345"\n'
+        'AI_PROVIDER="none"\n'
+    )
+
+    res = run_script(
+        SETUP_SCRIPT_PATH,
+        args=["--non-interactive"],
+        env={"PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        cwd=tmp_path,
+    )
+    assert res.returncode != 0
+    assert "Invalid or unexpected pairing status" in res.stderr
     assert "Herald Setup Complete!" not in res.stdout
 
 
