@@ -109,18 +109,41 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}/.."
 
+# Verify Docker Engine and Docker Compose v2 availability before proceeding
+if ! command -v docker >/dev/null 2>&1; then
+    echo "❌ Error: Docker command is missing. Cannot perform reset." >&2
+    echo "Please install Docker Engine before running reset-herald.sh." >&2
+    exit 1
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+    echo "❌ Error: Docker Compose v2 plugin is missing or inaccessible. Cannot perform reset." >&2
+    echo "Please install or enable docker-compose-plugin before running reset-herald.sh." >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "❌ Error: Docker daemon is unavailable or permission denied. Cannot perform reset." >&2
+    echo "Please ensure the Docker daemon is running and your user has docker group permissions." >&2
+    exit 1
+fi
+
 # 1. Authoritative Image Capture (for COLD reset) before containers stop
 BUILT_IMAGE_IDS=""
-if [ "$RESET_MODE" = "cold" ] && command -v docker >/dev/null 2>&1; then
-    BUILT_IMAGE_IDS=$(docker compose images -q herald-migration herald-worker telegram-bot herald-api 2>/dev/null | sort -u || true)
+if [ "$RESET_MODE" = "cold" ]; then
+    echo "🔍 Enumerating locally built Herald Docker images..."
+    if ! RAW_IMAGE_IDS=$(docker compose images -q herald-migration herald-worker telegram-bot herald-api 2>&1); then
+        echo "❌ Error: Failed to enumerate Herald Docker images: ${RAW_IMAGE_IDS}" >&2
+        exit 1
+    fi
+    BUILT_IMAGE_IDS=$(echo "$RAW_IMAGE_IDS" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
 fi
 
 # 2. Stop Containers and Remove Compose Volumes (Scoped strictly to project)
 echo "🛑 Stopping Herald containers and removing project volumes..."
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose down -v --remove-orphans
-else
-    echo "⚠️  Docker Compose not available or already stopped."
+if ! docker compose down -v --remove-orphans; then
+    echo "❌ Error: 'docker compose down -v --remove-orphans' failed." >&2
+    exit 1
 fi
 
 # 3. Handle COLD Reset Image Cleanup
@@ -129,7 +152,15 @@ if [ "$RESET_MODE" = "cold" ]; then
     if [ -n "$BUILT_IMAGE_IDS" ]; then
         for img_id in $BUILT_IMAGE_IDS; do
             if [ -n "$img_id" ]; then
-                docker rmi "$img_id"
+                echo "Removing image: ${img_id}"
+                if ! docker rmi "$img_id" >/dev/null 2>&1; then
+                    echo "❌ Error: Failed to remove image '${img_id}'." >&2
+                    exit 1
+                fi
+                if docker image inspect "$img_id" >/dev/null 2>&1; then
+                    echo "❌ Error: Image '${img_id}' is still locally addressable after removal." >&2
+                    exit 1
+                fi
             fi
         done
         echo "✅ Locally built Herald images removed."

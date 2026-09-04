@@ -10,6 +10,12 @@ echo ""
 ENV_FILE=".env"
 NON_INTERACTIVE=false
 
+# Track whether configuration existed before setup began
+ENV_EXISTED_AT_START=false
+if [ -f "$ENV_FILE" ]; then
+    ENV_EXISTED_AT_START=true
+fi
+
 # Parse flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,7 +31,9 @@ done
 
 # Initialize dedicated interactive input FD safely
 INPUT_FD=0
-if [ ! -t 0 ]; then
+if [ "${HERALD_TEST_ALLOW_STDIN:-0}" = "1" ]; then
+    INPUT_FD=0
+elif [ ! -t 0 ]; then
     if { exec 3< /dev/tty; } 2>/dev/null; then
         INPUT_FD=3
     else
@@ -47,10 +55,13 @@ prompt_value() {
         exit 1
     fi
 
-    read -u "$INPUT_FD" -rp "$prompt_msg" "$var_name"
-    if [ -z "${!var_name}" ] && [ -n "$default_val" ]; then
-        printf -v "$var_name" "%s" "$default_val"
+    local input_tmp=""
+    read -u "$INPUT_FD" -rp "$prompt_msg" input_tmp || true
+    input_tmp=$(trim_str "$input_tmp")
+    if [ -z "$input_tmp" ] && [ -n "$default_val" ]; then
+        input_tmp="$default_val"
     fi
+    printf -v "$var_name" "%s" "$input_tmp"
 }
 
 prompt_secret() {
@@ -62,8 +73,11 @@ prompt_secret() {
         exit 1
     fi
 
-    read -u "$INPUT_FD" -s -rp "$prompt_msg" "$var_name"
+    local input_tmp=""
+    read -u "$INPUT_FD" -s -rp "$prompt_msg" input_tmp || true
+    input_tmp=$(trim_str "$input_tmp")
     echo "" >&2
+    printf -v "$var_name" "%s" "$input_tmp"
 }
 
 # Pure-bash whitespace trimming (zero subprocesses, no process argv leakage)
@@ -74,15 +88,30 @@ trim_str() {
     printf "%s" "$var"
 }
 
+# Network validation timeouts
+CURL_CONNECT_TIMEOUT="${HERALD_CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${HERALD_CURL_MAX_TIME:-30}"
+CURRENT_CURL_CFG=""
+
+cleanup_curl_cfg() {
+    if [ -n "$CURRENT_CURL_CFG" ] && [ -f "$CURRENT_CURL_CFG" ]; then
+        rm -f "$CURRENT_CURL_CFG"
+        CURRENT_CURL_CFG=""
+    fi
+}
+trap cleanup_curl_cfg EXIT INT TERM
+
 # Safe curl invocation using temporary 0600 config file (never puts secret in process argv)
 call_curl_config() {
     local cfg
     cfg=$(mktemp)
     chmod 600 "$cfg"
+    CURRENT_CURL_CFG="$cfg"
     cat > "$cfg"
     local res
-    res=$(curl -s -K "$cfg" || true)
+    res=$(curl -s --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" -K "$cfg" || true)
     rm -f "$cfg"
+    CURRENT_CURL_CFG=""
     printf "%s" "$res"
 }
 
@@ -444,20 +473,51 @@ fi
 # 4. Ensure internal defaults & secrets are present without overwriting existing
 POSTGRES_PW=$(get_env_val "POSTGRES_PASSWORD")
 if [ -z "$POSTGRES_PW" ]; then
-    POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || true)
-    if [ -z "$POSTGRES_PW" ]; then
-        echo "❌ Error: Cryptographically secure random generator unavailable." >&2
-        exit 1
+    if [ "$ENV_EXISTED_AT_START" = true ]; then
+        if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
+            echo "❌ Error: Existing configuration in ${ENV_FILE} is missing POSTGRES_PASSWORD." >&2
+            echo "Cannot regenerate password because the existing PostgreSQL volume requires the original password." >&2
+            echo "Please restore POSTGRES_PASSWORD in ${ENV_FILE} or perform a reset with 'scripts/reset-herald.sh --warm'." >&2
+            exit 1
+        fi
+        echo "⚠️  Existing configuration found, but POSTGRES_PASSWORD is missing or empty."
+        echo "Do NOT generate a random password, as the existing database volume requires the original password."
+        while [ -z "$POSTGRES_PW" ]; do
+            prompt_secret POSTGRES_PW "Enter the existing PostgreSQL password: "
+            POSTGRES_PW=$(trim_str "$POSTGRES_PW")
+            if [ -z "$POSTGRES_PW" ]; then
+                echo "⚠️  Password cannot be empty. Please enter the existing database password."
+            fi
+        done
+        set_env_val "POSTGRES_PASSWORD" "$POSTGRES_PW"
+    else
+        POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || true)
+        if [ -z "$POSTGRES_PW" ]; then
+            echo "❌ Error: Cryptographically secure random generator unavailable." >&2
+            exit 1
+        fi
+        set_env_val "POSTGRES_PASSWORD" "$POSTGRES_PW"
     fi
-    set_env_val "POSTGRES_PASSWORD" "$POSTGRES_PW"
 fi
 
 HERALD_API_KEY=$(get_env_val "HERALD_API_KEY")
 if [ -z "$HERALD_API_KEY" ]; then
-    HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+    if [ "$ENV_EXISTED_AT_START" = true ]; then
+        if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
+            echo "❌ Error: Existing configuration in ${ENV_FILE} is missing HERALD_API_KEY." >&2
+            echo "Please restore HERALD_API_KEY in ${ENV_FILE}." >&2
+            exit 1
+        fi
+        echo "⚠️  Existing configuration found, but HERALD_API_KEY is missing or empty."
+        prompt_secret HERALD_API_KEY "Enter HERALD_API_KEY (leave empty to generate a new key): "
+        HERALD_API_KEY=$(trim_str "$HERALD_API_KEY")
+    fi
     if [ -z "$HERALD_API_KEY" ]; then
-        echo "❌ Error: Cryptographically secure random generator unavailable." >&2
-        exit 1
+        HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+        if [ -z "$HERALD_API_KEY" ]; then
+            echo "❌ Error: Cryptographically secure random generator unavailable." >&2
+            exit 1
+        fi
     fi
     set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
 fi
@@ -497,6 +557,8 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
             if [ "$PG_STATUS" = "healthy" ]; then
                 PG_OK=true
                 break
+            elif [ "$PG_STATUS" = "unhealthy" ]; then
+                break
             fi
         fi
         sleep 1
@@ -516,6 +578,8 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
         MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
         if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
             MIG_OK=true
+            break
+        elif echo "$MIG_STATUS" | grep -qEi "Exited \([1-9]"; then
             break
         fi
         sleep 1
@@ -538,6 +602,8 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
             K_STATUS=$(docker inspect --format='{{json .State.Health.Status}}' "$K_CID" 2>/dev/null | tr -d '"')
             if [ "$K_STATUS" = "healthy" ]; then
                 KOKORO_OK=true
+                break
+            elif [ "$K_STATUS" = "unhealthy" ]; then
                 break
             fi
         fi

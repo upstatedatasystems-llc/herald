@@ -33,13 +33,33 @@ def get_bash_executable() -> str | None:
 BASH_EXE = get_bash_executable()
 
 
+def to_posix_path(p: str | Path) -> str:
+    s = str(p).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":":
+        return f"/{s[0].lower()}{s[2:]}"
+    return s
+
+
 def run_install_script(args: list = None, env: dict = None) -> subprocess.CompletedProcess:
     """Helper to run the actual install.sh via bash subprocess."""
     assert BASH_EXE is not None, "Bash executable not found"
-    bash_cmd = [BASH_EXE, str(INSTALL_SCRIPT_PATH)] + (args or [])
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
+
+    path_val = (env or {}).get("PATH")
+    if path_val:
+        first_dir = path_val.split(os.pathsep)[0]
+        posix_path = to_posix_path(first_dir)
+        bash_cmd = [
+            BASH_EXE,
+            "-c",
+            f'export PATH="{posix_path}:$PATH"; exec "{INSTALL_SCRIPT_PATH.as_posix()}" "$@"',
+            "bash",
+        ] + (args or [])
+    else:
+        bash_cmd = [BASH_EXE, str(INSTALL_SCRIPT_PATH)] + (args or [])
+
     return subprocess.run(
         bash_cmd,
         capture_output=True,
@@ -305,8 +325,30 @@ def test_update_mode_refuses_wrong_origin(tmp_path):
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
-def test_reinstall_mode_requires_force_on_dirty_tree(tmp_path):
-    """Verify --reinstall requires --force when repository is dirty."""
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        ".",
+        "..",
+        "/tmp/foo/..",
+    ],
+)
+def test_directory_safety_canonicalization(tmp_path, bad_path):
+    """Verify install.sh canonicalizes paths and rejects unsafe resolved locations."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    res = run_install_script(
+        args=["--install-dir", bad_path],
+        env={"HERALD_TEST_OS_RELEASE": str(os_release), "HERALD_TEST_ARCH": "x86_64"},
+    )
+    assert res.returncode != 0
+    assert "unsafe location" in res.stderr or "is invalid" in res.stderr or "is unsafe" in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_mode_dirty_tracked_no_force_fails(tmp_path):
+    """Verify --reinstall requires --force when tracked files are modified."""
     os_release = tmp_path / "os-release"
     os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
 
@@ -318,7 +360,10 @@ def test_reinstall_mode_requires_force_on_dirty_tree(tmp_path):
         check=True,
         capture_output=True,
     )
-    (repo_dir / "dirty.txt").write_text("modified uncommitted")
+    (repo_dir / "tracked.txt").write_text("initial")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "tracked.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    (repo_dir / "tracked.txt").write_text("modified uncommitted")
 
     res = run_install_script(
         args=["--reinstall", "--install-dir", str(repo_dir)],
@@ -330,3 +375,266 @@ def test_reinstall_mode_requires_force_on_dirty_tree(tmp_path):
     )
     assert res.returncode != 0
     assert "Use --force to proceed with reinstall." in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_mode_dirty_untracked_no_force_fails(tmp_path):
+    """Verify --reinstall requires --force when untracked files are present."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    repo_dir = tmp_path / "herald_untracked_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/upstatedatasystems-llc/herald.git"],
+        check=True,
+        capture_output=True,
+    )
+    (repo_dir / "untracked.txt").write_text("untracked junk")
+
+    res = run_install_script(
+        args=["--reinstall", "--install-dir", str(repo_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "Use --force to proceed with reinstall." in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_forced_cleans_source_and_preserves_env(tmp_path):
+    """Verify --reinstall --force discards tracked/untracked changes, preserves .env, and restores clean tree."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    # Create bare upstream repo
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    # Create local clone
+    repo_dir = tmp_path / "herald_local_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    (repo_dir / ".gitignore").write_text(".env\n")
+    (repo_dir / "compose.yaml").write_text("services: {}\n")
+    (repo_dir / "setup.sh").write_text("#!/usr/bin/env bash\necho 'Setup mock'\n")
+    (repo_dir / "scripts").mkdir()
+    (repo_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\necho 'Acceptance mock'\n")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1.0.0", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+    expected_sha = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Now dirty the local repo
+    (repo_dir / "compose.yaml").write_text("services: { dirty: true }\n")
+    (repo_dir / "rogue_untracked.txt").write_text("should be deleted")
+    env_file = repo_dir / ".env"
+    env_file.write_text('TELEGRAM_BOT_TOKEN="preserve-me-secret-123"\n')
+    try:
+        env_file.chmod(0o600)
+    except Exception:
+        pass
+
+    # Fake bin for docker info / build
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"build\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    res = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(repo_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert f"Reinstalled clean source at commit {expected_sha}" in res.stdout
+    assert (repo_dir / ".env").exists()
+    assert 'TELEGRAM_BOT_TOKEN="preserve-me-secret-123"' in (repo_dir / ".env").read_text()
+    assert not (repo_dir / "rogue_untracked.txt").exists()
+    assert "dirty: true" not in (repo_dir / "compose.yaml").read_text()
+    status_out = subprocess.run(
+        ["git", "-C", str(repo_dir), "status", "--porcelain"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert status_out == ""
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_normal_clone_success_and_ref_selection(tmp_path):
+    """Verify normal install clones repo, checks out branch/tag/sha, builds images, and runs setup/acceptance."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    # Create bare remote
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    # Seed remote with main and a feature branch
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\necho 'Setup executed'\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\necho 'Acceptance executed'\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    # Create feature branch
+    subprocess.run(["git", "-C", str(seed_dir), "checkout", "-b", "feature/test-branch"], check=True, capture_output=True)
+    (seed_dir / "feature.txt").write_text("feature content")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "feature.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "feature commit", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:feature/test-branch"], check=True, capture_output=True)
+    feature_sha = subprocess.run(
+        ["git", "-C", str(seed_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "installed_herald"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote), "--ref", "feature/test-branch"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res.returncode == 0
+    assert f"Checked out commit {feature_sha}" in res.stdout
+    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert (target_dir / "feature.txt").exists()
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_setup_failure_propagates(tmp_path):
+    """Verify that failure in setup.sh causes install.sh to exit non-zero without claiming success."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    # Setup fails deliberately
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\necho 'Setup failed!' >&2\nexit 1\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "installed_herald_fail"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res.returncode != 0
+    assert "Herald installation and acceptance checks passed!" not in res.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_acceptance_failure_propagates(tmp_path):
+    """Verify that failure in install_acceptance.sh causes install.sh to exit non-zero."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (seed_dir / "scripts").mkdir()
+    # Acceptance fails deliberately
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\necho 'Acceptance check failed!' >&2\nexit 1\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "installed_herald_acc_fail"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res.returncode != 0
+    assert "Herald installation and acceptance checks passed!" not in res.stdout

@@ -146,40 +146,55 @@ check_arch() {
     esac
 }
 
-# 4. Target Directory Validation & Normalization
+canonicalize_path() {
+    local p="$1"
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m "$p" 2>/dev/null || echo "$p"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import os, sys; sys.stdout.write(os.path.realpath(sys.argv[1]))" "$p" 2>/dev/null || echo "$p"
+    else
+        echo "$p"
+    fi
+}
+
+# 4. Target Directory Validation & Canonicalization
 check_install_dir_safety() {
     local raw_target="$HERALD_INSTALL_DIR"
     raw_target="${raw_target%/}"
     if [ -z "$raw_target" ]; then raw_target="/"; fi
 
-    local unsafe_dirs=("/" "$HOME" "/etc" "/usr" "/var" "/tmp" "/bin" "/sbin" "/lib" "/boot" "/root")
+    local canon_target
+    canon_target=$(canonicalize_path "$raw_target")
+    canon_target="${canon_target%/}"
+    if [ -z "$canon_target" ]; then canon_target="/"; fi
+
+    local canon_home
+    canon_home=$(canonicalize_path "$HOME")
+    canon_home="${canon_home%/}"
+
+    local unsafe_dirs=("/" "$HOME" "$canon_home" "/etc" "/usr" "/var" "/tmp" "/bin" "/sbin" "/lib" "/lib64" "/boot" "/root" "/sys" "/proc" "/dev")
     for bad_dir in "${unsafe_dirs[@]}"; do
-        if [ "$raw_target" = "$bad_dir" ]; then
+        if [ "$raw_target" = "$bad_dir" ] || [ "$canon_target" = "$bad_dir" ]; then
             echo "❌ Error: Target installation directory '${raw_target}' is unsafe." >&2
             exit 1
         fi
     done
 
-    local target_parent
-    target_parent=$(dirname "$HERALD_INSTALL_DIR")
-    if [ ! -d "$target_parent" ]; then
-        mkdir -p "$target_parent" 2>/dev/null || {
-            echo "❌ Error: Cannot create parent directory for '${HERALD_INSTALL_DIR}'." >&2
-            exit 1
-        }
+    # Reject . or .. or empty base
+    if [ "$raw_target" = "." ] || [ "$raw_target" = ".." ]; then
+        echo "❌ Error: Target installation directory '${raw_target}' is invalid." >&2
+        exit 1
     fi
-    local resolved_parent
-    resolved_parent="$(cd "$target_parent" 2>/dev/null && pwd || echo "$target_parent")"
-    HERALD_INSTALL_DIR="${resolved_parent%/}/$(basename "$HERALD_INSTALL_DIR")"
+    local base_name
+    base_name=$(basename "$canon_target")
+    if [ "$base_name" = "." ] || [ "$base_name" = ".." ] || [ -z "$base_name" ]; then
+        echo "❌ Error: Target installation directory '${raw_target}' is invalid." >&2
+        exit 1
+    fi
 
-    for bad_dir in "${unsafe_dirs[@]}"; do
-        if [ "$HERALD_INSTALL_DIR" = "$bad_dir" ]; then
-            echo "❌ Error: Target installation directory '${HERALD_INSTALL_DIR}' is unsafe." >&2
-            exit 1
-        fi
-    done
+    HERALD_INSTALL_DIR="$canon_target"
 
-    if [[ ! "$HERALD_REPO_URL" =~ ^https:// ]]; then
+    if [ "${HERALD_TEST_ALLOW_FILE_REPO:-0}" != "1" ] && [[ ! "$HERALD_REPO_URL" =~ ^https:// ]]; then
         echo "❌ Error: Repository URL must start with 'https://'." >&2
         exit 1
     fi
@@ -322,11 +337,46 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
             exit 1
         fi
 
-        echo "🔄 Reinstalling clean ref '${HERALD_REF}'..."
+        echo "🔄 Fetching requested ref '${HERALD_REF}'..."
         git fetch origin "$HERALD_REF"
-        git checkout "$HERALD_REF"
+
+        # Resolve requested ref to exact commit SHA
+        RESOLVED_SHA=$(git rev-parse --verify "${HERALD_REF}^{commit}" 2>/dev/null || git rev-parse --verify "origin/${HERALD_REF}^{commit}" 2>/dev/null || true)
+        if [ -z "$RESOLVED_SHA" ]; then
+            echo "❌ Error: Cannot resolve ref '${HERALD_REF}' to a valid commit SHA." >&2
+            exit 1
+        fi
+
+        # Backup .env safely before any destructive git clean/reset
+        ENV_BACKUP=""
+        if [ -f ".env" ]; then
+            ENV_BACKUP=$(mktemp)
+            chmod 600 "$ENV_BACKUP"
+            cp -p ".env" "$ENV_BACKUP"
+        fi
+
+        echo "🔄 Restoring repository source to commit ${RESOLVED_SHA}..."
+        git checkout "$HERALD_REF" 2>/dev/null || git checkout "$RESOLVED_SHA" 2>/dev/null || true
+        git reset --hard "$RESOLVED_SHA"
+        git clean -fd
+
+        # Restore .env if needed and ensure 0600 permissions
+        if [ -n "$ENV_BACKUP" ]; then
+            if [ ! -f ".env" ]; then
+                cp -p "$ENV_BACKUP" ".env"
+            fi
+            chmod 600 ".env" 2>/dev/null || true
+            rm -f "$ENV_BACKUP"
+        fi
+
+        # Verify clean Git working tree (only ignored files like .env should remain)
+        if [ -n "$(git status --porcelain)" ]; then
+            echo "❌ Error: Working tree is still dirty after reinstall reset." >&2
+            exit 1
+        fi
+
         INSTALLED_SHA=$(git rev-parse HEAD)
-        echo "✅ Reinstalled at commit ${INSTALLED_SHA}"
+        echo "✅ Reinstalled clean source at commit ${INSTALLED_SHA}"
     fi
 else
     cd "$HERALD_INSTALL_DIR"

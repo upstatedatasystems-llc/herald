@@ -125,5 +125,5 @@ Checks:
 - Herald Worker and Telegram Bot daemons are active.
 - Migration container completed with exit code 0.
 - Database schema matches live dynamic Alembic head revision.
-- Optional legacy profiles (`n8n`, `herald-api`) are disabled by default.
+- Optional legacy profiles (`n8n`, `herald-api`) are disabled by default (can be bypassed via `HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=1`).
 - Host has sufficient disk headroom.
