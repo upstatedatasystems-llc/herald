@@ -217,8 +217,14 @@ if [ -z "$AI_PROVIDER" ]; then
                 set_env_val "GEMINI_API_KEY" "$RES_KEY"
                 set_env_val "RESEARCH_PROVIDER" "gemini"
                 echo "✅ Gemini Research configured alongside ${AI_PROVIDER}."
+            else
+                set_env_val "RESEARCH_PROVIDER" "none"
             fi
+        else
+            set_env_val "RESEARCH_PROVIDER" "none"
         fi
+    elif [ "$AI_PROVIDER" = "none" ]; then
+        set_env_val "RESEARCH_PROVIDER" "none"
     fi
 else
     echo "✅ AI Provider is configured: ${AI_PROVIDER}"
@@ -328,14 +334,14 @@ if [ "$RES_PROV" = "gemini" ] && [ "$AI_PROVIDER" != "gemini" ]; then
     G_RES_M=${G_RES_M:-"gemini-2.5-flash"}
     if [ -z "$G_RES_K" ]; then
         echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
-        set_env_val "RESEARCH_PROVIDER" ""
+        set_env_val "RESEARCH_PROVIDER" "none"
     else
         G_RES_RESP=$(curl -s -H "x-goog-api-key: ${G_RES_K}" "https://generativelanguage.googleapis.com/v1beta/models/${G_RES_M}" || true)
         if echo "$G_RES_RESP" | grep -q '"name":'; then
             echo "✅ Gemini Research model '${G_RES_M}' verified."
         else
             echo "⚠️  Gemini Research verification for '${G_RES_M}' failed. Disabling RESEARCH_PROVIDER."
-            set_env_val "RESEARCH_PROVIDER" ""
+            set_env_val "RESEARCH_PROVIDER" "none"
         fi
     fi
 fi

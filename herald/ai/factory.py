@@ -94,7 +94,9 @@ def get_research_provider() -> AIProvider | None:
     Defaults to RESEARCH_PROVIDER setting (default 'gemini').
     """
     global _research_provider_instance, _last_research_config
-    r_prov = (getattr(settings, "RESEARCH_PROVIDER", "gemini") or "gemini").lower().strip()
+    r_prov = (getattr(settings, "RESEARCH_PROVIDER", "gemini") or "").lower().strip()
+    if r_prov in ("", "none", "literal"):
+        return None
 
     current_config = (
         r_prov,

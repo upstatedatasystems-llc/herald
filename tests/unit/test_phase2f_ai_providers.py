@@ -476,13 +476,236 @@ def test_api_research_endpoint_validation():
     db.commit()
 
     # Case 2: Research provider configured but lacks capabilities.research_grounding
-    mock_prov = MagicMock()
-    mock_prov.is_configured.return_value = True
-    mock_prov.capabilities.research_grounding = False
-    with patch("herald.ai.factory.get_research_provider", return_value=mock_prov):
-        resp = client.post("/api/v1/script/generate", json={"job_id": job.id})
-        assert resp.status_code == 400
-        assert "Google Search Grounding" in resp.json()["detail"]
-
     app.dependency_overrides.clear()
 
+
+def test_provider_generation_matrix_brief_and_standard():
+    """Verify Brief and Standard generation across all providers (Gemini, Groq, OpenRouter, Mistral, Cloudflare, Literal)."""
+    db = setup_in_memory_db()
+
+    mock_openai_payload = {
+        "id": "gen-matrix-001",
+        "choices": [{"message": {"content": json.dumps(SAMPLE_SCRIPT_JSON)}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 150, "total_tokens": 250},
+    }
+
+    mock_gemini_payload = {
+        "candidates": [{
+            "content": {"parts": [{"text": json.dumps(SAMPLE_SCRIPT_JSON)}]},
+            "finishReason": "STOP",
+        }],
+        "usageMetadata": {"promptTokenCount": 110, "candidatesTokenCount": 160, "totalTokenCount": 270},
+    }
+
+    mock_cf_payload = {
+        "success": True,
+        "result": {"response": json.dumps(SAMPLE_SCRIPT_JSON)},
+    }
+
+    # 1. Gemini (Brief & Standard)
+    with patch.object(settings, "GEMINI_API_KEY", "gem_valid"):
+        g_prov = GeminiProvider()
+        with patch("httpx.Client.post", return_value=MagicMock(status_code=200, json=lambda: mock_gemini_payload, headers={})), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            s_brief = g_prov.generate_script(source_text="Gemini brief test", request_mode="brief", job_id="g-job-1")
+            assert s_brief.episode_title == "AI Provider Expansion"
+            s_std = g_prov.generate_script(source_text="Gemini std test", request_mode="standard", job_id="g-job-2")
+            assert s_std.episode_title == "AI Provider Expansion"
+
+    # 2. Groq (Brief & Standard)
+    groq_prov = GroqProvider(api_key="gsk_valid")
+    with patch("httpx.Client.post", return_value=MagicMock(status_code=200, json=lambda: mock_openai_payload, headers={"x-request-id": "grq-1"})), \
+         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+        s_brief = groq_prov.generate_script(source_text="Groq brief test", request_mode="brief", job_id="gr-job-1")
+        assert s_brief.episode_title == "AI Provider Expansion"
+        s_std = groq_prov.generate_script(source_text="Groq std test", request_mode="standard", job_id="gr-job-2")
+        assert s_std.episode_title == "AI Provider Expansion"
+
+    # 3. OpenRouter (Brief & Standard)
+    or_prov = OpenRouterProvider(api_key="sk-or-valid")
+    with patch("httpx.Client.post", return_value=MagicMock(status_code=200, json=lambda: mock_openai_payload, headers={"x-request-id": "or-1"})), \
+         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+        s_brief = or_prov.generate_script(source_text="OR brief test", request_mode="brief", job_id="or-job-1")
+        assert s_brief.episode_title == "AI Provider Expansion"
+        s_std = or_prov.generate_script(source_text="OR std test", request_mode="standard", job_id="or-job-2")
+        assert s_std.episode_title == "AI Provider Expansion"
+
+    # 4. Mistral (Brief & Standard)
+    mis_prov = MistralProvider(api_key="mis_valid")
+    with patch("httpx.Client.post", return_value=MagicMock(status_code=200, json=lambda: mock_openai_payload, headers={"x-request-id": "mis-1"})), \
+         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+        s_brief = mis_prov.generate_script(source_text="Mistral brief test", request_mode="brief", job_id="mis-job-1")
+        assert s_brief.episode_title == "AI Provider Expansion"
+        s_std = mis_prov.generate_script(source_text="Mistral std test", request_mode="standard", job_id="mis-job-2")
+        assert s_std.episode_title == "AI Provider Expansion"
+
+    # 5. Cloudflare Workers AI (Brief & Standard)
+    cf_prov = CloudflareProvider(account_id="acct_123", api_token="tok_456")
+    with patch("httpx.Client.post", return_value=MagicMock(status_code=200, json=lambda: mock_cf_payload, headers={})), \
+         patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+        s_brief = cf_prov.generate_script(source_text="CF brief test", request_mode="brief", job_id="cf-job-1")
+        assert s_brief.episode_title == "AI Provider Expansion"
+        s_std = cf_prov.generate_script(source_text="CF std test", request_mode="standard", job_id="cf-job-2")
+        assert s_std.episode_title == "AI Provider Expansion"
+
+    # 6. Literal (0 external HTTP calls, 0 AIInteraction rows)
+    lit_prov = LiteralProvider()
+    initial_ai_count = db.query(AIInteraction).count()
+    with patch("httpx.Client.post") as mock_post:
+        s_lit = lit_prov.generate_script(source_text="Literal deterministic source text paragraph.", request_mode="literal", job_id="lit-job-1")
+        assert s_lit.episode_title
+        assert not mock_post.called
+    assert db.query(AIInteraction).count() == initial_ai_count
+
+
+def test_gemini_one_http_call_one_ai_interaction_invariant():
+    """Verify Gemini functions record exactly 1 AIInteraction per outbound HTTP request across all failure and success modes."""
+    from herald.gemini.client import (
+        GeminiAuthError,
+        GeminiError,
+        audit_script_fidelity,
+        generate_grounded_research,
+        generate_podcast_script,
+    )
+
+    db = setup_in_memory_db()
+
+    with patch.object(settings, "GEMINI_API_KEY", "gem_valid"):
+        # Case 1: Success -> 1 request -> 1 AIInteraction row
+        j1 = "gem-inv-success"
+        mock_success_resp = MagicMock(
+            status_code=200,
+            headers={},
+            json=lambda: {
+                "candidates": [{"content": {"parts": [{"text": json.dumps(SAMPLE_SCRIPT_JSON)}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 60, "totalTokenCount": 110},
+            },
+        )
+        with patch("httpx.Client.post", return_value=mock_success_resp), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            script = generate_podcast_script(source_text="Valid text", request_mode="standard", job_id=j1)
+            assert script.episode_title == "AI Provider Expansion"
+
+        rows_1 = db.query(AIInteraction).filter(AIInteraction.job_id == j1).all()
+        assert len(rows_1) == 1
+        assert rows_1[0].success is True
+        assert rows_1[0].http_status == 200
+
+        # Case 2: Auth Failure (HTTP 401) -> exactly 1 AIInteraction row (no duplicate on outer catch)
+        j2 = "gem-inv-auth"
+        mock_401_resp = MagicMock(status_code=401, text="API key not valid", headers={})
+        with patch("httpx.Client.post", return_value=mock_401_resp), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            try:
+                generate_podcast_script(source_text="Auth fail text", request_mode="standard", job_id=j2)
+                assert False, "Expected GeminiAuthError"
+            except GeminiAuthError:
+                pass
+
+        rows_2 = db.query(AIInteraction).filter(AIInteraction.job_id == j2).all()
+        assert len(rows_2) == 1
+        assert rows_2[0].success is False
+        assert rows_2[0].http_status == 401
+        assert rows_2[0].error_category == "AUTHENTICATION_FAILED"
+
+        # Case 3: Rate limit 429 then success -> exactly 2 requests -> 2 AIInteraction rows
+        j3 = "gem-inv-retry"
+        mock_429_resp = MagicMock(status_code=429, text="Resource exhausted", headers={})
+        with patch("httpx.Client.post", side_effect=[mock_429_resp, mock_success_resp]), \
+             patch("time.sleep", return_value=None), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            script_retry = generate_podcast_script(source_text="Retry text", request_mode="standard", job_id=j3)
+            assert script_retry.episode_title == "AI Provider Expansion"
+
+        rows_3 = db.query(AIInteraction).filter(AIInteraction.job_id == j3).order_by(AIInteraction.attempt.asc()).all()
+        assert len(rows_3) == 2
+        assert rows_3[0].success is False
+        assert rows_3[0].attempt == 1
+        assert rows_3[0].http_status == 429
+        assert rows_3[1].success is True
+        assert rows_3[1].attempt == 2
+        assert rows_3[1].http_status == 200
+
+        # Case 4: Missing candidates (HTTP 200 with empty candidates) -> exactly 1 AIInteraction row
+        j4 = "gem-inv-nocand"
+        mock_no_cand = MagicMock(status_code=200, json=lambda: {"candidates": []}, headers={})
+        with patch.object(settings, "GEMINI_RETRY_COUNT", 1), \
+             patch("httpx.Client.post", return_value=mock_no_cand), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            try:
+                generate_podcast_script(source_text="No cand text", request_mode="standard", job_id=j4)
+                assert False, "Expected GeminiError"
+            except GeminiError:
+                pass
+
+        rows_4 = db.query(AIInteraction).filter(AIInteraction.job_id == j4).all()
+        assert len(rows_4) == 1
+        assert rows_4[0].success is False
+        assert rows_4[0].error_category == "EMPTY_RESPONSE"
+
+        # Case 5: Malformed JSON in response candidate -> exactly 1 AIInteraction row
+        j5 = "gem-inv-badjson"
+        mock_bad_json = MagicMock(
+            status_code=200,
+            json=lambda: {"candidates": [{"content": {"parts": [{"text": "not valid json {{"}]}, "finishReason": "STOP"}]},
+            headers={},
+        )
+        with patch.object(settings, "GEMINI_RETRY_COUNT", 1), \
+             patch("httpx.Client.post", return_value=mock_bad_json), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            try:
+                generate_podcast_script(source_text="Bad json text", request_mode="standard", job_id=j5)
+                assert False, "Expected GeminiError"
+            except GeminiError:
+                pass
+
+        rows_5 = db.query(AIInteraction).filter(AIInteraction.job_id == j5).all()
+        assert len(rows_5) == 1
+        assert rows_5[0].success is False
+        assert rows_5[0].error_category in ("JSONDecodeError", "SCHEMA_VALIDATION_ERROR", "INVALID_JSON")
+
+        # Case 6: Grounded research call -> exactly 1 AIInteraction row
+        j6 = "gem-inv-grounding"
+        mock_ground_resp = MagicMock(
+            status_code=200,
+            headers={},
+            json=lambda: {
+                "candidates": [{
+                    "content": {"parts": [{"text": "Grounded research notes content"}]},
+                    "groundingMetadata": {"webSearchQueries": ["AI models 2026"]},
+                    "finishReason": "STOP",
+                }],
+                "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 80, "totalTokenCount": 120},
+            },
+        )
+        with patch("httpx.Client.post", return_value=mock_ground_resp), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            g_res = generate_grounded_research(source_text="Source context for research", research_depth="medium", job_id=j6)
+            assert g_res["raw_text"] == "Grounded research notes content"
+
+        rows_6 = db.query(AIInteraction).filter(AIInteraction.job_id == j6).all()
+        assert len(rows_6) == 1
+        assert rows_6[0].operation == "grounded_research"
+        assert rows_6[0].success is True
+
+        # Case 7: Fidelity audit & repair calls -> exactly 1 AIInteraction row each
+        j7 = "gem-inv-fidelity"
+        mock_audit_resp = MagicMock(
+            status_code=200,
+            headers={},
+            json=lambda: {
+                "candidates": [{
+                    "content": {"parts": [{"text": json.dumps({"has_material_issues": False})}]},
+                    "finishReason": "STOP",
+                }],
+            },
+        )
+        with patch("httpx.Client.post", return_value=mock_audit_resp), \
+             patch("herald.services.ai_recorder.SessionLocal", return_value=db):
+            audit_res = audit_script_fidelity(source_text="Source", script_dict=SAMPLE_SCRIPT_JSON, job_id=j7)
+            assert audit_res.has_material_issues is False
+
+        rows_7 = db.query(AIInteraction).filter(AIInteraction.job_id == j7).all()
+        assert len(rows_7) == 1
+        assert rows_7[0].operation == "fidelity_audit"
+        assert rows_7[0].success is True

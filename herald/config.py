@@ -151,6 +151,8 @@ class Settings(BaseSettings):
 
     def is_research_configured(self) -> bool:
         r_prov = (self.RESEARCH_PROVIDER or "").lower().strip()
+        if r_prov in ("", "none", "literal"):
+            return False
         if r_prov == "gemini":
             return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
         return False

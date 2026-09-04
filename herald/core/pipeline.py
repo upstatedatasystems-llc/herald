@@ -33,6 +33,7 @@ from herald.literal.script_generator import generate_literal_script
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.performance_metrics import record_stage_metric
+from herald.services.redaction import sanitize_error
 
 logger = logging.getLogger("herald.core.pipeline")
 
@@ -655,14 +656,24 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         )
     except Exception as e:
         logger.error(f"Script generation failure for job '{job.id}': {e}")
-        record_job_diagnostic_event(job.id, "ERROR", "scripting", "SCRIPTING_FAILED", f"Script generation failed: {e}", db=db)
+        cat, safe_msg = sanitize_error(e)
+        eff_cat = cat if cat and cat != "UNKNOWN_ERROR" else "SCRIPT_GENERATION_FAILED"
+        record_job_diagnostic_event(
+            job.id,
+            "ERROR",
+            "scripting",
+            "SCRIPTING_FAILED",
+            f"Script generation failed: {safe_msg}",
+            metadata={"error_category": eff_cat},
+            db=db,
+        )
         transition_job_state(
             db,
             job,
             JobState.FAILED_FINAL.value,
             component="herald-core",
-            message=str(e),
-            error_category="SCRIPT_GENERATION_FAILED",
+            message=safe_msg,
+            error_category=eff_cat,
         )
         return HeraldResponse(
             job_id=job.id,
@@ -670,6 +681,6 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             request_mode=job.request_mode,
             source_type=job.source_type,
             is_duplicate=False,
-            message=f"Script generation failed: {e}",
-            error_category="SCRIPT_GENERATION_FAILED",
+            message=f"Script generation failed: {safe_msg}",
+            error_category=eff_cat,
         )

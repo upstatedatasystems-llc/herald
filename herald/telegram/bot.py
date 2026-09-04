@@ -675,6 +675,37 @@ def handle_telegram_content_message(
     title_escaped = html.escape(response.episode_title or "Podcast Episode")
     mode_escaped = html.escape(response.request_mode)
 
+    if response.status in (
+        JobState.FAILED_FINAL.value,
+        JobState.FAILED_RETRYABLE.value,
+        "cancelled",
+        "failed",
+    ):
+        safe_msg = html.escape(response.message or "An error occurred while processing the request.")
+        if not response.job_id:
+            client.send_message(
+                chat_id=chat_id,
+                text=f"❌ <b>Unable to process request</b>\n\n{safe_msg}",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+        else:
+            short_id = response.job_id[:8]
+            fail_text = (
+                f"❌ <b>Podcast Generation Failed</b>\n\n"
+                f"• <b>ID:</b> <code>{short_id}</code>\n"
+                f"• <b>Status:</b> <code>{html.escape(response.status)}</code>\n"
+                f"• <b>Reason:</b> {safe_msg}\n\n"
+                f"Use <code>/diagnostics {short_id}</code> for support details."
+            )
+            client.send_message(
+                chat_id=chat_id,
+                text=fail_text,
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+        return
+
     if response.is_duplicate:
         existing_job = db.query(PodcastJob).filter_by(id=response.job_id).first()
         if existing_job:
