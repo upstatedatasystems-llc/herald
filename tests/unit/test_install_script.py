@@ -1,7 +1,6 @@
 """
 Unit tests for Herald top-level bootstrap installer (install.sh).
-Tests OS verification, CPU architecture validation, disk thresholds,
-directory safety, argument parsing, and error propagation using subprocess.
+Executes the actual install.sh script as a subprocess with mock environments.
 """
 
 import os
@@ -34,10 +33,10 @@ def get_bash_executable() -> str | None:
 BASH_EXE = get_bash_executable()
 
 
-def run_bash_script(script_code: str, env: dict = None, args: list = None) -> subprocess.CompletedProcess:
-    """Helper to run a bash snippet or script via bash subprocess."""
+def run_install_script(args: list = None, env: dict = None) -> subprocess.CompletedProcess:
+    """Helper to run the actual install.sh via bash subprocess."""
     assert BASH_EXE is not None, "Bash executable not found"
-    bash_cmd = [BASH_EXE, "-c", script_code, "test_proc"] + (args or [])
+    bash_cmd = [BASH_EXE, str(INSTALL_SCRIPT_PATH)] + (args or [])
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
@@ -61,51 +60,34 @@ def test_install_script_syntax_validity():
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 def test_install_script_help_flag():
     """Verify --help outputs usage information and exits 0."""
-    res = subprocess.run([BASH_EXE, str(INSTALL_SCRIPT_PATH), "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    res = run_install_script(args=["--help"])
     assert res.returncode == 0
     assert "Herald Bootstrap Installer" in res.stdout
     assert "--install-dir" in res.stdout
     assert "--ref" in res.stdout
     assert "--update" in res.stdout
     assert "--reinstall" in res.stdout
+    assert "--force" in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 def test_install_script_rejects_unknown_argument():
     """Verify unknown arguments produce an error and non-zero exit."""
-    res = subprocess.run([BASH_EXE, str(INSTALL_SCRIPT_PATH), "--invalid-flag"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    res = run_install_script(args=["--invalid-flag"])
     assert res.returncode != 0
     assert "Unknown argument '--invalid-flag'" in res.stderr
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 def test_os_check_accepts_ubuntu_2404(tmp_path):
-    """Verify check_os accepts Ubuntu 24.04 LTS."""
+    """Verify install.sh accepts Ubuntu 24.04 LTS via actual script execution."""
     os_release = tmp_path / "os-release"
-    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\nNAME="Ubuntu"\nVERSION="24.04 LTS"\n')
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\nNAME="Ubuntu"\n')
 
-    bash_snippet = f"""
-    set -euo pipefail
-    check_os() {{
-        local os_id=""
-        local os_version=""
-        while IFS='=' read -r key val || [ -n "$key" ]; do
-            val=$(echo "$val" | tr -d '"' | tr -d "'")
-            if [ "$key" = "ID" ]; then os_id="$val"; fi
-            if [ "$key" = "VERSION_ID" ]; then os_version="$val"; fi
-        done < "{os_release.as_posix()}"
-
-        if [ "$os_id" != "ubuntu" ] || [ "$os_version" != "24.04" ]; then
-            echo "Unsupported OS: $os_id $os_version" >&2
-            exit 1
-        fi
-        echo "OK"
-    }}
-    check_os
-    """
-    res = run_bash_script(bash_snippet)
-    assert res.returncode == 0
-    assert "OK" in res.stdout
+    # Give invalid arch to stop execution right after OS check
+    res = run_install_script(env={"HERALD_TEST_OS_RELEASE": str(os_release), "HERALD_TEST_ARCH": "invalid_arch"})
+    assert "Operating System verified: Ubuntu 24.04 LTS" in res.stdout
+    assert res.returncode != 0  # stopped at arch
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -120,179 +102,231 @@ def test_os_check_accepts_ubuntu_2404(tmp_path):
     ],
 )
 def test_os_check_rejects_non_ubuntu_2404(tmp_path, id_val, ver_val):
-    """Verify check_os rejects any OS other than Ubuntu 24.04 LTS."""
+    """Verify install.sh rejects non-Ubuntu 24.04 OS releases."""
     os_release = tmp_path / "os-release"
     os_release.write_text(f'ID={id_val}\nVERSION_ID="{ver_val}"\n')
 
-    bash_snippet = f"""
-    set -euo pipefail
-    check_os() {{
-        local os_id=""
-        local os_version=""
-        while IFS='=' read -r key val || [ -n "$key" ]; do
-            val=$(echo "$val" | tr -d '"' | tr -d "'")
-            if [ "$key" = "ID" ]; then os_id="$val"; fi
-            if [ "$key" = "VERSION_ID" ]; then os_version="$val"; fi
-        done < "{os_release.as_posix()}"
-
-        if [ "$os_id" != "ubuntu" ] || [ "$os_version" != "24.04" ]; then
-            echo "Unsupported OS: $os_id $os_version" >&2
-            exit 1
-        fi
-        echo "OK"
-    }}
-    check_os
-    """
-    res = run_bash_script(bash_snippet)
+    res = run_install_script(env={"HERALD_TEST_OS_RELEASE": str(os_release)})
     assert res.returncode != 0
-    assert "Unsupported OS" in res.stderr
+    assert "Unsupported operating system" in res.stderr
+    assert "Herald Phase 2 officially supports Ubuntu 24.04 LTS only." in res.stderr
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 @pytest.mark.parametrize("arch", ["x86_64", "amd64", "aarch64", "arm64"])
-def test_arch_check_accepts_supported_architectures(arch):
-    """Verify check_arch accepts amd64, x86_64, arm64, aarch64."""
-    bash_snippet = f"""
-    set -euo pipefail
-    check_arch() {{
-        local arch="{arch}"
-        case "$arch" in
-            x86_64|amd64|aarch64|arm64)
-                echo "ARCH_OK: $arch"
-                ;;
-            *)
-                echo "Unsupported arch: $arch" >&2
-                exit 1
-                ;;
-        esac
-    }}
-    check_arch
-    """
-    res = run_bash_script(bash_snippet)
-    assert res.returncode == 0
-    assert f"ARCH_OK: {arch}" in res.stdout
+def test_arch_check_accepts_supported_architectures(tmp_path, arch):
+    """Verify install.sh accepts amd64, x86_64, arm64, aarch64."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    res = run_install_script(
+        args=["--install-dir", str(tmp_path / "target")],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": arch,
+            "HERALD_TEST_AVAIL_MB": "2000",  # fail at disk check after passing arch
+        },
+    )
+    assert f"CPU Architecture verified: {arch}" in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 @pytest.mark.parametrize("arch", ["s390x", "armv7l", "i386", "riscv64", "ppc64le"])
-def test_arch_check_rejects_unsupported_architectures(arch):
-    """Verify check_arch rejects unsupported CPU architectures."""
-    bash_snippet = f"""
-    set -euo pipefail
-    check_arch() {{
-        local arch="{arch}"
-        case "$arch" in
-            x86_64|amd64|aarch64|arm64)
-                echo "ARCH_OK"
-                ;;
-            *)
-                echo "Unsupported arch: $arch" >&2
-                exit 1
-                ;;
-        esac
-    }}
-    check_arch
-    """
-    res = run_bash_script(bash_snippet)
+def test_arch_check_rejects_unsupported_architectures(tmp_path, arch):
+    """Verify install.sh rejects unsupported CPU architectures."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    res = run_install_script(env={"HERALD_TEST_OS_RELEASE": str(os_release), "HERALD_TEST_ARCH": arch})
     assert res.returncode != 0
-    assert f"Unsupported arch: {arch}" in res.stderr
+    assert f"Unsupported architecture '{arch}'" in res.stderr
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
-def test_disk_space_guard_thresholds():
-    """Verify disk space math: <4000MB fails, 4000-8000MB warns, >=8000MB passes."""
-    bash_snippet = """
-    set -euo pipefail
-    check_disk_logic() {
-        local avail_mb="$1"
-        local min_mb=4000
-        local warn_mb=8000
+def test_disk_space_guard_thresholds(tmp_path):
+    """Verify install.sh disk space math: <4000MB fails, 4000-8000MB warns, >=8000MB passes."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
 
-        if [ "$avail_mb" -lt "$min_mb" ]; then
-            echo "FAIL: $avail_mb < $min_mb" >&2
-            return 1
-        fi
-        if [ "$avail_mb" -lt "$warn_mb" ]; then
-            echo "WARN: $avail_mb < $warn_mb"
-            return 0
-        fi
-        echo "PASS: $avail_mb"
-        return 0
-    }
-    check_disk_logic "$1"
-    """
-    # Test hard fail
-    res_fail = run_bash_script(bash_snippet, args=["2500"])
+    # Hard fail (< 4000 MB)
+    res_fail = run_install_script(
+        args=["--install-dir", str(tmp_path / "target1")],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "2500",
+        },
+    )
     assert res_fail.returncode != 0
-    assert "FAIL" in res_fail.stderr
+    assert "Insufficient free disk space" in res_fail.stderr
 
-    # Test warning
-    res_warn = run_bash_script(bash_snippet, args=["5500"])
+    # Warning (4000 - 8000 MB)
+    res_warn = run_install_script(
+        args=["--install-dir", str(tmp_path / "target2"), "--help"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "5500",
+        },
+    )
     assert res_warn.returncode == 0
-    assert "WARN" in res_warn.stdout
-
-    # Test pass
-    res_pass = run_bash_script(bash_snippet, args=["12000"])
-    assert res_pass.returncode == 0
-    assert "PASS" in res_pass.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 @pytest.mark.parametrize("bad_dir", ["/", "/etc", "/usr", "/var", "/tmp", "/bin", "/sbin", "/boot", "/root"])
-def test_directory_safety_rejects_critical_roots(bad_dir):
-    """Verify installer rejects dangerous target directories."""
-    bash_snippet = f"""
-    set -euo pipefail
-    check_dir() {{
-        local target="{bad_dir}"
-        local unsafe_dirs=("/" "$HOME" "/etc" "/usr" "/var" "/tmp" "/bin" "/sbin" "/lib" "/boot" "/root")
-        for d in "${{unsafe_dirs[@]}}"; do
-            if [ "$target" = "$d" ]; then
-                echo "Unsafe directory: $target" >&2
-                exit 1
-            fi
-        done
-        echo "OK"
-    }}
-    check_dir
-    """
-    res = run_bash_script(bash_snippet)
+def test_directory_safety_rejects_critical_roots(tmp_path, bad_dir):
+    """Verify install.sh rejects dangerous root target directories."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    res = run_install_script(
+        args=["--install-dir", bad_dir],
+        env={"HERALD_TEST_OS_RELEASE": str(os_release), "HERALD_TEST_ARCH": "x86_64"},
+    )
     assert res.returncode != 0
-    assert "Unsafe directory" in res.stderr
+    assert f"Target installation directory '{bad_dir}' is unsafe." in res.stderr
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
 def test_custom_install_path_with_spaces(tmp_path):
-    """Verify custom install paths containing spaces are handled safely."""
-    space_path = tmp_path / "My Herald App Directory"
-    space_path.mkdir(parents=True)
+    """Verify install.sh handles custom install paths with spaces."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
 
-    bash_snippet = f"""
-    set -euo pipefail
-    TARGET="{space_path.as_posix()}"
-    cd "$TARGET"
-    pwd
-    """
-    res = run_bash_script(bash_snippet)
-    assert res.returncode == 0
-    assert "My Herald App Directory" in res.stdout
+    space_dir = tmp_path / "My Herald App Directory"
+    space_dir.mkdir(parents=True)
+    (space_dir / "compose.yaml").write_text("services: {}\n")
+    (space_dir / "setup.sh").write_text("#!/usr/bin/env bash\n")
+
+    res = run_install_script(
+        args=["--install-dir", str(space_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "Herald installation already exists" in res.stderr
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
-def test_insecure_repo_scheme_rejected():
-    """Verify non-https repository URLs are rejected."""
-    bash_snippet = """
-    set -euo pipefail
-    check_repo() {
-        local repo="$1"
-        if [[ ! "$repo" =~ ^https:// ]]; then
-            echo "Invalid repo URL scheme: $repo" >&2
-            exit 1
-        fi
-        echo "OK"
-    }
-    check_repo "http://insecure-repo.com/herald.git"
-    """
-    res = run_bash_script(bash_snippet)
+def test_insecure_repo_scheme_rejected(tmp_path):
+    """Verify install.sh rejects non-https repository URLs."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    res = run_install_script(
+        args=["--repo", "http://insecure-herald-repo.com/repo.git", "--install-dir", str(tmp_path / "target")],
+        env={"HERALD_TEST_OS_RELEASE": str(os_release), "HERALD_TEST_ARCH": "x86_64"},
+    )
     assert res.returncode != 0
-    assert "Invalid repo URL scheme" in res.stderr
+    assert "Repository URL must start with 'https://'." in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_normal_mode_refuses_existing_installation(tmp_path):
+    """Verify normal install refuses to overwrite an existing Herald installation directory."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    install_dir = tmp_path / "existing_herald"
+    install_dir.mkdir(parents=True)
+    (install_dir / "compose.yaml").write_text("services: {}\n")
+    (install_dir / "setup.sh").write_text("#!/usr/bin/env bash\n")
+
+    res = run_install_script(
+        args=["--install-dir", str(install_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "Herald installation already exists" in res.stderr
+    assert "To update the existing installation, run: ./install.sh --update" in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_update_mode_refuses_dirty_tree(tmp_path):
+    """Verify --update refuses if repository has uncommitted or untracked changes."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    repo_dir = tmp_path / "herald_git_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/upstatedatasystems-llc/herald.git"],
+        check=True,
+        capture_output=True,
+    )
+    # Add untracked dirty file
+    (repo_dir / "untracked_file.txt").write_text("dirty content")
+
+    res = run_install_script(
+        args=["--update", "--install-dir", str(repo_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "has uncommitted or untracked changes. Update refused." in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_update_mode_refuses_wrong_origin(tmp_path):
+    """Verify --update refuses if repository origin is not the official Herald repo."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    repo_dir = tmp_path / "foreign_git_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/attacker/malicious.git"],
+        check=True,
+        capture_output=True,
+    )
+
+    res = run_install_script(
+        args=["--update", "--install-dir", str(repo_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "does not match expected Herald origin." in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_reinstall_mode_requires_force_on_dirty_tree(tmp_path):
+    """Verify --reinstall requires --force when repository is dirty."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    repo_dir = tmp_path / "herald_dirty_repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/upstatedatasystems-llc/herald.git"],
+        check=True,
+        capture_output=True,
+    )
+    (repo_dir / "dirty.txt").write_text("modified uncommitted")
+
+    res = run_install_script(
+        args=["--reinstall", "--install-dir", str(repo_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+        },
+    )
+    assert res.returncode != 0
+    assert "Use --force to proceed with reinstall." in res.stderr

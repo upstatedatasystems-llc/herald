@@ -23,11 +23,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Initialize dedicated interactive input FD
+# Initialize dedicated interactive input FD safely
 INPUT_FD=0
 if [ ! -t 0 ]; then
-    if [ -r /dev/tty ]; then
-        exec 3< /dev/tty
+    if { exec 3< /dev/tty; } 2>/dev/null; then
         INPUT_FD=3
     else
         INPUT_FD=""
@@ -67,33 +66,58 @@ prompt_secret() {
     echo "" >&2
 }
 
-# Python helper to read a variable from .env safely
+# Pure-bash whitespace trimming (zero subprocesses, no process argv leakage)
+trim_str() {
+    local var="$1"
+    var="${var#"${var%%[![:space:]]*}"}"
+    var="${var%"${var##*[![:space:]]}"}"
+    printf "%s" "$var"
+}
+
+# Safe curl invocation using temporary 0600 config file (never puts secret in process argv)
+call_curl_config() {
+    local cfg
+    cfg=$(mktemp)
+    chmod 600 "$cfg"
+    cat > "$cfg"
+    local res
+    res=$(curl -s -K "$cfg" || true)
+    rm -f "$cfg"
+    printf "%s" "$res"
+}
+
+# Python helper to read a variable from .env safely without argv secret leakage
 get_env_val() {
     local key="$1"
     if [ -f "$ENV_FILE" ]; then
         python3 -c "
-import os
+import sys, os
+key = sys.argv[1]
+filepath = sys.argv[2]
 val = ''
-if os.path.exists('$ENV_FILE'):
-    with open('$ENV_FILE', 'r', encoding='utf-8') as f:
+if os.path.exists(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
             stripped = line.strip()
             if stripped and not stripped.startswith('#') and '=' in stripped:
                 k, v = stripped.split('=', 1)
-                if k.strip() == '$key':
+                if k.strip() == key:
                     val = v.strip().strip('\"').strip('\'')
-print(val)
-" 2>/dev/null || true
+sys.stdout.write(val)
+" "$key" "$ENV_FILE" 2>/dev/null || true
     fi
 }
 
-# Python helper to update or append keys in .env preserving all other lines and comments
+# Python helper to update or append keys in .env reading secret value via stdin
 set_env_val() {
     local key="$1"
     local val="$2"
     python3 -c "
-import os
-filepath = '$ENV_FILE'
+import sys, os
+key = sys.argv[1]
+filepath = sys.argv[2]
+val = sys.stdin.read().rstrip('\r\n')
+
 lines = []
 if os.path.exists(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -105,19 +129,21 @@ for line in lines:
     stripped = line.strip()
     if stripped and not stripped.startswith('#') and '=' in stripped:
         k = stripped.split('=', 1)[0].strip()
-        if k == '$key':
-            new_lines.append(f'''$key=\"$val\"\n''')
+        if k == key:
+            escaped = val.replace('\\\\', '\\\\\\\\').replace('\"', '\\\"')
+            new_lines.append(f'{key}=\"{escaped}\"\n')
             found = True
             continue
     new_lines.append(line)
 
 if not found:
-    new_lines.append(f'''$key=\"$val\"\n''')
+    escaped = val.replace('\\\\', '\\\\\\\\').replace('\"', '\\\"')
+    new_lines.append(f'{key}=\"{escaped}\"\n')
 
 with open(filepath, 'w', encoding='utf-8') as f:
     f.writelines(new_lines)
 os.chmod(filepath, 0o600)
-"
+" "$key" "$ENV_FILE" <<< "$val"
 }
 
 if [ -f "$ENV_FILE" ]; then
@@ -131,7 +157,7 @@ if [ -z "$TG_TOKEN" ]; then
     echo "To create a bot, message @BotFather on Telegram and send /newbot."
     while [ -z "$TG_TOKEN" ]; do
         prompt_secret TG_TOKEN "Enter your Telegram Bot Token: "
-        TG_TOKEN=$(echo "$TG_TOKEN" | xargs)
+        TG_TOKEN=$(trim_str "$TG_TOKEN")
         if [ -z "$TG_TOKEN" ]; then
             echo "⚠️  Token cannot be empty. Please enter a valid token."
         fi
@@ -143,7 +169,7 @@ fi
 # Validate Telegram Bot Token with Bot API (fail hard on invalid token)
 echo ""
 echo "🔍 Validating Telegram Bot Token with api.telegram.org..."
-TG_ME_RESP=$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getMe" || true)
+TG_ME_RESP=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TG_TOKEN" | call_curl_config)
 if echo "$TG_ME_RESP" | grep -q '"ok":true'; then
     BOT_NAME=$(echo "$TG_ME_RESP" | grep -o '"username":"[^"]*' | cut -d'"' -f4 || echo "HeraldBot")
     echo "✅ Telegram Bot verified: @${BOT_NAME}"
@@ -154,7 +180,7 @@ else
     exit 1
 fi
 
-# 2. AI Provider Selection & Existing Configuration Inference
+# 2. AI Provider Selection & Validation
 AI_PROVIDER=$(get_env_val "AI_PROVIDER")
 
 if [ -z "$AI_PROVIDER" ]; then
@@ -179,7 +205,7 @@ if [ -z "$AI_PROVIDER" ]; then
             GEMINI_KEY=""
             while [ -z "$GEMINI_KEY" ]; do
                 prompt_secret GEMINI_KEY "Enter your Gemini API Key: "
-                GEMINI_KEY=$(echo "$GEMINI_KEY" | xargs)
+                GEMINI_KEY=$(trim_str "$GEMINI_KEY")
                 if [ -z "$GEMINI_KEY" ]; then
                     echo "⚠️  Gemini API Key cannot be empty when Gemini provider is selected."
                 fi
@@ -194,7 +220,7 @@ if [ -z "$AI_PROVIDER" ]; then
             GROQ_KEY=""
             while [ -z "$GROQ_KEY" ]; do
                 prompt_secret GROQ_KEY "Enter your Groq API Key (gsk_...): "
-                GROQ_KEY=$(echo "$GROQ_KEY" | xargs)
+                GROQ_KEY=$(trim_str "$GROQ_KEY")
                 if [ -z "$GROQ_KEY" ]; then
                     echo "⚠️  Groq API Key cannot be empty."
                 fi
@@ -208,7 +234,7 @@ if [ -z "$AI_PROVIDER" ]; then
             OR_KEY=""
             while [ -z "$OR_KEY" ]; do
                 prompt_secret OR_KEY "Enter your OpenRouter API Key (sk-or-...): "
-                OR_KEY=$(echo "$OR_KEY" | xargs)
+                OR_KEY=$(trim_str "$OR_KEY")
                 if [ -z "$OR_KEY" ]; then
                     echo "⚠️  OpenRouter API Key cannot be empty."
                 fi
@@ -222,7 +248,7 @@ if [ -z "$AI_PROVIDER" ]; then
             MIS_KEY=""
             while [ -z "$MIS_KEY" ]; do
                 prompt_secret MIS_KEY "Enter your Mistral API Key: "
-                MIS_KEY=$(echo "$MIS_KEY" | xargs)
+                MIS_KEY=$(trim_str "$MIS_KEY")
                 if [ -z "$MIS_KEY" ]; then
                     echo "⚠️  Mistral API Key cannot be empty."
                 fi
@@ -237,11 +263,11 @@ if [ -z "$AI_PROVIDER" ]; then
             CF_ACCT=""
             while [ -z "$CF_TOKEN" ]; do
                 prompt_secret CF_TOKEN "Enter your Cloudflare API Token: "
-                CF_TOKEN=$(echo "$CF_TOKEN" | xargs)
+                CF_TOKEN=$(trim_str "$CF_TOKEN")
             done
             while [ -z "$CF_ACCT" ]; do
                 prompt_value CF_ACCT "Enter your Cloudflare Account ID: "
-                CF_ACCT=$(echo "$CF_ACCT" | xargs)
+                CF_ACCT=$(trim_str "$CF_ACCT")
             done
             set_env_val "AI_PROVIDER" "cloudflare"
             set_env_val "CLOUDFLARE_API_TOKEN" "$CF_TOKEN"
@@ -249,9 +275,8 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
             ;;
         *)
-            AI_PROVIDER="none"
-            set_env_val "AI_PROVIDER" "none"
-            set_env_val "RESEARCH_PROVIDER" "none"
+            echo "❌ Error: Invalid AI provider choice '${AI_CHOICE}'." >&2
+            exit 1
             ;;
     esac
 
@@ -262,7 +287,7 @@ if [ -z "$AI_PROVIDER" ]; then
         prompt_value WANT_RES "Would you like to configure an optional GEMINI_API_KEY for Research mode? [y/N]: " "N"
         if [[ "$WANT_RES" =~ ^[Yy]$ ]]; then
             prompt_secret RES_KEY "Enter Gemini API Key for Research: "
-            RES_KEY=$(echo "$RES_KEY" | xargs)
+            RES_KEY=$(trim_str "$RES_KEY")
             if [ -n "$RES_KEY" ]; then
                 set_env_val "GEMINI_API_KEY" "$RES_KEY"
                 set_env_val "RESEARCH_PROVIDER" "gemini"
@@ -277,10 +302,25 @@ if [ -z "$AI_PROVIDER" ]; then
         set_env_val "RESEARCH_PROVIDER" "none"
     fi
 else
-    echo "✅ AI Provider is configured: ${AI_PROVIDER}"
+    # Normalize aliases
+    if [ "$AI_PROVIDER" = "literal" ]; then
+        AI_PROVIDER="none"
+        set_env_val "AI_PROVIDER" "none"
+    fi
+
+    case "$AI_PROVIDER" in
+        none|gemini|groq|openrouter|mistral|cloudflare)
+            echo "✅ AI Provider is configured: ${AI_PROVIDER}"
+            ;;
+        *)
+            echo "❌ Error: Unknown AI_PROVIDER '${AI_PROVIDER}' in ${ENV_FILE}." >&2
+            echo "Allowed values: none, gemini, groq, openrouter, mistral, cloudflare." >&2
+            exit 1
+            ;;
+    esac
 fi
 
-# 3. Live Validate Active Provider Connection and Configured Model without Echoing Secrets
+# 3. Live Validate Active Provider Connection without Echoing Secrets
 echo ""
 echo "🔍 Validating AI Provider and model availability..."
 AI_VALID=true
@@ -289,10 +329,10 @@ if [ "$AI_PROVIDER" = "gemini" ]; then
     G_MOD=$(get_env_val "GEMINI_MODEL")
     G_MOD=${G_MOD:-"gemini-3.5-flash"}
     if [ -z "$G_KEY" ]; then
-        echo "⚠️  Gemini API key is missing."
+        echo "❌ Error: Gemini API key is missing." >&2
         AI_VALID=false
     else
-        GEM_RESP=$(curl -s -H "x-goog-api-key: ${G_KEY}" "https://generativelanguage.googleapis.com/v1beta/models/${G_MOD}" || true)
+        GEM_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s"\nheader = "x-goog-api-key: %s"\n' "$G_MOD" "$G_KEY" | call_curl_config)
         if echo "$GEM_RESP" | grep -q '"name":'; then
             echo "✅ Gemini API connection and model '${G_MOD}' verified."
         else
@@ -303,12 +343,12 @@ if [ "$AI_PROVIDER" = "gemini" ]; then
 elif [ "$AI_PROVIDER" = "groq" ]; then
     GR_KEY=$(get_env_val "GROQ_API_KEY")
     GR_MOD=$(get_env_val "GROQ_MODEL")
-    GR_MOD=${G_MOD:-"llama-3.3-70b-versatile"}
+    GR_MOD=${GR_MOD:-"llama-3.3-70b-versatile"}
     if [ -z "$GR_KEY" ]; then
-        echo "⚠️  Groq API key is missing."
+        echo "❌ Error: Groq API key is missing." >&2
         AI_VALID=false
     else
-        GR_RESP=$(curl -s -H "Authorization: Bearer ${GR_KEY}" "https://api.groq.com/openai/v1/models/${GR_MOD}" || true)
+        GR_RESP=$(printf 'url = "https://api.groq.com/openai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$GR_MOD" "$GR_KEY" | call_curl_config)
         if echo "$GR_RESP" | grep -q '"id":'; then
             echo "✅ Groq Cloud connection and model '${GR_MOD}' verified."
         else
@@ -321,10 +361,10 @@ elif [ "$AI_PROVIDER" = "openrouter" ]; then
     OR_MOD=$(get_env_val "OPENROUTER_MODEL")
     OR_MOD=${OR_MOD:-"meta-llama/llama-3.3-70b-instruct"}
     if [ -z "$OR_K" ]; then
-        echo "⚠️  OpenRouter API key is missing."
+        echo "❌ Error: OpenRouter API key is missing." >&2
         AI_VALID=false
     else
-        OR_RESP=$(curl -s -H "Authorization: Bearer ${OR_K}" "https://openrouter.ai/api/v1/models" || true)
+        OR_RESP=$(printf 'url = "https://openrouter.ai/api/v1/models"\nheader = "Authorization: Bearer %s"\n' "$OR_K" | call_curl_config)
         if echo "$OR_RESP" | grep -q "${OR_MOD}"; then
             echo "✅ OpenRouter connection and model '${OR_MOD}' verified."
         else
@@ -337,10 +377,10 @@ elif [ "$AI_PROVIDER" = "mistral" ]; then
     M_MOD=$(get_env_val "MISTRAL_MODEL")
     M_MOD=${M_MOD:-"mistral-large-latest"}
     if [ -z "$M_K" ]; then
-        echo "⚠️  Mistral API key is missing."
+        echo "❌ Error: Mistral API key is missing." >&2
         AI_VALID=false
     else
-        M_RESP=$(curl -s -H "Authorization: Bearer ${M_K}" "https://api.mistral.ai/v1/models/${M_MOD}" || true)
+        M_RESP=$(printf 'url = "https://api.mistral.ai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$M_MOD" "$M_K" | call_curl_config)
         if echo "$M_RESP" | grep -q '"id":'; then
             echo "✅ Mistral AI connection and model '${M_MOD}' verified."
         else
@@ -355,10 +395,10 @@ elif [ "$AI_PROVIDER" = "cloudflare" ]; then
     CF_MOD=${CF_MOD:-$(get_env_val "CLOUDFLARE_MODEL")}
     CF_MOD=${CF_MOD:-"@cf/meta/llama-3.3-70b-instruct-fp8-fast"}
     if [ -z "$CF_T" ] || [ -z "$CF_A" ]; then
-        echo "⚠️  Cloudflare API Token or Account ID is missing."
+        echo "❌ Error: Cloudflare API Token or Account ID is missing." >&2
         AI_VALID=false
     else
-        CF_RESP=$(curl -s -H "Authorization: Bearer ${CF_T}" "https://api.cloudflare.com/client/v4/accounts/${CF_A}/ai/models/search?search=${CF_MOD}" || true)
+        CF_RESP=$(printf 'url = "https://api.cloudflare.com/client/v4/accounts/%s/ai/models/search?search=%s"\nheader = "Authorization: Bearer %s"\n' "$CF_A" "$CF_MOD" "$CF_T" | call_curl_config)
         if echo "$CF_RESP" | grep -q '"success":true' && echo "$CF_RESP" | grep -q "${CF_MOD}"; then
             echo "✅ Cloudflare Workers AI connection and model '${CF_MOD}' verified."
         else
@@ -372,6 +412,10 @@ fi
 
 # Fallback safely to Literal if configured AI provider validation failed
 if [ "$AI_VALID" = false ]; then
+    if [ "$NON_INTERACTIVE" = true ]; then
+        echo "❌ Error: Configured AI provider validation failed in non-interactive mode." >&2
+        exit 1
+    fi
     echo "⚠️  Configured AI provider was not verified. Falling back to Literal mode to ensure pipeline stability."
     set_env_val "AI_PROVIDER" "none"
     AI_PROVIDER="none"
@@ -387,7 +431,7 @@ if [ "$RES_PROV" = "gemini" ]; then
         echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
         set_env_val "RESEARCH_PROVIDER" "none"
     else
-        G_RES_RESP=$(curl -s -H "x-goog-api-key: ${G_RES_K}" "https://generativelanguage.googleapis.com/v1beta/models/${G_RES_M}" || true)
+        G_RES_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s"\nheader = "x-goog-api-key: %s"\n' "$G_RES_M" "$G_RES_K" | call_curl_config)
         if echo "$G_RES_RESP" | grep -q '"name":'; then
             echo "✅ Gemini Research model '${G_RES_M}' verified."
         else
@@ -400,13 +444,21 @@ fi
 # 4. Ensure internal defaults & secrets are present without overwriting existing
 POSTGRES_PW=$(get_env_val "POSTGRES_PASSWORD")
 if [ -z "$POSTGRES_PW" ]; then
-    POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || echo "herald_secure_db_pass_$(date +%s)")
+    POSTGRES_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))" 2>/dev/null || openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' || true)
+    if [ -z "$POSTGRES_PW" ]; then
+        echo "❌ Error: Cryptographically secure random generator unavailable." >&2
+        exit 1
+    fi
     set_env_val "POSTGRES_PASSWORD" "$POSTGRES_PW"
 fi
 
 HERALD_API_KEY=$(get_env_val "HERALD_API_KEY")
 if [ -z "$HERALD_API_KEY" ]; then
-    HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || echo "herald_internal_key_$(date +%s)")
+    HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+    if [ -z "$HERALD_API_KEY" ]; then
+        echo "❌ Error: Cryptographically secure random generator unavailable." >&2
+        exit 1
+    fi
     set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
 fi
 
@@ -430,13 +482,35 @@ if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"
 
 echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
 
-# 5. Start Herald core services and truthfully verify startup
+# 5. Start Herald core services and strictly verify startup (NO false success on failure)
 echo ""
 echo "🚀 Starting Herald core services via Docker Compose..."
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     docker compose up -d postgres kokoro herald-migration herald-worker telegram-bot
 
-    echo "⏳ Waiting for PostgreSQL and schema migrations to complete..."
+    echo "⏳ Waiting for PostgreSQL health..."
+    PG_OK=false
+    for i in {1..30}; do
+        PG_CID=$(docker compose ps -q postgres 2>/dev/null || true)
+        if [ -n "$PG_CID" ]; then
+            PG_STATUS=$(docker inspect --format='{{json .State.Health.Status}}' "$PG_CID" 2>/dev/null | tr -d '"')
+            if [ "$PG_STATUS" = "healthy" ]; then
+                PG_OK=true
+                break
+            fi
+        fi
+        sleep 1
+    done
+
+    if [ "$PG_OK" = true ]; then
+        echo "✅ PostgreSQL is healthy."
+    else
+        echo "❌ Error: PostgreSQL failed to become healthy. Check 'docker compose logs postgres'." >&2
+        docker compose logs postgres >&2 || true
+        exit 1
+    fi
+
+    echo "⏳ Waiting for database schema migrations to complete..."
     MIG_OK=false
     for i in {1..30}; do
         MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
@@ -458,7 +532,7 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
 
     echo "⏳ Waiting for Kokoro TTS engine initialization (Docker healthcheck)..."
     KOKORO_OK=false
-    for i in {1..30}; do
+    for i in {1..45}; do
         K_CID=$(docker compose ps -q kokoro 2>/dev/null || true)
         if [ -n "$K_CID" ]; then
             K_STATUS=$(docker inspect --format='{{json .State.Health.Status}}' "$K_CID" 2>/dev/null | tr -d '"')
@@ -473,24 +547,35 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     if [ "$KOKORO_OK" = true ]; then
         echo "✅ Kokoro TTS engine is healthy and ready (/v1/models)."
     else
-        echo "⚠️  Kokoro TTS health check timed out. Model weights may still be downloading. Check 'docker compose logs kokoro'."
+        echo "❌ Error: Kokoro TTS health check timed out. Check 'docker compose logs kokoro'." >&2
+        docker compose logs kokoro >&2 || true
+        exit 1
+    fi
+
+    # Check herald-worker
+    if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
+        echo "✅ Herald Worker daemon is running."
+    else
+        echo "❌ Error: Herald Worker container is not running. Check 'docker compose logs herald-worker'." >&2
+        docker compose logs herald-worker >&2 || true
+        exit 1
     fi
 
     # Check telegram-bot container
-    if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "telegram-bot"; then
+    if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^telegram-bot$"; then
         echo "✅ Telegram Bot daemon is running."
     else
-        echo "⚠️  Telegram Bot container is not running yet. Check 'docker compose logs telegram-bot'."
+        echo "❌ Error: Telegram Bot container is not running. Check 'docker compose logs telegram-bot'." >&2
+        docker compose logs telegram-bot >&2 || true
+        exit 1
     fi
 else
-    echo "ℹ️  Docker Compose not detected. Please run 'docker compose up -d' when Docker is available."
+    echo "❌ Error: Docker or Docker Compose not available. Cannot start Herald services." >&2
+    exit 1
 fi
 
 # 6. Retrieve active pairing status & display setup complete summary
-PAIRING_OUTPUT=""
-if command -v docker &> /dev/null && docker compose version &> /dev/null; then
-    PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli 2>/dev/null || true)
-fi
+PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli 2>/dev/null || true)
 
 echo ""
 echo "========================================================"

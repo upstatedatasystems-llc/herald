@@ -7,6 +7,8 @@ set -euo pipefail
 RESET_MODE="" # warm, cold
 REMOVE_ENV=false
 CONFIRM_YES=false
+WARM_FLAG=false
+COLD_FLAG=false
 
 usage() {
     cat <<EOF
@@ -34,11 +36,11 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --warm)
-            RESET_MODE="warm"
+            WARM_FLAG=true
             shift
             ;;
         --cold)
-            RESET_MODE="cold"
+            COLD_FLAG=true
             shift
             ;;
         --remove-env)
@@ -60,7 +62,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [ -z "$RESET_MODE" ]; then
+if [ "$WARM_FLAG" = true ] && [ "$COLD_FLAG" = true ]; then
+    echo "❌ Error: Cannot specify both --warm and --cold mode simultaneously." >&2
+    exit 1
+elif [ "$WARM_FLAG" = true ]; then
+    RESET_MODE="warm"
+elif [ "$COLD_FLAG" = true ]; then
+    RESET_MODE="cold"
+else
     echo "❌ Error: Must specify either --warm or --cold mode." >&2
     echo "Run 'scripts/reset-herald.sh --help' for usage." >&2
     exit 1
@@ -83,7 +92,9 @@ echo ""
 # Interactive confirmation if --yes was not provided
 if [ "$CONFIRM_YES" = false ]; then
     if [ -t 0 ] || [ -r /dev/tty ]; then
-        read -r -p "Are you sure you want to perform a ${RESET_MODE} reset? [y/N]: " CONFIRM < "${INPUT_TTY:-/dev/tty}"
+        INPUT_DEV="/dev/tty"
+        if [ -t 0 ]; then INPUT_DEV="/dev/stdin"; fi
+        read -r -p "Are you sure you want to perform a ${RESET_MODE} reset? [y/N]: " CONFIRM < "$INPUT_DEV"
         if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
             echo "Operation cancelled. No changes made."
             exit 0
@@ -101,10 +112,10 @@ cd "${SCRIPT_DIR}/.."
 # 1. Authoritative Image Capture (for COLD reset) before containers stop
 BUILT_IMAGE_IDS=""
 if [ "$RESET_MODE" = "cold" ] && command -v docker >/dev/null 2>&1; then
-    BUILT_IMAGE_IDS=$(docker compose images -q herald-migration herald-worker telegram-bot herald-api 2>/dev/null || true)
+    BUILT_IMAGE_IDS=$(docker compose images -q herald-migration herald-worker telegram-bot herald-api 2>/dev/null | sort -u || true)
 fi
 
-# 2. Stop Containers and Remove Compose Volumes (Scoped to project)
+# 2. Stop Containers and Remove Compose Volumes (Scoped strictly to project)
 echo "🛑 Stopping Herald containers and removing project volumes..."
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     docker compose down -v --remove-orphans
@@ -117,7 +128,9 @@ if [ "$RESET_MODE" = "cold" ]; then
     echo "🧹 Removing locally built Herald Docker images..."
     if [ -n "$BUILT_IMAGE_IDS" ]; then
         for img_id in $BUILT_IMAGE_IDS; do
-            docker rmi -f "$img_id" 2>/dev/null || true
+            if [ -n "$img_id" ]; then
+                docker rmi "$img_id"
+            fi
         done
         echo "✅ Locally built Herald images removed."
     else
@@ -126,16 +139,15 @@ if [ "$RESET_MODE" = "cold" ]; then
     echo "ℹ️  Upstream images (postgres, kokoro) preserved."
 fi
 
-# 4. Clean local temporary files if present
-rm -rf smoke_test/ 2>/dev/null || true
-
-# 5. Handle .env Configuration File
+# 4. Handle .env Configuration File
 if [ "$REMOVE_ENV" = true ]; then
     if [ "$CONFIRM_YES" = false ]; then
         echo ""
         echo "⚠️  CRITICAL: You specified --remove-env."
         echo "This will permanently delete your .env file containing Telegram Bot token, AI provider keys, and database passwords."
-        read -r -p "Confirm .env deletion by typing 'yes': " ENV_CONFIRM < "${INPUT_TTY:-/dev/tty}"
+        INPUT_DEV="/dev/tty"
+        if [ -t 0 ]; then INPUT_DEV="/dev/stdin"; fi
+        read -r -p "Confirm .env deletion by typing 'yes': " ENV_CONFIRM < "$INPUT_DEV"
         if [ "$ENV_CONFIRM" = "yes" ]; then
             rm -f .env
             echo "🗑️  Configuration file (.env) removed."

@@ -6,7 +6,7 @@ This guide provides instructions for deploying Herald on Ubuntu 24.04 LTS server
 
 ## 1. Quick Bootstrap Installation
 
-On a clean Ubuntu 24.04 LTS host, execute the single-line bootstrap installer:
+On a clean Ubuntu 24.04 LTS host, execute the single-line bootstrap installer as a standard non-root user with sudo privileges:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/main/install.sh | bash
@@ -18,19 +18,19 @@ The installer supports several arguments for testing and customization:
 
 ```bash
 # Install to custom directory
-install.sh --install-dir /srv/herald
+curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/main/install.sh | bash -s -- --install-dir /home/ubuntu/custom-herald
 
 # Install a specific Git branch or tag
-install.sh --ref feature/telegram-phase2-productization
+curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/feature/telegram-phase2-productization/install.sh | bash -s -- --ref feature/telegram-phase2-productization
 
 # Update an existing installation in-place
-install.sh --update
+./install.sh --update
 
 # Reinstall existing installation without resetting database/configuration
-install.sh --reinstall
+./install.sh --reinstall
 
 # Run non-interactively (requires pre-existing valid .env)
-install.sh --non-interactive
+./install.sh --non-interactive
 ```
 
 ---
@@ -38,13 +38,13 @@ install.sh --non-interactive
 ## 2. What the Bootstrap Installer Does
 
 1. **System & Architecture Guards**: Confirms the host is running Ubuntu 24.04 LTS on `amd64` or `arm64`.
-2. **Disk Space Check**: Confirms at least 4 GB free disk space (fails `<4 GB`, warns `<8 GB`).
-3. **Prerequisites**: Installs `git`, `curl`, Docker Engine, and the Docker Compose plugin via official Docker APT repositories if missing.
+2. **Disk Space Check**: Confirms at least 4 GB free disk space (fails `<4 GB`, warns `<8 GB` for install build headroom; runtime minimum is 500 MB).
+3. **Prerequisites**: Installs `git`, `curl`, `python3`, Docker Engine, and the Docker Compose plugin via official Docker APT repositories if missing.
 4. **Permissions Handoff**: Safely configures user group membership for Docker without requiring manual re-login.
 5. **Configuration Wizard**: Prompts for your Telegram Bot Token and chosen AI provider (Gemini, Groq, OpenRouter, Mistral, Cloudflare, or None/Literal). Writes `.env` with strict `0600` permissions.
 6. **Stack Launch & Migrations**: Launches core services (`postgres`, `kokoro`, `herald-worker`, `telegram-bot`) and executes Alembic schema migrations (`herald-migration`).
 7. **Acceptance Testing**: Automatically executes `scripts/install_acceptance.sh` to guarantee database schema matches latest Alembic head, default services are healthy, and optional legacy services remain isolated.
-8. **Pairing Output**: Displays your instance owner pairing code.
+8. **Pairing Output**: Displays your one-time owner pairing code.
 
 ---
 
@@ -76,7 +76,7 @@ cd ~/herald
 ```
 
 This will:
-- Verify clean working tree.
+- Verify clean working tree (no uncommitted or untracked changes).
 - Fast-forward pull the latest release.
 - Rebuild container images.
 - Run Alembic schema migrations.
@@ -124,6 +124,6 @@ Checks:
 - Kokoro TTS engine is healthy (`/v1/models` ready).
 - Herald Worker and Telegram Bot daemons are active.
 - Migration container completed with exit code 0.
-- Database schema matches live Alembic head revision.
+- Database schema matches live dynamic Alembic head revision.
 - Optional legacy profiles (`n8n`, `herald-api`) are disabled by default.
 - Host has sufficient disk headroom.

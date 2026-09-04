@@ -2,10 +2,21 @@
 set -euo pipefail
 
 # Herald Installation Acceptance Validation Helper
-# Verifies installation health, schema revision, service state, permissions, and isolation without exposing secrets.
+# Verifies installation health, dynamic schema revision, service state, permissions, and isolation without exposing secrets.
 
-ENV_FILE=".env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${HERALD_ENV_FILE:-.env}"
+
+# If .env doesn't exist in current working directory, fallback to SCRIPT_DIR/.env
+if [ ! -f "$ENV_FILE" ] && [ -f "${SCRIPT_DIR}/.env" ]; then
+    ENV_FILE="${SCRIPT_DIR}/.env"
+fi
+
 FAILURES=0
+PG_CID=""
+KOKORO_CID=""
+DYNAMIC_HEAD=""
+LIVE_REV=""
 
 report_pass() {
     echo "  ✅ $1"
@@ -26,7 +37,6 @@ echo "[1/7] Checking configuration file and permissions..."
 if [ ! -f "$ENV_FILE" ]; then
     report_fail "Configuration file '${ENV_FILE}' not found."
 else
-    # Check permissions (mode 0600 / -rw-------)
     PERMS=$(stat -c "%a" "$ENV_FILE" 2>/dev/null || stat -f "%Lp" "$ENV_FILE" 2>/dev/null || echo "")
     if [ "$PERMS" = "600" ] || [ "$PERMS" = "0600" ]; then
         report_pass "Configuration file exists with strict 0600 permissions."
@@ -35,16 +45,24 @@ else
     fi
 fi
 
-# Helper to read .env line safely without sourcing
+# Pure-bash helper to read .env variable safely without sourcing or xargs
 get_env_key() {
     local key="$1"
     if [ -f "$ENV_FILE" ]; then
-        grep -E "^${key}=" "$ENV_FILE" | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | xargs || true
+        local raw
+        raw=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d'=' -f2- || true)
+        raw="${raw%\"}"
+        raw="${raw#\"}"
+        raw="${raw%\'}"
+        raw="${raw#\'}"
+        raw="${raw#"${raw%%[![:space:]]*}"}"
+        raw="${raw%"${raw##*[![:space:]]}"}"
+        printf "%s" "$raw"
     fi
 }
 
-# 2. Check for Placeholder Secrets
-echo "[2/7] Auditing credentials for unsafe default placeholders..."
+# 2. Check for Placeholder Secrets and Provider Configuration
+echo "[2/7] Auditing credentials and AI provider consistency..."
 KNOWN_PLACEHOLDERS=(
     "your-telegram-bot-token-from-botfather"
     "herald_secure_password"
@@ -99,6 +117,8 @@ fi
 
 AI_PROV=$(get_env_key "AI_PROVIDER")
 AI_PROV=${AI_PROV:-"none"}
+if [ "$AI_PROV" = "literal" ]; then AI_PROV="none"; fi
+
 case "$AI_PROV" in
     gemini)
         G_KEY=$(get_env_key "GEMINI_API_KEY")
@@ -121,11 +141,32 @@ case "$AI_PROV" in
         CF_A=$(get_env_key "CLOUDFLARE_ACCOUNT_ID")
         if [ -z "$CF_T" ] || [ -z "$CF_A" ]; then report_fail "Cloudflare API Token or Account ID is missing."; else report_pass "Cloudflare Workers AI credentials configured."; fi
         ;;
-    none|"")
+    none)
         report_pass "Literal mode active (no external AI provider key required)."
         ;;
     *)
-        report_pass "AI Provider configured: ${AI_PROV}"
+        report_fail "Unknown AI_PROVIDER '${AI_PROV}' configured in ${ENV_FILE}."
+        ;;
+esac
+
+# Validate RESEARCH_PROVIDER
+RES_PROV=$(get_env_key "RESEARCH_PROVIDER")
+RES_PROV=${RES_PROV:-"none"}
+
+case "$RES_PROV" in
+    none|"")
+        report_pass "Research provider is disabled (no Gemini research key required)."
+        ;;
+    gemini)
+        G_RES_K=$(get_env_key "GEMINI_API_KEY")
+        if [ -z "$G_RES_K" ]; then
+            report_fail "RESEARCH_PROVIDER is 'gemini' but GEMINI_API_KEY is missing.";
+        else
+            report_pass "Gemini Research credentials configured.";
+        fi
+        ;;
+    *)
+        report_fail "Unsupported RESEARCH_PROVIDER '${RES_PROV}' (only 'gemini' or 'none' supported)."
         ;;
 esac
 
@@ -139,7 +180,7 @@ else
     if [ -z "$PG_CID" ]; then
         report_fail "PostgreSQL container (postgres) is not running."
     else
-        PG_HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' "$PG_CID" 2>/dev/null | tr -d '"')
+        PG_HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' "$PG_CID" 2>/dev/null | tr -d '"' || echo "unknown")
         if [ "$PG_HEALTH" = "healthy" ]; then
             report_pass "PostgreSQL container is running and healthy."
         else
@@ -152,7 +193,7 @@ else
     if [ -z "$KOKORO_CID" ]; then
         report_fail "Kokoro TTS container (kokoro) is not running."
     else
-        K_HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' "$KOKORO_CID" 2>/dev/null | tr -d '"')
+        K_HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' "$KOKORO_CID" 2>/dev/null | tr -d '"' || echo "unknown")
         if [ "$K_HEALTH" = "healthy" ]; then
             report_pass "Kokoro TTS container is running and healthy."
         else
@@ -181,28 +222,34 @@ MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev
 if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
     report_pass "Migration container (herald-migration) exited successfully with code 0."
 else
-    report_fail "Migration container status is '${MIG_STATUS}', expected 'Exited (0)'."
+    report_fail "Migration container status is '${MIG_STATUS:-not started}', expected 'Exited (0)'."
 fi
 
-# 5. Authoritative Live Alembic Revision Check
+# 5. Authoritative Live Alembic Revision Parity Check (Dynamic Head)
 echo "[5/7] Verifying database schema matches dynamic Alembic head..."
-DYNAMIC_HEAD=""
 if command -v docker >/dev/null 2>&1; then
-    DYNAMIC_HEAD=$(docker compose run --rm --no-deps --entrypoint alembic herald-migration heads 2>/dev/null | grep -E '^[a-f0-9]+' | awk '{print $1}' | tr -d '()' | head -n1 || true)
+    HEADS_OUT=$(docker compose run --rm --no-deps --entrypoint alembic herald-migration heads 2>/dev/null || true)
+    # Extract revision IDs (leading token on revision line)
+    REV_IDS=$(echo "$HEADS_OUT" | grep -E '^[0-9a-f]+' | awk '{print $1}' | tr -d '()' || true)
+    HEAD_COUNT=$(echo "$REV_IDS" | grep -v '^$' | wc -l || echo "0")
+
+    if [ "$HEAD_COUNT" -eq 1 ]; then
+        DYNAMIC_HEAD=$(echo "$REV_IDS" | tr -d '[:space:]')
+    fi
 fi
 
-LIVE_REV=""
 if [ -n "$PG_CID" ]; then
     LIVE_REV=$(docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT version_num FROM alembic_version;"' 2>/dev/null | tr -d '[:space:]' || true)
 fi
 
-if [ -n "$DYNAMIC_HEAD" ] && [ -n "$LIVE_REV" ] && [ "$DYNAMIC_HEAD" = "$LIVE_REV" ]; then
+if [ -z "$DYNAMIC_HEAD" ]; then
+    report_fail "Could not authoritatively determine single Alembic migration head revision."
+elif [ -z "$LIVE_REV" ]; then
+    report_fail "Could not query live database revision from PostgreSQL."
+elif [ "$DYNAMIC_HEAD" = "$LIVE_REV" ]; then
     report_pass "Database schema revision (${LIVE_REV}) matches Alembic migration head (${DYNAMIC_HEAD})."
-elif [ -n "$LIVE_REV" ] && [ -z "$DYNAMIC_HEAD" ]; then
-    # Fallback to checking that alembic_version is populated
-    report_pass "Database schema version record exists (${LIVE_REV})."
 else
-    report_fail "Database schema revision mismatch (Live: '${LIVE_REV:-none}', Expected: '${DYNAMIC_HEAD:-unknown}')."
+    report_fail "Database schema revision mismatch (Live: '${LIVE_REV}', Expected: '${DYNAMIC_HEAD}')."
 fi
 
 # 6. Verify Default Profile Isolation (n8n and herald-api NOT running)
@@ -221,15 +268,15 @@ else
     report_pass "Optional service 'herald-api' is not running (default profile)."
 fi
 
-# 7. Check Disk Space
+# 7. Check Runtime Disk Space Headroom (HERALD_MIN_DISK_MB runtime minimum)
 echo "[7/7] Verifying runtime disk headroom..."
 MIN_DISK_MB="${HERALD_MIN_DISK_MB:-500}"
 AVAIL_KB=$(df -Pk . 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
 AVAIL_MB=$((AVAIL_KB / 1024))
 if [ "$AVAIL_MB" -ge "$MIN_DISK_MB" ]; then
-    report_pass "Disk space check passed (${AVAIL_MB} MB available >= ${MIN_DISK_MB} MB minimum)."
+    report_pass "Runtime disk space check passed (${AVAIL_MB} MB available >= ${MIN_DISK_MB} MB minimum)."
 else
-    report_fail "Available disk space (${AVAIL_MB} MB) is below minimum threshold (${MIN_DISK_MB} MB)."
+    report_fail "Available disk space (${AVAIL_MB} MB) is below runtime threshold (${MIN_DISK_MB} MB)."
 fi
 
 echo ""
