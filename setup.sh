@@ -8,12 +8,64 @@ echo "========================================================"
 echo ""
 
 ENV_FILE=".env"
-EXISTING_ENV=false
+NON_INTERACTIVE=false
 
-if [ -f "$ENV_FILE" ]; then
-    EXISTING_ENV=true
-    echo "ℹ️  Existing configuration found in ${ENV_FILE}."
+# Parse flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --non-interactive)
+            NON_INTERACTIVE=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Initialize dedicated interactive input FD
+INPUT_FD=0
+if [ ! -t 0 ]; then
+    if [ -r /dev/tty ]; then
+        exec 3< /dev/tty
+        INPUT_FD=3
+    else
+        INPUT_FD=""
+    fi
 fi
+
+prompt_value() {
+    local var_name="$1"
+    local prompt_msg="$2"
+    local default_val="${3:-}"
+
+    if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
+        if [ -n "$default_val" ]; then
+            printf -v "$var_name" "%s" "$default_val"
+            return 0
+        fi
+        echo "❌ Error: Interactive input required for '${var_name}' but running non-interactively without TTY." >&2
+        exit 1
+    fi
+
+    read -u "$INPUT_FD" -rp "$prompt_msg" "$var_name"
+    if [ -z "${!var_name}" ] && [ -n "$default_val" ]; then
+        printf -v "$var_name" "%s" "$default_val"
+    fi
+}
+
+prompt_secret() {
+    local var_name="$1"
+    local prompt_msg="$2"
+
+    if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
+        echo "❌ Error: Interactive credential required for '${var_name}' but running non-interactively without TTY." >&2
+        exit 1
+    fi
+
+    read -u "$INPUT_FD" -s -rp "$prompt_msg" "$var_name"
+    echo "" >&2
+}
 
 # Python helper to read a variable from .env safely
 get_env_val() {
@@ -68,14 +120,17 @@ os.chmod(filepath, 0o600)
 "
 }
 
+if [ -f "$ENV_FILE" ]; then
+    echo "ℹ️  Existing configuration found in ${ENV_FILE}."
+fi
+
 # 1. Telegram Bot Token
 TG_TOKEN=$(get_env_val "TELEGRAM_BOT_TOKEN")
 
 if [ -z "$TG_TOKEN" ]; then
     echo "To create a bot, message @BotFather on Telegram and send /newbot."
     while [ -z "$TG_TOKEN" ]; do
-        read -s -rp "Enter your Telegram Bot Token: " TG_TOKEN
-        echo ""
+        prompt_secret TG_TOKEN "Enter your Telegram Bot Token: "
         TG_TOKEN=$(echo "$TG_TOKEN" | xargs)
         if [ -z "$TG_TOKEN" ]; then
             echo "⚠️  Token cannot be empty. Please enter a valid token."
@@ -111,20 +166,19 @@ if [ -z "$AI_PROVIDER" ]; then
     echo "  4) OpenRouter (Multi-model gateway, e.g. Claude, Llama 3.3, DeepSeek)"
     echo "  5) Mistral AI (Mistral Large / Mistral Small Chat API)"
     echo "  6) Cloudflare Workers AI (Serverless Edge Inference)"
-    read -rp "Enter choice [1-6, default: 2]: " AI_CHOICE
-    AI_CHOICE=${AI_CHOICE:-2}
+    prompt_value AI_CHOICE "Enter choice [1-6, default: 2]: " "2"
 
     case "$AI_CHOICE" in
         1)
             AI_PROVIDER="none"
             set_env_val "AI_PROVIDER" "none"
+            set_env_val "RESEARCH_PROVIDER" "none"
             ;;
         2)
             AI_PROVIDER="gemini"
             GEMINI_KEY=""
             while [ -z "$GEMINI_KEY" ]; do
-                read -s -rp "Enter your Gemini API Key: " GEMINI_KEY
-                echo ""
+                prompt_secret GEMINI_KEY "Enter your Gemini API Key: "
                 GEMINI_KEY=$(echo "$GEMINI_KEY" | xargs)
                 if [ -z "$GEMINI_KEY" ]; then
                     echo "⚠️  Gemini API Key cannot be empty when Gemini provider is selected."
@@ -139,8 +193,7 @@ if [ -z "$AI_PROVIDER" ]; then
             AI_PROVIDER="groq"
             GROQ_KEY=""
             while [ -z "$GROQ_KEY" ]; do
-                read -s -rp "Enter your Groq API Key (gsk_...): " GROQ_KEY
-                echo ""
+                prompt_secret GROQ_KEY "Enter your Groq API Key (gsk_...): "
                 GROQ_KEY=$(echo "$GROQ_KEY" | xargs)
                 if [ -z "$GROQ_KEY" ]; then
                     echo "⚠️  Groq API Key cannot be empty."
@@ -154,8 +207,7 @@ if [ -z "$AI_PROVIDER" ]; then
             AI_PROVIDER="openrouter"
             OR_KEY=""
             while [ -z "$OR_KEY" ]; do
-                read -s -rp "Enter your OpenRouter API Key (sk-or-...): " OR_KEY
-                echo ""
+                prompt_secret OR_KEY "Enter your OpenRouter API Key (sk-or-...): "
                 OR_KEY=$(echo "$OR_KEY" | xargs)
                 if [ -z "$OR_KEY" ]; then
                     echo "⚠️  OpenRouter API Key cannot be empty."
@@ -169,8 +221,7 @@ if [ -z "$AI_PROVIDER" ]; then
             AI_PROVIDER="mistral"
             MIS_KEY=""
             while [ -z "$MIS_KEY" ]; do
-                read -s -rp "Enter your Mistral API Key: " MIS_KEY
-                echo ""
+                prompt_secret MIS_KEY "Enter your Mistral API Key: "
                 MIS_KEY=$(echo "$MIS_KEY" | xargs)
                 if [ -z "$MIS_KEY" ]; then
                     echo "⚠️  Mistral API Key cannot be empty."
@@ -185,12 +236,11 @@ if [ -z "$AI_PROVIDER" ]; then
             CF_TOKEN=""
             CF_ACCT=""
             while [ -z "$CF_TOKEN" ]; do
-                read -s -rp "Enter your Cloudflare API Token: " CF_TOKEN
-                echo ""
+                prompt_secret CF_TOKEN "Enter your Cloudflare API Token: "
                 CF_TOKEN=$(echo "$CF_TOKEN" | xargs)
             done
             while [ -z "$CF_ACCT" ]; do
-                read -rp "Enter your Cloudflare Account ID: " CF_ACCT
+                prompt_value CF_ACCT "Enter your Cloudflare Account ID: "
                 CF_ACCT=$(echo "$CF_ACCT" | xargs)
             done
             set_env_val "AI_PROVIDER" "cloudflare"
@@ -201,6 +251,7 @@ if [ -z "$AI_PROVIDER" ]; then
         *)
             AI_PROVIDER="none"
             set_env_val "AI_PROVIDER" "none"
+            set_env_val "RESEARCH_PROVIDER" "none"
             ;;
     esac
 
@@ -208,10 +259,9 @@ if [ -z "$AI_PROVIDER" ]; then
     if [ "$AI_PROVIDER" != "gemini" ] && [ "$AI_PROVIDER" != "none" ]; then
         echo ""
         echo "ℹ️  Research mode requires Google Search Grounding (Gemini)."
-        read -rp "Would you like to configure an optional GEMINI_API_KEY for Research mode? [y/N]: " WANT_RES
+        prompt_value WANT_RES "Would you like to configure an optional GEMINI_API_KEY for Research mode? [y/N]: " "N"
         if [[ "$WANT_RES" =~ ^[Yy]$ ]]; then
-            read -s -rp "Enter Gemini API Key for Research: " RES_KEY
-            echo ""
+            prompt_secret RES_KEY "Enter Gemini API Key for Research: "
             RES_KEY=$(echo "$RES_KEY" | xargs)
             if [ -n "$RES_KEY" ]; then
                 set_env_val "GEMINI_API_KEY" "$RES_KEY"
@@ -253,7 +303,7 @@ if [ "$AI_PROVIDER" = "gemini" ]; then
 elif [ "$AI_PROVIDER" = "groq" ]; then
     GR_KEY=$(get_env_val "GROQ_API_KEY")
     GR_MOD=$(get_env_val "GROQ_MODEL")
-    GR_MOD=${GR_MOD:-"llama-3.3-70b-versatile"}
+    GR_MOD=${G_MOD:-"llama-3.3-70b-versatile"}
     if [ -z "$GR_KEY" ]; then
         echo "⚠️  Groq API key is missing."
         AI_VALID=false
@@ -400,7 +450,10 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     if [ "$MIG_OK" = true ]; then
         echo "✅ Database migrations completed successfully."
     else
-        echo "⚠️  Migration container status: ${MIG_STATUS:-unknown}. Check 'docker compose logs herald-migration'."
+        echo "❌ Error: Database migration failed. Status: ${MIG_STATUS:-unknown}." >&2
+        echo "Logs from herald-migration:" >&2
+        docker compose logs herald-migration >&2 || true
+        exit 1
     fi
 
     echo "⏳ Waiting for Kokoro TTS engine initialization (Docker healthcheck)..."

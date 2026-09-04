@@ -3,7 +3,7 @@
 [![CI Workflow](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml/badge.svg)](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Herald is an automated podcast generation system designed to turn articles, newsletters, notes, and documents into high-quality spoken audio podcasts delivered directly through Telegram.
+Herald turns articles, newsletters, notes, and documents into high-quality spoken audio podcasts delivered directly through Telegram.
 
 Herald operates behind NATs and firewalls using outbound Telegram long polling without requiring open ports, public IPs, domains, HTTPS certificates, Gmail, Google Drive, Google OAuth, or even an AI API key.
 
@@ -13,7 +13,8 @@ Herald operates behind NATs and firewalls using outbound Telegram long polling w
 
 - **Telegram-First Interface**: Send an article URL, pasted text, or forwarded message directly to your private Telegram bot and receive the completed MP3 podcast in response.
 - **Literal Mode (AI is Optional)**: Functions 100% locally on your host with **zero** LLM API calls, performing deterministic text cleaning, heading preservation, sentence-aware chunking, and Kokoro TTS narration.
-- **AI-Powered Modes (Gemini)**: When configured with a Gemini API key, access `brief`, `standard`, and `research` modes with grounded web verification and fidelity audits.
+- **AI-Powered Modes**: When configured with an AI provider (Google Gemini, Groq Cloud, OpenRouter, Mistral AI, or Cloudflare Workers AI), access `brief`, `standard`, and grounded `research` modes.
+- **Automated Bootstrap Installer**: Deploy the entire stack on Ubuntu 24.04 with a single command.
 - **Secure Owner Pairing**: Prevents unauthorized access using a single-owner one-time pairing code displayed strictly in server console output / container logs (`/pair <code>`).
 - **Outbound Long Polling**: No inbound ports, webhooks, or public IP addresses required.
 - **Local Neural Speech Synthesis**: Powered by Kokoro-82M TTS and FFmpeg spoken-word loudness normalization (`loudnorm`).
@@ -21,47 +22,52 @@ Herald operates behind NATs and firewalls using outbound Telegram long polling w
 
 ---
 
-## Getting Started
+## Quick Start (Ubuntu 24.04 LTS)
 
 ### 1. Create a Telegram Bot
-1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
+1. Open Telegram and message [@BotFather](https://t.me/BotFather).
 2. Send `/newbot` and follow instructions to name your bot.
 3. Copy the HTTP API token provided by BotFather.
 
-### 2. Run Setup Wizard
-On your Linux host, clone the repository and run the setup script:
+### 2. Run Bootstrap Installer
+On your Ubuntu 24.04 server (AMD64 or ARM64), run:
 
 ```bash
-git clone https://github.com/upstatedatasystems-llc/herald.git
-cd herald
-./setup.sh
+curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/main/install.sh | bash
 ```
 
-The setup script will prompt you for:
-1. **Telegram Bot Token** (Required)
-2. **AI Provider** (Optional: Gemini or None / Literal only)
-3. **Gemini API Key** (Optional if Gemini selected)
-
-### 3. Start Herald
+*(For pre-release testing on the Phase 2 feature branch:)*
 ```bash
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/feature/telegram-phase2-productization/install.sh | bash -s -- --ref feature/telegram-phase2-productization
 ```
 
-### 4. Pair Your Account
-Look at your server startup logs (e.g. `docker compose logs telegram-bot`). The pairing code is displayed only in trusted server console logs:
+The installer will:
+1. Verify Ubuntu 24.04, CPU architecture, and disk headroom.
+2. Install Docker Engine and Docker Compose v2 if missing.
+3. Prompt for your Telegram Bot Token and chosen AI provider.
+4. Launch the Docker Compose stack and run schema migrations.
+5. Run automated installation acceptance tests (`scripts/install_acceptance.sh`).
+6. Display your one-time owner pairing code.
 
-```text
-/pair 123456
-```
-*(Replace `123456` with the active pairing code shown in your console).*
+### 3. Pair Your Telegram Account
+1. Open a chat with your Telegram Bot.
+2. Send the pairing command displayed in the installer output:
+   ```text
+   /pair 123456
+   ```
 
 ---
 
 ## How to Use Herald
 
-Once paired, simply message your Telegram bot:
+Once paired, send messages directly to your Telegram bot:
 
-### 1. Literal Reading (No AI Required)
+### 1. Standard Podcast (AI Scripted)
+```text
+https://example.com/ai-breakthrough
+```
+
+### 2. Literal Reading (Zero AI)
 ```text
 https://example.com/article
 literal
@@ -70,15 +76,16 @@ or paste raw text:
 ```text
 # Architecture Notes
 Distributed consensus algorithms ensure state consistency across replicated nodes...
+literal
 ```
 
-### 2. Standard AI Podcast
+### 3. Concise Brief Episode
 ```text
-https://example.com/ai-breakthrough
-standard
+https://example.com/morning-news
+brief
 ```
 
-### 3. Deep-Dive Research
+### 4. Deep-Dive Grounded Research (Gemini)
 ```text
 https://example.com/complex-topic
 research high
@@ -95,57 +102,35 @@ research high
 
 | Command | Description |
 | :--- | :--- |
-| `/start` | Welcome message and pairing status |
-| `/help` | Concise Telegram usage instructions |
-| `/voices` | Interactive voice catalog, audio sample previews, and default voice selection |
+| `/start` | Welcome message, quick-start guide, and pairing status |
+| `/help` | Complete usage guide and directive reference |
+| `/voices` | Interactive voice catalog, audio preview samples, and default voice selection |
 | `/download [id]` | Download completed podcast MP3 as an audio document |
-| `/diagnostics [id]` | View job diagnostics card and download support bundle ZIP |
-| `/status` | Live runtime, TTS readiness, AI provider health, queue, disk, and uptime |
-| `/ai_check` | Dedicated AI API configuration and connection test |
-| `/queue` | View pending and in-progress podcast jobs |
-| `/settings` | View current user-facing configuration and preferences |
+| `/diagnostics [id]` | View job diagnostics card and download redacted support bundle ZIP |
+| `/status` | Live runtime health, TTS readiness, AI provider health, queue, disk, and uptime |
+| `/ai_check` | Dedicated AI API configuration and connectivity test |
+| `/queue` | View pending, scripting, and synthesizing podcast jobs |
+| `/settings` | View preferences and toggle pre-TTS confirmation card |
 | `/readme` | Send the project `README.md` document |
-| `/pair <code>` | Pair Telegram account as instance owner |
+| `/pair <code>` | Pair your Telegram account as the authorized instance owner |
 
 ---
 
-## Architecture
+## Management & Operations
 
-```
-           Telegram / HTTP / Email
-                     ↓
-         [ Transport-Neutral Core ]
-     (Intake, Dedup, SSRF URL Extraction)
-                     ↓
-             [ Mode Dispatch ]
-             /               \
-   [ Literal Engine ]    [ AIProvider ]
-   (Local/Deterministic) (Gemini Scripting & Research)
-             \               /
-          [ PodcastJob Queue ]
-                     ↓
-         [ Kokoro TTS Synthesis ]
-        (Concurrency-Controlled Chunk Synthesis)
-                     ↓
-        [ FFmpeg Audio Assembly ]
-                     ↓
-        [ Transport Delivery ]
-     (Direct Telegram MP3 Delivery)
-```
+Herald includes dedicated operational scripts in `scripts/`:
 
----
-
-## Operational Commands
-
-Herald includes a standard `Makefile` for operations and testing:
-
-| Command | Description |
+| Action | Command |
 | :--- | :--- |
-| `make up` | Start all Herald services |
-| `make down` | Stop all services |
-| `make logs` | Tail service container logs |
-| `make test` | Run full pytest suite |
-| `make status` | Display queue depth and system status |
+| **Acceptance Test** | `./scripts/install_acceptance.sh` |
+| **System Status** | `python3 scripts/status.py` or `docker compose ps` |
+| **Live Logs** | `docker compose logs -f --tail=100` |
+| **Backup State** | `./scripts/backup.sh` |
+| **Restore State** | `./scripts/restore.sh <backup-dir>` |
+| **Warm Reset** | `./scripts/reset-herald.sh --warm` *(resets DB/volumes, keeps .env & images)* |
+| **Cold Reset** | `./scripts/reset-herald.sh --cold` *(resets DB/volumes & built images, keeps .env)* |
+| **Update Stack** | `./install.sh --update` |
+| **Reinstall** | `./install.sh --reinstall` |
 
 ---
 

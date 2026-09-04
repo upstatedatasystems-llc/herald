@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
+import os
+import sys
 from pathlib import Path
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from herald.config import settings
-from herald.tts.kokoro_client import KokoroClient, KokoroTTSError
 from herald.audio.ffmpeg_builder import join_and_normalize_audio
+from herald.config import settings
+from herald.tts.kokoro_client import KokoroClient
 
 
 def run_smoke_test(mock_if_missing: bool = False):
