@@ -238,7 +238,9 @@ def sanitize_error(error: Exception | str | None) -> tuple[str, str]:
 
     # Classify error category
     lower_msg = sanitized_msg.lower()
-    if "auth" in lower_msg or "401" in lower_msg or "403" in lower_msg or "permission" in lower_msg or "api key" in lower_msg:
+    if "outputtruncated" in cat.lower() or "truncated" in lower_msg or "max_tokens" in lower_msg or "token limit" in lower_msg:
+        cat = "OUTPUT_TRUNCATED"
+    elif "auth" in lower_msg or "401" in lower_msg or "403" in lower_msg or "permission" in lower_msg or "api key" in lower_msg:
         cat = "AUTHENTICATION_FAILED"
     elif "429" in lower_msg or "quota" in lower_msg or "rate limit" in lower_msg:
         cat = "RATE_LIMIT_EXCEEDED"

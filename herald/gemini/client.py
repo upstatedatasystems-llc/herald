@@ -28,15 +28,29 @@ def load_system_prompt() -> str:
     return "Transform the provided source content into a podcast script JSON matching schema."
 
 
-def _extract_tokens(result_json: dict | None) -> tuple[int | None, int | None, int | None]:
-    """Safely extract prompt, completion, and total tokens from Gemini usageMetadata."""
+def _extract_tokens(result_json: dict | None) -> tuple[int | None, int | None, int | None, int | None]:
+    """Safely extract prompt, completion, total, and thought tokens from Gemini usageMetadata."""
     if not isinstance(result_json, dict):
-        return None, None, None
+        return None, None, None, None
     usage = result_json.get("usageMetadata") or result_json.get("usage_metadata") or {}
     p = usage.get("promptTokenCount") or usage.get("prompt_token_count")
     c = usage.get("candidatesTokenCount") or usage.get("candidates_token_count")
     t = usage.get("totalTokenCount") or usage.get("total_token_count")
-    return p, c, t
+    th = (
+        usage.get("thoughtsTokenCount")
+        or usage.get("thoughtTokenCount")
+        or usage.get("thoughts_token_count")
+        or usage.get("thought_token_count")
+        or usage.get("reasoningTokenCount")
+    )
+    if th is None:
+        cand_details = usage.get("candidatesTokensDetails") or usage.get("candidates_tokens_details") or []
+        if isinstance(cand_details, list):
+            for d in cand_details:
+                if isinstance(d, dict) and str(d.get("modality", "")).upper() in ("THOUGHT", "THOUGHTS"):
+                    th = d.get("tokenCount") or d.get("token_count")
+                    break
+    return p, c, t, th
 
 
 def _extract_request_id(resp: Any) -> str | None:
@@ -63,6 +77,27 @@ class GeminiValidationError(GeminiError):
     """Returned response failed schema validation."""
 
 
+class GeminiOutputTruncatedError(GeminiError):
+    """Model output was cut off by the configured token limit (finishReason=MAX_TOKENS)."""
+
+
+def supports_thinking_budget(model_name: str | None) -> bool:
+    """
+    Check if a Gemini model supports thinkingConfig (e.g. gemini-2.5, gemini-3.5, *thinking*).
+    Older models like gemini-1.5-flash / gemini-1.0 do NOT support thinkingConfig and will reject it.
+    """
+    if not model_name:
+        return True
+    m = model_name.lower().strip()
+    if "gemini-1.5" in m or "gemini-1.0" in m or m == "gemini-pro":
+        return False
+    if "gemini-2.5" in m or "gemini-3." in m or "thinking" in m or "gemini-2.0-flash-thinking" in m:
+        return True
+    if m.startswith("gemini-2."):
+        return True
+    return False
+
+
 def _record_gemini_interaction(
     job_id: str | None,
     model: str,
@@ -76,7 +111,12 @@ def _record_gemini_interaction(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
+    thought_tokens: int | None = None,
+    requested_max_output_tokens: int | None = None,
+    finish_reason: str | None = None,
     error: Exception | str | None = None,
+    error_category: str | None = None,
+    error_message: str | None = None,
     request_evidence: dict[str, Any] | None = None,
     response_evidence: dict[str, Any] | None = None,
     provider_request_id: str | None = None,
@@ -94,6 +134,8 @@ def _record_gemini_interaction(
     }
     if input_chars is not None:
         sanitized_req["input_chars"] = input_chars
+    if requested_max_output_tokens is not None:
+        sanitized_req["requested_max_output_tokens"] = requested_max_output_tokens
     if metadata:
         for k in ("mode", "research_depth", "structured_output", "has_material_issues"):
             if k in metadata:
@@ -114,15 +156,25 @@ def _record_gemini_interaction(
             sanitized_resp["completion_tokens"] = completion_tokens
         if total_tokens is not None:
             sanitized_resp["total_tokens"] = total_tokens
+        if thought_tokens is not None:
+            sanitized_resp["thought_tokens"] = thought_tokens
+        if finish_reason is not None:
+            sanitized_resp["finish_reason"] = finish_reason
         sanitized_resp["validation"] = "valid" if success else "invalid"
         if metadata:
             for k in ("finish_reason", "search_count", "grounding_query_count", "source_count", "score", "material_issues_count"):
-                if k in metadata:
+                if k in metadata and k not in sanitized_resp:
                     sanitized_resp[k] = metadata[k]
         if response_evidence:
             sanitized_resp.update(response_evidence)
 
     meta = {"attempt": attempt, "operation": operation}
+    if finish_reason is not None:
+        meta["finish_reason"] = finish_reason
+    if thought_tokens is not None:
+        meta["thought_tokens"] = thought_tokens
+    if requested_max_output_tokens is not None:
+        meta["requested_max_output_tokens"] = requested_max_output_tokens
     if metadata:
         meta.update(metadata)
 
@@ -142,6 +194,8 @@ def _record_gemini_interaction(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         error=error,
+        error_category=error_category,
+        error_message=error_message,
         request_json=sanitized_req,
         response_json=sanitized_resp,
         metadata=meta,
@@ -270,7 +324,7 @@ Report your comprehensive grounded findings in detail.
                 raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
 
             result_json = resp.json()
-            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
             candidates = result_json.get("candidates", [])
             if not candidates:
                 err_msg = "Gemini API returned no response candidates for grounded research."
@@ -287,6 +341,7 @@ Report your comprehensive grounded findings in detail.
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
                     error=err_msg,
                     provider_request_id=req_id,
                     metadata={"research_depth": depth},
@@ -358,6 +413,7 @@ Report your comprehensive grounded findings in detail.
                 prompt_tokens=p_tok,
                 completion_tokens=c_tok,
                 total_tokens=t_tok,
+                thought_tokens=th_tok,
                 provider_request_id=req_id,
                 metadata={
                     "research_depth": depth,
@@ -543,7 +599,7 @@ Requirements:
                 raise GeminiError(f"Gemini error ({resp.status_code}): {resp.text}")
 
             result_json = resp.json()
-            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
             candidates = result_json.get("candidates", [])
             if not candidates:
                 err_msg = "Gemini API returned no response candidates for dossier normalization."
@@ -560,6 +616,7 @@ Requirements:
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
                     error=err_msg,
                     provider_request_id=req_id,
                 )
@@ -597,6 +654,7 @@ Requirements:
                 prompt_tokens=p_tok,
                 completion_tokens=c_tok,
                 total_tokens=t_tok,
+                thought_tokens=th_tok,
                 provider_request_id=req_id,
             )
             interaction_recorded = True
@@ -738,24 +796,33 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     max_attempts = settings.GEMINI_RETRY_COUNT
     backoff = 2.0
     last_error = ""
+    last_finish_reason = ""
+
+    base_max_tokens = getattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384) or getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 4096) or 16384
+    MAX_SCRIPT_OUTPUT_CEILING = 65536
+    current_max_tokens = base_max_tokens
 
     for attempt in range(1, max_attempts + 1):
         t0 = datetime.now(UTC)
         interaction_recorded = False
         prompt_content = f"{system_prompt}\n\n{user_prompt}"
-        if attempt == 2 and last_error:
+        if attempt > 1 and last_error and last_finish_reason != "MAX_TOKENS":
             prompt_content += f"\n\nNOTE: Previous attempt failed validation: '{last_error}'. Strictly conform to required fields."
 
         try:
-            logger.info(f"Sending script request to Gemini ({model}), mode={mode_clean}, attempt {attempt}/{max_attempts}")
+            logger.info(f"Sending script request to Gemini ({model}), mode={mode_clean}, max_tokens={current_max_tokens}, attempt {attempt}/{max_attempts}")
+            gen_config: dict[str, Any] = {
+                "temperature": settings.GEMINI_TEMPERATURE,
+                "maxOutputTokens": current_max_tokens,
+                "responseMimeType": "application/json",
+                "responseSchema": schema_dict,
+            }
+            if supports_thinking_budget(model):
+                gen_config["thinkingConfig"] = {"thinkingBudget": 1024}
+
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": prompt_content}]}],
-                "generationConfig": {
-                    "temperature": settings.GEMINI_TEMPERATURE,
-                    "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
-                    "responseMimeType": "application/json",
-                    "responseSchema": schema_dict,
-                },
+                "generationConfig": gen_config,
             }
 
             from herald.concurrency import get_semaphores
@@ -776,6 +843,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     http_status=resp.status_code,
                     attempt=attempt,
                     input_chars=len(prompt_content),
+                    requested_max_output_tokens=current_max_tokens,
                     error=f"Gemini API authentication failed ({resp.status_code}): {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -793,6 +861,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     http_status=resp.status_code,
                     attempt=attempt,
                     input_chars=len(prompt_content),
+                    requested_max_output_tokens=current_max_tokens,
                     error=f"HTTP 429: {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -814,6 +883,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     http_status=resp.status_code,
                     attempt=attempt,
                     input_chars=len(prompt_content),
+                    requested_max_output_tokens=current_max_tokens,
                     error=f"HTTP {resp.status_code}: {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -826,7 +896,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
 
             result_json = resp.json()
-            p_tok, c_tok, t_tok = _extract_tokens(result_json)
+            p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
             candidates = result_json.get("candidates", [])
             if not candidates:
                 err_msg = "Gemini API returned no response candidates."
@@ -843,6 +913,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    requested_max_output_tokens=current_max_tokens,
                     error=err_msg,
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -850,7 +922,9 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 interaction_recorded = True
                 raise GeminiValidationError(err_msg)
 
-            parts = candidates[0].get("content", {}).get("parts", [])
+            candidate = candidates[0]
+            finish_reason = candidate.get("finishReason") or candidate.get("finish_reason") or "STOP"
+            parts = candidate.get("content", {}).get("parts", [])
             if not parts or "text" not in parts[0]:
                 err_msg = "Gemini candidate content missing text part."
                 _record_gemini_interaction(
@@ -866,9 +940,12 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    requested_max_output_tokens=current_max_tokens,
+                    finish_reason=finish_reason,
                     error=err_msg,
                     provider_request_id=req_id,
-                    metadata={"mode": mode_clean},
+                    metadata={"mode": mode_clean, "finish_reason": finish_reason},
                 )
                 interaction_recorded = True
                 raise GeminiValidationError(err_msg)
@@ -890,8 +967,11 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 prompt_tokens=p_tok,
                 completion_tokens=c_tok,
                 total_tokens=t_tok,
+                thought_tokens=th_tok,
+                requested_max_output_tokens=current_max_tokens,
+                finish_reason=finish_reason,
                 provider_request_id=req_id,
-                metadata={"mode": mode_clean},
+                metadata={"mode": mode_clean, "finish_reason": finish_reason},
             )
             interaction_recorded = True
 
@@ -899,8 +979,19 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
 
         except (json.JSONDecodeError, pydantic.ValidationError, GeminiValidationError) as e:
             last_error = str(e)
+            cand_list = locals().get("candidates", [])
+            f_reason = (cand_list[0].get("finishReason") or cand_list[0].get("finish_reason") or "STOP") if cand_list else "STOP"
+            last_finish_reason = f_reason
+
             if not interaction_recorded:
                 t1 = datetime.now(UTC)
+                is_trunc = f_reason == "MAX_TOKENS"
+                err_to_record = (
+                    GeminiOutputTruncatedError(f"Gemini output truncated by max_output_tokens limit ({current_max_tokens} tokens, finishReason=MAX_TOKENS): {e}")
+                    if is_trunc
+                    else e
+                )
+                err_category = "OUTPUT_TRUNCATED" if is_trunc else "SCHEMA_VALIDATION_ERROR"
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
@@ -914,14 +1005,39 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     prompt_tokens=p_tok if "p_tok" in locals() else None,
                     completion_tokens=c_tok if "c_tok" in locals() else None,
                     total_tokens=t_tok if "t_tok" in locals() else None,
-                    error=e,
+                    thought_tokens=th_tok if "th_tok" in locals() else None,
+                    requested_max_output_tokens=current_max_tokens,
+                    finish_reason=f_reason,
+                    error=err_to_record,
+                    error_category=err_category,
+                    error_message=str(err_to_record),
                     provider_request_id=req_id if "req_id" in locals() else None,
-                    metadata={"mode": mode_clean},
+                    metadata={"mode": mode_clean, "finish_reason": f_reason, "truncated": is_trunc},
                 )
                 interaction_recorded = True
-            logger.error(f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}")
-            if attempt == max_attempts:
+
+            if f_reason == "MAX_TOKENS":
+                logger.warning(
+                    f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{max_attempts}: {e}"
+                )
+                if attempt < max_attempts:
+                    next_tokens = min(current_max_tokens * 2, MAX_SCRIPT_OUTPUT_CEILING)
+                    logger.info(f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens")
+                    current_max_tokens = next_tokens
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                raise GeminiOutputTruncatedError(
+                    f"Gemini output truncated by max_output_tokens limit ({current_max_tokens} tokens, finishReason=MAX_TOKENS): {e}"
+                )
+            else:
+                logger.error(f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}")
+                if attempt < max_attempts:
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
                 raise GeminiValidationError(f"Invalid JSON/schema returned by Gemini: {e}")
+
         except Exception as e:
             if not interaction_recorded:
                 t1 = datetime.now(UTC)
@@ -934,11 +1050,12 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     success=False,
                     attempt=attempt,
                     input_chars=len(prompt_content),
+                    requested_max_output_tokens=current_max_tokens,
                     error=e,
                     metadata={"mode": mode_clean},
                 )
                 interaction_recorded = True
-            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
+            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiOutputTruncatedError)):
                 raise
             last_error = str(e)
             logger.error(f"Gemini client error on attempt {attempt}: {e}")
@@ -1050,7 +1167,7 @@ If has_material_issues is true, provide concrete repair_instructions.
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                p_tok, c_tok, t_tok = _extract_tokens(result_json)
+                p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
                 audit_obj = ResearchAuditResponse(**json.loads(raw_text))
                 _record_gemini_interaction(
                     job_id=job_id,
@@ -1064,6 +1181,7 @@ If has_material_issues is true, provide concrete repair_instructions.
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
                     provider_request_id=req_id,
                     metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
                 )
@@ -1193,7 +1311,7 @@ Return the corrected PodcastScriptResponse JSON now.
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                p_tok, c_tok, t_tok = _extract_tokens(result_json)
+                p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
                 repair_obj = PodcastScriptResponse(**json.loads(raw_text))
                 _record_gemini_interaction(
                     job_id=job_id,
@@ -1207,6 +1325,7 @@ Return the corrected PodcastScriptResponse JSON now.
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
                     provider_request_id=req_id,
                 )
                 interaction_recorded = True
@@ -1337,7 +1456,7 @@ If has_material_issues is true, provide concrete repair_instructions.
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                p_tok, c_tok, t_tok = _extract_tokens(result_json)
+                p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
                 audit_obj = FidelityAuditResponse(**json.loads(raw_text))
                 _record_gemini_interaction(
                     job_id=job_id,
@@ -1351,6 +1470,7 @@ If has_material_issues is true, provide concrete repair_instructions.
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
+                    thought_tokens=th_tok,
                     provider_request_id=req_id,
                     metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
                 )

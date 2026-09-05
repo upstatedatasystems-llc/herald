@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     GEMINI_RESEARCH_MODEL: str = "gemini-2.5-flash"
     GEMINI_TEMPERATURE: float = 0.3
     GEMINI_MAX_OUTPUT_TOKENS: int = 4096
+    GEMINI_SCRIPT_MAX_OUTPUT_TOKENS: int = 16384
     GEMINI_TIMEOUT_SECONDS: int = 60
     GEMINI_RETRY_COUNT: int = 3
 
