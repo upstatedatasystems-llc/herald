@@ -141,6 +141,7 @@ SAFE_NUMERIC_TELEMETRY_KEYS = {
     "total_tokens",
     "thought_tokens",
     "requested_max_output_tokens",
+    "thinking_budget",
 }
 
 

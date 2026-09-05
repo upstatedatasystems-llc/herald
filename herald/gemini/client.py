@@ -107,24 +107,24 @@ def build_script_thinking_config(
     return None
 
 
-def get_gemini_max_output_tokens_ceiling(model_name: str | None) -> int:
+def get_gemini_max_output_tokens_ceiling(model_name: str | None) -> int | None:
     """
     Determine authoritative maximum output token ceiling based on Gemini model family.
     - Gemini 3.x / Gemini 2.5: 65,536 tokens
     - Gemini 2.0 / Gemini 1.5: 8,192 tokens
     - Gemini 1.0 / Gemini Pro: 4,096 tokens
-    - Unknown/unspecified: 8,192 tokens
+    - Unknown/unrecognized: None (unknown ceiling)
     """
     if not model_name:
-        return 16384
+        return None
     m = model_name.lower().strip()
-    if "gemini-3." in m or "gemini-3" in m or "gemini-2.5" in m:
+    if "gemini-3" in m or "gemini-2.5" in m:
         return 65536
     elif "gemini-2.0" in m or "gemini-1.5" in m:
         return 8192
     elif "gemini-1.0" in m or m == "gemini-pro":
         return 4096
-    return 8192
+    return None
 
 
 
@@ -205,6 +205,8 @@ def _record_gemini_interaction(
         meta["thought_tokens"] = thought_tokens
     if requested_max_output_tokens is not None:
         meta["requested_max_output_tokens"] = requested_max_output_tokens
+    if request_evidence:
+        meta.update(request_evidence)
     if metadata:
         meta.update(metadata)
 
@@ -828,8 +830,13 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     last_error = ""
     last_finish_reason = ""
 
-    base_max_tokens = getattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384) or getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 4096) or 16384
-    current_max_tokens = base_max_tokens
+    model_ceiling = get_gemini_max_output_tokens_ceiling(model)
+    if mode_clean == "research":
+        base_max_tokens = getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 4096) or 4096
+    else:
+        base_max_tokens = getattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384) or 16384
+
+    current_max_tokens = min(base_max_tokens, model_ceiling) if model_ceiling is not None else base_max_tokens
 
     for attempt in range(1, max_attempts + 1):
         t0 = datetime.now(UTC)
@@ -837,6 +844,14 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
         prompt_content = f"{system_prompt}\n\n{user_prompt}"
         if attempt > 1 and last_error and last_finish_reason != "MAX_TOKENS":
             prompt_content += f"\n\nNOTE: Previous attempt failed validation: '{last_error}'. Strictly conform to required fields."
+
+        thinking_cfg = build_script_thinking_config(model, request_mode=mode_clean)
+        request_evidence: dict[str, Any] = {}
+        if thinking_cfg:
+            if "thinkingLevel" in thinking_cfg:
+                request_evidence["thinking_level"] = thinking_cfg["thinkingLevel"]
+            if "thinkingBudget" in thinking_cfg:
+                request_evidence["thinking_budget"] = thinking_cfg["thinkingBudget"]
 
         try:
             logger.info(f"Sending script request to Gemini ({model}), mode={mode_clean}, max_tokens={current_max_tokens}, attempt {attempt}/{max_attempts}")
@@ -846,7 +861,6 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 "responseMimeType": "application/json",
                 "responseSchema": schema_dict,
             }
-            thinking_cfg = build_script_thinking_config(model, request_mode=mode_clean)
             if thinking_cfg:
                 gen_config["thinkingConfig"] = thinking_cfg
 
@@ -874,6 +888,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     attempt=attempt,
                     input_chars=len(prompt_content),
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     error=f"Gemini API authentication failed ({resp.status_code}): {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -892,6 +907,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     attempt=attempt,
                     input_chars=len(prompt_content),
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     error=f"HTTP 429: {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -914,6 +930,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     attempt=attempt,
                     input_chars=len(prompt_content),
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     error=f"HTTP {resp.status_code}: {resp.text}",
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -945,6 +962,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     total_tokens=t_tok,
                     thought_tokens=th_tok,
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     error=err_msg,
                     provider_request_id=req_id,
                     metadata={"mode": mode_clean},
@@ -972,6 +990,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     total_tokens=t_tok,
                     thought_tokens=th_tok,
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     finish_reason=finish_reason,
                     error=err_msg,
                     provider_request_id=req_id,
@@ -999,6 +1018,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 total_tokens=t_tok,
                 thought_tokens=th_tok,
                 requested_max_output_tokens=current_max_tokens,
+                request_evidence=request_evidence or None,
                 finish_reason=finish_reason,
                 provider_request_id=req_id,
                 metadata={"mode": mode_clean, "finish_reason": finish_reason},
@@ -1037,6 +1057,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     total_tokens=t_tok if "t_tok" in locals() else None,
                     thought_tokens=th_tok if "th_tok" in locals() else None,
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     finish_reason=f_reason,
                     error=err_to_record,
                     error_category=err_category,
@@ -1050,17 +1071,16 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 logger.warning(
                     f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{max_attempts}: {e}"
                 )
-                model_ceiling = get_gemini_max_output_tokens_ceiling(model)
-                effective_ceiling = max(base_max_tokens, model_ceiling)
-                next_tokens = min(current_max_tokens * 2, effective_ceiling)
-                if next_tokens > current_max_tokens and attempt < max_attempts:
-                    logger.info(
-                        f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens (ceiling: {effective_ceiling})"
-                    )
-                    current_max_tokens = next_tokens
-                    time.sleep(backoff)
-                    backoff *= 2.0
-                    continue
+                if mode_clean != "research" and model_ceiling is not None:
+                    next_tokens = min(current_max_tokens * 2, model_ceiling)
+                    if next_tokens > current_max_tokens and attempt < max_attempts:
+                        logger.info(
+                            f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens (ceiling: {model_ceiling})"
+                        )
+                        current_max_tokens = next_tokens
+                        time.sleep(backoff)
+                        backoff *= 2.0
+                        continue
                 raise GeminiOutputTruncatedError(
                     f"Gemini output truncated by max_output_tokens limit ({current_max_tokens} tokens, finishReason=MAX_TOKENS): {e}"
                 )
@@ -1085,6 +1105,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     attempt=attempt,
                     input_chars=len(prompt_content),
                     requested_max_output_tokens=current_max_tokens,
+                    request_evidence=request_evidence or None,
                     error=e,
                     metadata={"mode": mode_clean},
                 )
