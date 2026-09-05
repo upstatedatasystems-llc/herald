@@ -103,20 +103,19 @@ def format_help() -> str:
         "<b>Commands:</b>\n"
         "/start — Quick-start guide\n"
         "/help — Full usage and directive reference\n"
-        "/voices — Browse voices, hear samples, and set default voice\n"
         "/download — Download latest (or specific) episode MP3 file\n"
         "/diagnostics — View job diagnostics and download support package\n"
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"
-        "/settings — Preferences and pre-TTS confirmation toggle\n"
+        "/settings — Preferences, voice selection, and pre-TTS confirmation toggle\n"
         "/readme — Project documentation"
     )
 
 
 def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple[str, dict]:
     """
-    Format settings message and generate inline keyboard markup for confirmation toggle.
+    Format settings message and generate inline keyboard markup for voice selection and confirmation toggle.
     Returns:
         (text, reply_markup_dict)
     """
@@ -137,17 +136,23 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
         f"• <b>Default Speed:</b> <code>{default_speed:.1f}x</code>\n"
         f"• <b>Confirm Before TTS:</b> {confirm_str}\n"
         f"• <b>AI Provider:</b> <code>{ai_provider}</code>\n\n"
-        "<i>Tap below to toggle pre-TTS approval confirmation:</i>"
+        "<i>Tap below to customize your default voice or toggle pre-TTS approval confirmation:</i>"
     )
 
     reply_markup = {
         "inline_keyboard": [
             [
                 {
+                    "text": "🎙 Set Voice",
+                    "callback_data": "h2:settings:voice",
+                }
+            ],
+            [
+                {
                     "text": button_text,
                     "callback_data": button_callback,
                 }
-            ]
+            ],
         ]
     }
 
@@ -539,12 +544,19 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
             "callback_data": f"h2:voice:sample:{vid}",
         }
         btn_set = {
-            "text": "✅ Default" if is_curr else f"⭐ Set {dname}",
+            "text": "✅ Selected" if is_curr else f"Use {dname}",
             "callback_data": f"h2:voice:set:{vid}",
         }
         keyboard.append([btn_sample, btn_set])
 
-    lines.append("\n<i>Tip: You can also use <code>Voice: <name></code> at the top of any message.</i>")
+    keyboard.append([
+        {
+            "text": "← Back to Settings",
+            "callback_data": "h2:settings:main",
+        }
+    ])
+
+    lines.append("\n<i>Tip: You can also use <code>Voice: &lt;name&gt;</code> at the top of any message.</i>")
     text = "\n".join(lines)
     reply_markup = {"inline_keyboard": keyboard}
 

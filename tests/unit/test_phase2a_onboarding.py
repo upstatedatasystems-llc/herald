@@ -158,7 +158,6 @@ def test_authenticated_start_and_help(db_session):
     assert "/status" in help_text
     assert "/queue" in help_text
     assert "/settings" in help_text
-    assert "/voices" in help_text
     assert "/download" in help_text
 
 

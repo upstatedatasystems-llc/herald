@@ -898,6 +898,45 @@ def handle_telegram_callback_query(
                 logger.warning(f"Failed to update settings message markup: {e}")
         return
 
+    elif raw_data == "h2:settings:voice":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        current_default = prefs.get("default_voice", "af_heart")
+        voices_text, reply_markup = format_voices_browser(current_default=current_default)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=voices_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"editMessageText idempotent notice: {e}")
+            else:
+                logger.warning(f"Failed to show voices browser: {e}")
+        return
+
+    elif raw_data in ("h2:settings:main", "h2:voice:back_to_settings"):
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        settings_text, reply_markup = format_settings(prefs, settings)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=settings_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"editMessageText idempotent notice: {e}")
+            else:
+                logger.warning(f"Failed to return to settings message markup: {e}")
+        return
+
     elif raw_data.startswith("h2:approve:"):
         job_id = raw_data[len("h2:approve:") :]
         job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()

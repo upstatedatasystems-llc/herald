@@ -244,3 +244,122 @@ def test_voice_sample_callback_generic_error_on_failure(db_session, monkeypatch,
 
     with _VOICE_SAMPLE_LOCK:
         assert "af_sarah" not in _IN_FLIGHT_VOICE_SAMPLES
+
+
+def test_voice_browser_html_safety_escaping(monkeypatch):
+    """
+    Test that voice browser correctly escapes dynamic metadata containing <, >, &, quotes,
+    and specifically that the tip format contains valid escaped HTML ('&lt;name&gt;' rather than '<name>').
+    """
+    from herald.telegram.formatters import format_voices_browser
+
+    # Format standard catalog
+    text, markup = format_voices_browser(current_default="af_heart")
+    # Must NOT contain raw unescaped <name>
+    assert "<name>" not in text
+    assert "&lt;name&gt;" in text or "&lt;" in text
+
+    # Test with custom tricky voice metadata
+    fake_voices = [
+        {
+            "voice_id": "test_<voice>&1",
+            "display_name": "Test <Voice> & Co \"Special\"",
+            "gender": "Female <X>",
+            "description": "A <bold> test voice with & special chars 'quotes' and <name>.",
+        }
+    ]
+    monkeypatch.setattr("herald.services.voice_manager.get_all_voice_metadata", lambda: fake_voices)
+
+    text_tricky, markup_tricky = format_voices_browser(current_default="test_<voice>&1")
+    assert "<bold>" not in text_tricky
+    assert "&lt;bold&gt;" in text_tricky
+    assert "&lt;name&gt;" in text_tricky
+    assert "&amp;" in text_tricky
+    assert "&lt;Voice&gt;" in text_tricky
+    assert "&lt;X&gt;" in text_tricky
+
+    # Buttons should have Back to Settings and Selected
+    keyboard = markup_tricky.get("inline_keyboard", [])
+    assert any(b.get("text") == "← Back to Settings" for row in keyboard for b in row)
+    assert any("✅ Selected" in b.get("text") for row in keyboard for b in row)
+
+
+def test_settings_voice_navigation_and_selection_flow(db_session, monkeypatch):
+    """
+    Test full flow:
+    1. /settings shows '🎙 Set Voice' button.
+    2. Clicking '🎙 Set Voice' (h2:settings:voice) opens voice browser with '← Back to Settings'.
+    3. Clicking a voice 'Use Bella' (h2:voice:set:af_bella) sets default voice.
+    4. Clicking '← Back to Settings' (h2:settings:main) returns to settings showing 'af_bella'.
+    """
+    from herald.telegram.auth import get_effective_user_preferences
+
+    code = generate_pairing_code(db_session)
+    verify_and_claim_pairing_code(db_session, code, user_id=99999, chat_id=99999, username="owner")
+
+    mock_client = MagicMock(spec=TelegramClient)
+
+    # 1. /settings command
+    msg = {"chat": {"id": 99999, "type": "private"}, "from": {"id": 99999}, "message_id": 801}
+    handle_telegram_command(db_session, mock_client, msg, "settings", "")
+    assert mock_client.send_message.called
+    sent_text = mock_client.send_message.call_args[1]["text"]
+    sent_markup = mock_client.send_message.call_args[1]["reply_markup"]
+    assert "Herald Preferences & Settings" in sent_text
+    assert any(b.get("callback_data") == "h2:settings:voice" for row in sent_markup["inline_keyboard"] for b in row)
+
+    # 2. Click '🎙 Set Voice' (h2:settings:voice)
+    cb_voice = {
+        "id": "cb-nav-1",
+        "from": {"id": 99999},
+        "message": {"message_id": 801, "chat": {"id": 99999, "type": "private"}},
+        "data": "h2:settings:voice",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_voice)
+    assert mock_client.edit_message_text.called
+    edited_text = mock_client.edit_message_text.call_args[1]["text"]
+    edited_markup = mock_client.edit_message_text.call_args[1]["reply_markup"]
+    assert "Herald Voice Catalog" in edited_text
+    assert any(b.get("callback_data") == "h2:settings:main" for row in edited_markup["inline_keyboard"] for b in row)
+
+    # 3. Select 'af_bella' (h2:voice:set:af_bella)
+    cb_set = {
+        "id": "cb-nav-2",
+        "from": {"id": 99999},
+        "message": {"message_id": 801, "chat": {"id": 99999, "type": "private"}},
+        "data": "h2:voice:set:af_bella",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_set)
+    prefs = get_effective_user_preferences(db_session, 99999)
+    assert prefs["default_voice"] == "af_bella"
+
+    # 4. Click '← Back to Settings' (h2:settings:main)
+    cb_back = {
+        "id": "cb-nav-3",
+        "from": {"id": 99999},
+        "message": {"message_id": 801, "chat": {"id": 99999, "type": "private"}},
+        "data": "h2:settings:main",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_back)
+    assert mock_client.edit_message_text.called
+    back_text = mock_client.edit_message_text.call_args[1]["text"]
+    assert "Herald Preferences & Settings" in back_text
+    assert "af_bella" in back_text
+
+
+def test_legacy_voices_command_alias(db_session):
+    """
+    Test sending /voices manually still returns voice browser safely without crashing.
+    """
+    code = generate_pairing_code(db_session)
+    verify_and_claim_pairing_code(db_session, code, user_id=88888, chat_id=88888, username="owner")
+
+    mock_client = MagicMock(spec=TelegramClient)
+    msg = {"chat": {"id": 88888, "type": "private"}, "from": {"id": 88888}, "message_id": 901}
+    handle_telegram_command(db_session, mock_client, msg, "voices", "")
+
+    assert mock_client.send_message.called
+    sent_text = mock_client.send_message.call_args[1]["text"]
+    sent_markup = mock_client.send_message.call_args[1]["reply_markup"]
+    assert "Herald Voice Catalog" in sent_text
+    assert any(b.get("callback_data") == "h2:settings:main" for row in sent_markup["inline_keyboard"] for b in row)

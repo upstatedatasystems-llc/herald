@@ -104,13 +104,12 @@ research high
 | :--- | :--- |
 | `/start` | Welcome message, quick-start guide, and pairing status |
 | `/help` | Complete usage guide and directive reference |
-| `/voices` | Interactive voice catalog, audio preview samples, and default voice selection |
 | `/download [id]` | Download completed podcast MP3 as an audio document |
 | `/diagnostics [id]` | View job diagnostics card and download redacted support bundle ZIP |
 | `/status` | Live runtime health, TTS readiness, AI provider health, queue, disk, and uptime |
 | `/ai_check` | Dedicated AI API configuration and connectivity test |
 | `/queue` | View pending, scripting, and synthesizing podcast jobs |
-| `/settings` | View preferences and toggle pre-TTS confirmation card |
+| `/settings` | View preferences, default voice selection, and pre-TTS confirmation toggle |
 | `/readme` | Send the project `README.md` document |
 | `/pair <code>` | Pair your Telegram account as the authorized instance owner |
 

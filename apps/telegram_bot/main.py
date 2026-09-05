@@ -70,13 +70,12 @@ def print_startup_banner():
 TELEGRAM_BOT_COMMANDS = [
     {"command": "start", "description": "Start bot and view quick-start guide"},
     {"command": "help", "description": "View usage guide, modes, and directives"},
-    {"command": "voices", "description": "Browse voices, hear samples, and set default"},
     {"command": "download", "description": "Download podcast audio MP3"},
     {"command": "diagnostics", "description": "View job diagnostics and support export"},
     {"command": "status", "description": "View system health, queue depth, and uptime"},
     {"command": "ai_check", "description": "Test AI provider connection"},
     {"command": "queue", "description": "View active podcast queue"},
-    {"command": "settings", "description": "Configure preferences and confirm before TTS"},
+    {"command": "settings", "description": "Configure preferences and default voice"},
     {"command": "readme", "description": "Download project documentation"},
 ]
 TELEGRAM_BOT_COMMANDS_2A = [c for c in TELEGRAM_BOT_COMMANDS if c["command"] != "settings"]

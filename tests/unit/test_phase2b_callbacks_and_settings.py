@@ -308,7 +308,8 @@ def test_settings_command_and_formatting(db_session):
     assert "⚪ Off" in text
     assert markup is not None
     assert "inline_keyboard" in markup
-    assert markup["inline_keyboard"][0][0]["callback_data"] == "h2:settings:confirm:on"
+    assert markup["inline_keyboard"][0][0]["callback_data"] == "h2:settings:voice"
+    assert markup["inline_keyboard"][1][0]["callback_data"] == "h2:settings:confirm:on"
 
 
 def test_typed_preference_setters(db_session, monkeypatch):
@@ -345,12 +346,12 @@ def test_typed_preference_setters(db_session, monkeypatch):
 
 
 def test_set_my_commands_includes_settings():
-    """Test that /settings, /voices, and /download are registered in TELEGRAM_BOT_COMMANDS."""
+    """Test that /settings and /download are registered in TELEGRAM_BOT_COMMANDS, but /voices is omitted."""
     registered_names = {cmd["command"] for cmd in TELEGRAM_BOT_COMMANDS}
     assert "settings" in registered_names
-    assert "voices" in registered_names
     assert "download" in registered_names
-    assert {"start", "help", "status", "ai_check", "queue", "settings", "readme", "voices", "download"}.issubset(registered_names)
+    assert "voices" not in registered_names
+    assert {"start", "help", "download", "diagnostics", "status", "ai_check", "queue", "settings", "readme"} == registered_names
 
 
 def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, monkeypatch):
