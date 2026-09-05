@@ -144,15 +144,6 @@ def inspect_pcm_wav_file(file_path: Path) -> dict[str, Any] | None:
                     "duration_seconds": float(dur),
                     "file_size": file_size,
                 }
-            elif math.isfinite(dur) and file_size <= 44:
-                return {
-                    "valid": True,
-                    "sample_rate": sample_rate,
-                    "channels": num_channels,
-                    "frames": actual_frames,
-                    "duration_seconds": float(dur),
-                    "file_size": file_size,
-                }
             return None
     except Exception as e:
         logger.debug(f"WAV RIFF inspection exception for '{file_path}': {e}")
@@ -199,14 +190,9 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
                 with wave.open(str(file_path), "rb") as w:
                     nframes = w.getnframes()
                     framerate = w.getframerate()
-                    nchannels = w.getnchannels()
-                    sampwidth = w.getsampwidth()
-                    if framerate > 0 and nframes >= 0 and nchannels > 0 and sampwidth > 0:
-                        bytes_per_frame = nchannels * sampwidth
-                        max_possible_frames = max(0, file_size - 44) // bytes_per_frame
-                        actual_frames = min(nframes, max_possible_frames)
-                        dur = actual_frames / float(framerate)
-                        if math.isfinite(dur) and (dur > 0 or file_size <= 44):
+                    if framerate > 0 and nframes > 0:
+                        dur = nframes / float(framerate)
+                        if math.isfinite(dur) and dur > 0:
                             duration_sec = float(dur)
                             is_valid_container = True
                             audio_type = "WAVE"

@@ -185,3 +185,18 @@ def test_malformed_wav_controlled_failure(tmp_path):
     with patch("shutil.which", return_value=None):
         with pytest.raises(FFmpegExecutionError):
             validate_audio_file(junk_file)
+
+
+def test_no_fixed_44_byte_assumptions_in_codebase():
+    """
+    Regression assertion: Ensure ffmpeg_builder.py contains zero fixed 44-byte ('- 44' or '<= 44')
+    payload offset calculations.
+    """
+    import inspect
+
+    import herald.audio.ffmpeg_builder as fb
+
+    source = inspect.getsource(fb)
+    assert "- 44" not in source
+    assert "<= 44" not in source
+    assert "(file_size - 44)" not in source
