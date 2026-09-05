@@ -1053,3 +1053,31 @@ def test_acceptance_dynamic_alembic_heads_revision_mismatch_fails(tmp_path):
     )
     assert res.returncode != 0
     assert "Database schema revision mismatch" in res.stderr
+
+
+def test_deployment_scripts_git_executable_permissions():
+    """Ensure all entrypoint and lifecycle shell scripts have Git executable mode 100755."""
+    repo_root = Path(__file__).parent.parent.parent
+    scripts_to_check = [
+        "install.sh",
+        "setup.sh",
+        "scripts/reset-herald.sh",
+        "scripts/install_acceptance.sh",
+        "scripts/backup.sh",
+        "scripts/restore.sh",
+        "scripts/test_restore.sh",
+    ]
+    res = subprocess.run(
+        ["git", "ls-files", "-s", *scripts_to_check],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = [line.strip() for line in res.stdout.strip().splitlines() if line.strip()]
+    assert len(lines) == len(scripts_to_check), f"Expected {len(scripts_to_check)} tracked files, got: {lines}"
+    for line in lines:
+        parts = line.split(maxsplit=3)
+        assert len(parts) == 4, f"Unexpected git ls-files output: {line}"
+        mode, _, _, filepath = parts
+        assert mode == "100755", f"Expected 100755 executable mode for {filepath}, got {mode}"
