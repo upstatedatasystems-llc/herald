@@ -342,14 +342,16 @@ def test_postgres_shared_tts_slot_concurrency(pg_session_factory, monkeypatch, t
             worker_in_synth.set()
             worker_can_finish.wait(timeout=10.0)
             Path(output_path).write_bytes(
-                b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+                b"RIFF\xa4\x0c\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x80\x0c\x00\x00"
+                + (b"\x00" * 3200)
             )
 
         def mock_voice_synth(text, output_path, **kwargs):
             voice_in_synth.set()
             voice_can_finish.wait(timeout=10.0)
             Path(output_path).write_bytes(
-                b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+                b"RIFF\xa4\x0c\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x80\x0c\x00\x00"
+                + (b"\x00" * 3200)
             )
 
         mock_kokoro_w = MagicMock(spec=KokoroClient)

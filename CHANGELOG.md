@@ -5,6 +5,13 @@ All notable changes to the **Herald** project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-05
+
+### Fixed
+- **Voice-Selection UX & HTML Safety**: Integrated voice picker into the `/settings` interface via interactive inline keyboard (`🎙 Set Voice`), added direct voice switching (`[ Use <Name> ]`), and enforced HTML-safe entity escaping on all user and voice metadata to eliminate Telegram API parse errors.
+- **Gemini Script-Output Truncation & Diagnostics**: Added `GEMINI_SCRIPT_MAX_OUTPUT_TOKENS` (default 16,384) with model-aware `thinkingBudget` for Gemini 2.5/3.x reasoning models, precise `OUTPUT_TRUNCATED` error categorization upon token limit exhaustion, and adaptive token budget doubling without redundant JSON repair prompts.
+- **WAV Chunk-Duration Telemetry**: Replaced generic container metadata parsing with authoritative WAV header inspection (`frame_count / sample_rate`) bounded by actual file payload size, eliminating spurious ~89,478.5s duration artifacts caused by unfinalized streaming chunk headers.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

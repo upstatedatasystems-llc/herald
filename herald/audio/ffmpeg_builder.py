@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import struct
@@ -67,41 +68,68 @@ def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sampl
 def validate_audio_file(file_path: Path) -> dict[str, Any]:
     """
     Validate that an audio file exists, is non-zero, contains valid audio streams,
-    non-zero duration, valid container format using mutagen/ffprobe.
+    non-zero duration, and valid container format.
+    For PCM WAV files, authoritatively calculates duration from WAV structure (frame_count / sample_rate)
+    before generic metadata libraries to prevent streaming chunk header artifacts.
     Raises FFmpegExecutionError if file is invalid, empty, or missing streams.
     """
     if not file_path.exists() or file_path.stat().st_size == 0:
         raise FFmpegExecutionError(f"Audio file '{file_path}' is missing or 0 bytes.")
 
+    file_size = file_path.stat().st_size
+    duration_sec = 0.0
     audio_type = None
     is_valid_container = False
 
-    try:
-        audio = mutagen.File(file_path)
-        if audio and audio.info:
-            is_valid_container = True
-            audio_type = type(audio).__name__
-            if hasattr(audio.info, "length"):
-                duration_sec = float(audio.info.length)
-    except Exception as e:
-        logger.debug(f"Mutagen validation error for '{file_path}': {e}")
+    # 1. Prefer authoritative wave parsing for WAV files
+    is_wav = str(file_path).lower().endswith(".wav")
+    if not is_wav and file_size >= 12:
+        try:
+            with open(file_path, "rb") as f_head:
+                magic = f_head.read(12)
+                if len(magic) >= 12 and magic[:4] == b"RIFF" and magic[8:12] == b"WAVE":
+                    is_wav = True
+        except Exception:
+            pass
 
-    if not is_valid_container and str(file_path).lower().endswith(".wav"):
+    if is_wav:
         try:
             with wave.open(str(file_path), "rb") as w:
                 nframes = w.getnframes()
                 framerate = w.getframerate()
-                if framerate > 0 and nframes >= 0:
-                    is_valid_container = True
-                    duration_sec = nframes / float(framerate)
-                    audio_type = "WAVE"
+                nchannels = w.getnchannels()
+                sampwidth = w.getsampwidth()
+                if framerate > 0 and nframes >= 0 and nchannels > 0 and sampwidth > 0:
+                    bytes_per_frame = nchannels * sampwidth
+                    max_possible_frames = max(0, file_size - 44) // bytes_per_frame
+                    # Guard against unfinalized/streaming chunk headers (e.g. 0x7FFFFFFF data chunk size)
+                    actual_frames = nframes
+                    if actual_frames > max_possible_frames:
+                        actual_frames = max_possible_frames
+                    dur = actual_frames / float(framerate)
+                    if math.isfinite(dur) and (dur > 0 or file_size <= 44):
+                        duration_sec = float(dur)
+                        is_valid_container = True
+                        audio_type = "WAVE"
         except Exception as e:
             logger.debug(f"Wave inspection error for '{file_path}': {e}")
 
-    if not is_valid_container and not shutil.which("ffprobe"):
-        raise FFmpegExecutionError(f"File '{file_path}' is not a valid audio format.")
+    # 2. For non-WAV formats (or if wave failed), use Mutagen metadata
+    if not is_valid_container:
+        try:
+            audio = mutagen.File(file_path)
+            if audio and audio.info:
+                audio_type = type(audio).__name__
+                if hasattr(audio.info, "length") and audio.info.length is not None:
+                    dur = float(audio.info.length)
+                    if math.isfinite(dur) and 0 < dur < 86400:
+                        duration_sec = dur
+                        is_valid_container = True
+        except Exception as e:
+            logger.debug(f"Mutagen validation error for '{file_path}': {e}")
 
-    if duration_sec <= 0 and shutil.which("ffprobe"):
+    # 3. If still unresolved / non-positive duration, fall back to ffprobe
+    if (not is_valid_container or duration_sec <= 0) and shutil.which("ffprobe"):
         try:
             cmd = [
                 "ffprobe",
@@ -118,18 +146,22 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
                 raise FFmpegExecutionError(f"File '{file_path}' contains no valid audio streams.")
 
             dur_str = probe_data.get("format", {}).get("duration", "0")
-            duration_sec = float(dur_str)
+            dur = float(dur_str)
+            if math.isfinite(dur) and dur > 0:
+                duration_sec = dur
+                is_valid_container = True
+                audio_type = audio_type or probe_data.get("format", {}).get("format_name", "audio")
         except Exception as e:
             if isinstance(e, FFmpegExecutionError):
                 raise
-            raise FFmpegExecutionError(f"FFprobe validation failed for '{file_path}': {e}")
+            logger.debug(f"FFprobe validation fallback failed for '{file_path}': {e}")
 
-    if not is_valid_container and duration_sec <= 0:
+    if not is_valid_container or duration_sec <= 0 or not math.isfinite(duration_sec):
         raise FFmpegExecutionError(f"Audio file '{file_path}' is invalid or contains no audio duration.")
 
     return {
         "valid": True,
-        "size_bytes": file_path.stat().st_size,
+        "size_bytes": file_size,
         "duration_seconds": float(duration_sec),
         "audio_type": audio_type,
     }

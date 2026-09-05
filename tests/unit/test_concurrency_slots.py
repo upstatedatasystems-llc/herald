@@ -138,7 +138,8 @@ def test_local_sqlite_single_slot_no_deadlock(db_session_factory, tmp_path, monk
 
     def mock_synth(text, output_path, voice=None, speed=None, timeout=None):
         Path(output_path).write_bytes(
-            b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            b"RIFF\xa4\x0c\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x80\x0c\x00\x00"
+            + (b"\x00" * 3200)
         )
 
     mock_kokoro.synthesize_chunk.side_effect = mock_synth
@@ -213,7 +214,8 @@ def test_local_sqlite_two_workers_two_slots_concurrency_bounded(
         with lock:
             active_in_kokoro -= 1
         Path(output_path).write_bytes(
-            b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            b"RIFF\xa4\x0c\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x80\x0c\x00\x00"
+            + (b"\x00" * 3200)
         )
 
     mock_kokoro = MagicMock(spec=KokoroClient)
