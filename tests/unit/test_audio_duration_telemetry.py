@@ -105,6 +105,72 @@ def test_rtf_derivation_from_corrected_duration():
     assert rtf_val_real == 2.26
 
 
+def test_wav_with_extra_riff_chunks_before_data(tmp_path):
+    """
+    Test Matrix C: WAV file containing additional chunks before 'data' (e.g. JUNK, LIST)
+    calculates duration accurately without assuming fixed 44-byte offset.
+    """
+    wav_path = tmp_path / "chunk_extra_chunks.wav"
+    sample_rate = 24000
+    channels = 1
+    sample_width = 2
+    num_frames = 24000
+    pcm_bytes = b"\x00" * (channels * sample_width * num_frames)
+
+    junk_payload = b"PADDING_DATA_IN_JUNK_CHUNK_FOR_METADATA_ALIGNMENT"
+    junk_chunk = b"JUNK" + struct.pack("<I", len(junk_payload)) + junk_payload
+    if len(junk_payload) % 2 == 1:
+        junk_chunk += b"\x00"
+
+    fmt_chunk = b"fmt \x10\x00\x00\x00\x01\x00" + struct.pack(
+        "<HIIHH", channels, sample_rate, sample_rate * channels * sample_width, channels * sample_width, sample_width * 8
+    )
+    data_chunk = b"data" + struct.pack("<I", len(pcm_bytes)) + pcm_bytes
+
+    riff_payload = fmt_chunk + junk_chunk + data_chunk
+    riff_header = b"RIFF" + struct.pack("<I", len(riff_payload) + 4) + b"WAVE"
+
+    wav_path.write_bytes(riff_header + riff_payload)
+
+    val = validate_audio_file(wav_path)
+    assert val["valid"] is True
+    assert val["audio_type"] == "WAVE"
+    assert val["duration_seconds"] == 1.0
+
+
+def test_wav_with_extra_riff_chunks_and_sentinel_streaming_header(tmp_path):
+    """
+    Test Matrix C+B: WAV file containing prepended JUNK chunk AND 0x7FFFFFFF streaming sentinel data header
+    still calculates exact 1.0s duration based on physical payload from data offset.
+    """
+    wav_path = tmp_path / "chunk_extra_streaming.wav"
+    sample_rate = 24000
+    channels = 1
+    sample_width = 2
+    num_frames = 24000
+    pcm_bytes = b"\x00" * (channels * sample_width * num_frames)
+
+    junk_payload = b"LIST_INFO_ALBUM_HERALD_PODCAST_AUTOMATION"
+    junk_chunk = b"LIST" + struct.pack("<I", len(junk_payload)) + junk_payload
+    if len(junk_payload) % 2 == 1:
+        junk_chunk += b"\x00"
+
+    fmt_chunk = b"fmt \x10\x00\x00\x00\x01\x00" + struct.pack(
+        "<HIIHH", channels, sample_rate, sample_rate * channels * sample_width, channels * sample_width, sample_width * 8
+    )
+    data_chunk = b"data" + struct.pack("<I", 0x7FFFFFFF) + pcm_bytes
+
+    riff_payload = fmt_chunk + junk_chunk + data_chunk
+    riff_header = b"RIFF" + struct.pack("<I", len(riff_payload) + 4) + b"WAVE"
+
+    wav_path.write_bytes(riff_header + riff_payload)
+
+    val = validate_audio_file(wav_path)
+    assert val["valid"] is True
+    assert val["audio_type"] == "WAVE"
+    assert pytest.approx(val["duration_seconds"], rel=1e-3) == 1.0
+
+
 def test_malformed_wav_controlled_failure(tmp_path):
     """Test that zero-byte or corrupt non-audio files raise FFmpegExecutionError cleanly."""
     empty_file = tmp_path / "empty.wav"

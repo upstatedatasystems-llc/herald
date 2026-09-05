@@ -65,6 +65,100 @@ def generate_silence_wav(output_path: Path, duration_seconds: float = 0.5, sampl
     return output_path
 
 
+def inspect_pcm_wav_file(file_path: Path) -> dict[str, Any] | None:
+    """
+    Safely inspect PCM WAV RIFF structure by locating chunks ('fmt ', 'data', etc.)
+    without assuming a fixed 44-byte header size.
+    Handles extra preceding chunks (JUNK, LIST, fact, etc.) and guards against
+    streaming sentinel headers (0x7FFFFFFF data sizes) by bounding the data payload
+    to physically available bytes from the actual data chunk offset.
+    """
+    try:
+        file_size = file_path.stat().st_size
+        if file_size < 12:
+            return None
+
+        with open(file_path, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12:
+                return None
+            riff, _, wave_tag = struct.unpack("<4sI4s", header)
+            if riff != b"RIFF" or wave_tag != b"WAVE":
+                return None
+
+            sample_rate = 0
+            num_channels = 0
+            bits_per_sample = 0
+            block_align = 0
+            data_found = False
+            actual_frames = 0
+
+            while f.tell() + 8 <= file_size:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                chunk_id, chunk_size = struct.unpack("<4sI", chunk_header)
+
+                if chunk_id == b"fmt ":
+                    fmt_data = f.read(chunk_size)
+                    if len(fmt_data) >= 14:
+                        _, num_channels, sample_rate, _, block_align = struct.unpack("<HHIIH", fmt_data[:14])
+                        if len(fmt_data) >= 16:
+                            bits_per_sample = struct.unpack("<H", fmt_data[14:16])[0]
+                        elif block_align > 0 and num_channels > 0:
+                            bits_per_sample = (block_align // num_channels) * 8
+                    if chunk_size % 2 == 1:
+                        f.seek(1, os.SEEK_CUR)
+                elif chunk_id == b"data":
+                    data_offset = f.tell()
+                    data_found = True
+                    bytes_per_sample = (bits_per_sample + 7) // 8 if bits_per_sample > 0 else 2
+                    bytes_per_frame = block_align if block_align > 0 else (num_channels * bytes_per_sample)
+                    if bytes_per_frame <= 0:
+                        bytes_per_frame = 2
+
+                    physical_available_bytes = max(0, file_size - data_offset)
+                    # If declared chunk size exceeds physically available bytes (e.g. streaming sentinel 0x7FFFFFFF),
+                    # clamp to physical bytes
+                    usable_data_bytes = min(chunk_size, physical_available_bytes)
+                    actual_frames = usable_data_bytes // bytes_per_frame
+                    break
+                else:
+                    # Skip non-data chunks (JUNK, LIST, fact, etc.), aligning to 2-byte boundary
+                    skip_bytes = chunk_size + (chunk_size % 2)
+                    if f.tell() + skip_bytes > file_size:
+                        f.seek(file_size)
+                        break
+                    f.seek(skip_bytes, os.SEEK_CUR)
+
+            if not data_found or sample_rate <= 0 or num_channels <= 0:
+                return None
+
+            dur = actual_frames / float(sample_rate)
+            if math.isfinite(dur) and dur > 0:
+                return {
+                    "valid": True,
+                    "sample_rate": sample_rate,
+                    "channels": num_channels,
+                    "frames": actual_frames,
+                    "duration_seconds": float(dur),
+                    "file_size": file_size,
+                }
+            elif math.isfinite(dur) and file_size <= 44:
+                return {
+                    "valid": True,
+                    "sample_rate": sample_rate,
+                    "channels": num_channels,
+                    "frames": actual_frames,
+                    "duration_seconds": float(dur),
+                    "file_size": file_size,
+                }
+            return None
+    except Exception as e:
+        logger.debug(f"WAV RIFF inspection exception for '{file_path}': {e}")
+        return None
+
+
 def validate_audio_file(file_path: Path) -> dict[str, Any]:
     """
     Validate that an audio file exists, is non-zero, contains valid audio streams,
@@ -93,26 +187,31 @@ def validate_audio_file(file_path: Path) -> dict[str, Any]:
             pass
 
     if is_wav:
-        try:
-            with wave.open(str(file_path), "rb") as w:
-                nframes = w.getnframes()
-                framerate = w.getframerate()
-                nchannels = w.getnchannels()
-                sampwidth = w.getsampwidth()
-                if framerate > 0 and nframes >= 0 and nchannels > 0 and sampwidth > 0:
-                    bytes_per_frame = nchannels * sampwidth
-                    max_possible_frames = max(0, file_size - 44) // bytes_per_frame
-                    # Guard against unfinalized/streaming chunk headers (e.g. 0x7FFFFFFF data chunk size)
-                    actual_frames = nframes
-                    if actual_frames > max_possible_frames:
-                        actual_frames = max_possible_frames
-                    dur = actual_frames / float(framerate)
-                    if math.isfinite(dur) and (dur > 0 or file_size <= 44):
-                        duration_sec = float(dur)
-                        is_valid_container = True
-                        audio_type = "WAVE"
-        except Exception as e:
-            logger.debug(f"Wave inspection error for '{file_path}': {e}")
+        wav_info = inspect_pcm_wav_file(file_path)
+        if wav_info and wav_info.get("duration_seconds") is not None:
+            dur = wav_info["duration_seconds"]
+            if math.isfinite(dur) and dur > 0:
+                duration_sec = dur
+                is_valid_container = True
+                audio_type = "WAVE"
+        if not is_valid_container:
+            try:
+                with wave.open(str(file_path), "rb") as w:
+                    nframes = w.getnframes()
+                    framerate = w.getframerate()
+                    nchannels = w.getnchannels()
+                    sampwidth = w.getsampwidth()
+                    if framerate > 0 and nframes >= 0 and nchannels > 0 and sampwidth > 0:
+                        bytes_per_frame = nchannels * sampwidth
+                        max_possible_frames = max(0, file_size - 44) // bytes_per_frame
+                        actual_frames = min(nframes, max_possible_frames)
+                        dur = actual_frames / float(framerate)
+                        if math.isfinite(dur) and (dur > 0 or file_size <= 44):
+                            duration_sec = float(dur)
+                            is_valid_container = True
+                            audio_type = "WAVE"
+            except Exception as e:
+                logger.debug(f"Wave fallback inspection error for '{file_path}': {e}")
 
     # 2. For non-WAV formats (or if wave failed), use Mutagen metadata
     if not is_valid_container:
