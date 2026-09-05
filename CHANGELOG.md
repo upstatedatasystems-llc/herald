@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - 2026-09-05
 
 ### Fixed
-- **Voice-Selection UX & HTML Safety**: Integrated voice picker into the `/settings` interface via interactive inline keyboard (`🎙 Set Voice`), added direct voice switching (`[ Use <Name> ]`), and enforced HTML-safe entity escaping on all user and voice metadata to eliminate Telegram API parse errors.
-- **Gemini Script-Output Truncation & Diagnostics**: Added `GEMINI_SCRIPT_MAX_OUTPUT_TOKENS` (default 16,384) with model-aware `thinkingBudget` for Gemini 2.5/3.x reasoning models, precise `OUTPUT_TRUNCATED` error categorization upon token limit exhaustion, and adaptive token budget doubling without redundant JSON repair prompts.
-- **WAV Chunk-Duration Telemetry**: Replaced generic container metadata parsing with authoritative WAV header inspection (`frame_count / sample_rate`) bounded by actual file payload size, eliminating spurious ~89,478.5s duration artifacts caused by unfinalized streaming chunk headers.
+- **Voice-Selection UX & Media-Aware Callback Safety**: Integrated voice picker into the `/settings` interface (`🎙 Set Voice`), enforced HTML-safe entity escaping across all dynamic user/voice metadata, delivered clean sample audio without redundant inline keyboards, and added media-aware callback handling to prevent invalid `editMessageText` calls on audio messages.
+- **Gemini Thinking Model Contracts & Token Ceilings**: Configured Gemini 3.x script generation with `thinkingLevel: "low"` and Gemini 2.5 with numeric `thinkingBudget: 1024`, preserved default unconstrained reasoning for Research mode, bounded adaptive retries strictly by model capability ceilings (e.g. 65,536 for 3.x/2.5; 8,192 for 1.5/2.0), and prevented identical retries when already at the ceiling.
+- **Safe Numeric Diagnostic Telemetry**: Added narrow safe exception for numeric AI token telemetry (`thought_tokens`, `requested_max_output_tokens`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `finish_reason`) so support diagnostics remain visible while broad credential redaction (`api_token`, `access_token`, `telegram_bot_token`, etc.) remains strictly enforced.
+- **Multi-Chunk WAV Duration Calculation**: Implemented dynamic RIFF chunk parsing to accurately locate audio `data` chunks past prepended metadata chunks (JUNK, LIST, fact), removing fixed 44-byte header assumptions while maintaining protection against Kokoro streaming sentinel headers (`0x7FFFFFFF`).
 
 ## [0.2.0] - 2026-09-04
 

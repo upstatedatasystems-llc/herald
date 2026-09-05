@@ -363,3 +363,58 @@ def test_legacy_voices_command_alias(db_session):
     sent_markup = mock_client.send_message.call_args[1]["reply_markup"]
     assert "Herald Voice Catalog" in sent_text
     assert any(b.get("callback_data") == "h2:settings:main" for row in sent_markup["inline_keyboard"] for b in row)
+
+
+def test_voice_sample_audio_delivery_clean_and_media_callback_safe(db_session, monkeypatch, tmp_path):
+    """
+    Test that:
+    1. Sample delivery does not attach redundant inline keyboards to audio messages.
+    2. Any callback originating from a media/audio message updates voice preferences safely without calling editMessageText.
+    """
+    monkeypatch.setenv("HERALD_MOCK_TTS", "1")
+    monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
+    monkeypatch.setattr("herald.services.voice_manager.settings.HERALD_WORK_DIR", str(tmp_path))
+
+    code = generate_pairing_code(db_session)
+    verify_and_claim_pairing_code(db_session, code, user_id=77777, chat_id=77777, username="owner")
+
+    # Seed sample audio (filename is sample_<voice>.mp3)
+    sample_file = tmp_path / "voice_samples" / "sample_af_sarah.mp3"
+    sample_file.parent.mkdir(parents=True, exist_ok=True)
+    sample_file.write_bytes(b"dummy audio data for sample")
+
+    mock_client = MagicMock(spec=TelegramClient)
+
+    # 1. Trigger sample delivery
+    cb_sample = {
+        "id": "cb-sample-1",
+        "from": {"id": 77777},
+        "message": {"message_id": 950, "chat": {"id": 77777, "type": "private"}, "text": "Catalog"},
+        "data": "h2:voice:sample:af_sarah",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_sample)
+
+    assert mock_client.send_audio.called
+    audio_kwargs = mock_client.send_audio.call_args[1]
+    assert audio_kwargs.get("reply_markup") is None  # Clean audio delivery without inline buttons
+
+    # 2. Callback from media/audio message (e.g. without 'text' field)
+    cb_media_set = {
+        "id": "cb-sample-2",
+        "from": {"id": 77777},
+        "message": {
+            "message_id": 951,
+            "chat": {"id": 77777, "type": "private"},
+            "audio": {"file_id": "aud123"},  # Non-text audio message
+        },
+        "data": "h2:voice:set:af_sarah",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_media_set)
+
+    # Must set preference and answer callback query
+    assert mock_client.answer_callback_query.called
+    from herald.telegram.auth import get_effective_user_preferences
+    prefs = get_effective_user_preferences(db_session, 77777)
+    assert prefs["default_voice"] == "af_sarah"
+    # edit_message_text must NOT be called on non-text audio message!
+    assert not mock_client.edit_message_text.called

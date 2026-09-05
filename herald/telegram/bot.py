@@ -1179,18 +1179,21 @@ def handle_telegram_callback_query(
         meta = VOICE_METADATA.get(v_name, {})
         disp_name = meta.get("display_name", v_name)
         client.answer_callback_query(cb_id, text=f"Default voice set to {disp_name} ({v_name}).")
-        voices_text, reply_markup = format_voices_browser(current_default=v_name)
-        try:
-            client.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=voices_text,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-            )
-        except Exception as e:
-            if "message is not modified" not in str(e).lower():
-                logger.debug(f"Failed to edit voices browser: {e}")
+
+        # Only edit message if callback originated from an editable text message (e.g. voice browser)
+        if isinstance(message, dict) and "text" in message:
+            voices_text, reply_markup = format_voices_browser(current_default=v_name)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=voices_text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e).lower():
+                    logger.debug(f"Failed to edit voices browser: {e}")
         return
 
     elif raw_data.startswith("h2:voice:sample:"):
@@ -1204,18 +1207,7 @@ def handle_telegram_callback_query(
         disp_name = meta.get("display_name", v_name)
         sample_path = get_voice_sample_path(v_name)
 
-        sample_markup = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": f"⭐ Set as Default ({disp_name})",
-                        "callback_data": f"h2:voice:set:{v_name}",
-                    }
-                ]
-            ]
-        }
-
-        # Cache hit: fast immediate delivery
+        # Cache hit: fast immediate delivery (voice selection kept in voice browser)
         if is_valid_sample_audio(sample_path):
             client.answer_callback_query(cb_id, text=f"Playing sample for {disp_name}...")
             caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
@@ -1226,7 +1218,6 @@ def handle_telegram_callback_query(
                 performer="Herald",
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=sample_markup,
             )
             return
 
@@ -1259,16 +1250,6 @@ def handle_telegram_callback_query(
                 v_meta = VOICE_METADATA.get(target_voice, {})
                 d_name = v_meta.get("display_name", target_voice)
                 cap = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(target_voice)}</code> ({html.escape(d_name)})\nSpeed: 1.0x"
-                m_up = {
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": f"⭐ Set as Default ({d_name})",
-                                "callback_data": f"h2:voice:set:{target_voice}",
-                            }
-                        ]
-                    ]
-                }
                 client.send_audio(
                     chat_id=target_chat_id,
                     audio_path=gen_path,
@@ -1276,7 +1257,6 @@ def handle_telegram_callback_query(
                     performer="Herald",
                     caption=cap,
                     parse_mode="HTML",
-                    reply_markup=m_up,
                 )
             except Exception as e:
                 logger.error(
