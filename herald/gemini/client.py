@@ -837,6 +837,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
         base_max_tokens = getattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384) or 16384
 
     current_max_tokens = min(base_max_tokens, model_ceiling) if model_ceiling is not None else base_max_tokens
+    truncation_budget_retry_used = False
 
     for attempt in range(1, max_attempts + 1):
         t0 = datetime.now(UTC)
@@ -946,58 +947,13 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
             candidates = result_json.get("candidates", [])
             if not candidates:
-                err_msg = "Gemini API returned no response candidates."
-                _record_gemini_interaction(
-                    job_id=job_id,
-                    model=model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=t1,
-                    success=False,
-                    http_status=resp.status_code,
-                    attempt=attempt,
-                    input_chars=len(prompt_content),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
-                    requested_max_output_tokens=current_max_tokens,
-                    request_evidence=request_evidence or None,
-                    error=err_msg,
-                    provider_request_id=req_id,
-                    metadata={"mode": mode_clean},
-                )
-                interaction_recorded = True
-                raise GeminiValidationError(err_msg)
+                raise GeminiValidationError("Gemini API returned no response candidates.")
 
             candidate = candidates[0]
             finish_reason = candidate.get("finishReason") or candidate.get("finish_reason") or "STOP"
             parts = candidate.get("content", {}).get("parts", [])
-            if not parts or "text" not in parts[0]:
-                err_msg = "Gemini candidate content missing text part."
-                _record_gemini_interaction(
-                    job_id=job_id,
-                    model=model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=t1,
-                    success=False,
-                    http_status=resp.status_code,
-                    attempt=attempt,
-                    input_chars=len(prompt_content),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
-                    requested_max_output_tokens=current_max_tokens,
-                    request_evidence=request_evidence or None,
-                    finish_reason=finish_reason,
-                    error=err_msg,
-                    provider_request_id=req_id,
-                    metadata={"mode": mode_clean, "finish_reason": finish_reason},
-                )
-                interaction_recorded = True
-                raise GeminiValidationError(err_msg)
+            if not parts or "text" not in parts[0] or not parts[0].get("text", "").strip():
+                raise GeminiValidationError("Gemini candidate content missing text part.")
 
             raw_text = parts[0]["text"]
             script_data = json.loads(raw_text)
@@ -1036,12 +992,17 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             if not interaction_recorded:
                 t1 = datetime.now(UTC)
                 is_trunc = f_reason == "MAX_TOKENS"
-                err_to_record = (
-                    GeminiOutputTruncatedError(f"Gemini output truncated by max_output_tokens limit ({current_max_tokens} tokens, finishReason=MAX_TOKENS): {e}")
-                    if is_trunc
-                    else e
-                )
-                err_category = "OUTPUT_TRUNCATED" if is_trunc else "SCHEMA_VALIDATION_ERROR"
+                if is_trunc:
+                    err_to_record = GeminiOutputTruncatedError(
+                        f"Gemini output truncated by max_output_tokens limit ({current_max_tokens} tokens, finishReason=MAX_TOKENS): {e}"
+                    )
+                    err_category = "OUTPUT_TRUNCATED"
+                elif not cand_list:
+                    err_to_record = e
+                    err_category = "EMPTY_RESPONSE"
+                else:
+                    err_to_record = e
+                    err_category = "SCHEMA_VALIDATION_ERROR"
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
@@ -1071,13 +1032,14 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 logger.warning(
                     f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{max_attempts}: {e}"
                 )
-                if mode_clean != "research" and model_ceiling is not None:
+                if mode_clean != "research" and model_ceiling is not None and not truncation_budget_retry_used:
                     next_tokens = min(current_max_tokens * 2, model_ceiling)
                     if next_tokens > current_max_tokens and attempt < max_attempts:
                         logger.info(
                             f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens (ceiling: {model_ceiling})"
                         )
                         current_max_tokens = next_tokens
+                        truncation_budget_retry_used = True
                         time.sleep(backoff)
                         backoff *= 2.0
                         continue

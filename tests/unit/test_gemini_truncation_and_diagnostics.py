@@ -646,3 +646,92 @@ def test_thinking_telemetry_recorded_in_request_evidence(monkeypatch):
     assert req_ev["thinking_level"] == "low"
     meta = recorded[0]["metadata"]
     assert meta["thinking_level"] == "low"
+
+
+def test_double_max_tokens_stops_at_two_requests_and_fails(monkeypatch):
+    """
+    Test Requirement 2:
+    Attempt 1: 16384 -> MAX_TOKENS
+    Attempt 2: 32768 -> MAX_TOKENS
+    -> Fails immediately with GeminiOutputTruncatedError
+    -> Exactly 2 API requests (does NOT make a 3rd request with 65536 despite retry count = 3).
+    """
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
+    monkeypatch.setattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384)
+    monkeypatch.setattr(settings, "GEMINI_RETRY_COUNT", 3)
+
+    resp_trunc1 = _make_gemini_response(
+        raw_text='{"episode_title": "Truncated 1...',
+        finish_reason="MAX_TOKENS",
+    )
+    resp_trunc2 = _make_gemini_response(
+        raw_text='{"episode_title": "Truncated 2...',
+        finish_reason="MAX_TOKENS",
+    )
+
+    posted_payloads = []
+
+    def mock_post(url, json=None, headers=None):
+        posted_payloads.append(json)
+        if len(posted_payloads) == 1:
+            return resp_trunc1
+        return resp_trunc2
+
+    with patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep"):
+        with pytest.raises(GeminiOutputTruncatedError) as exc_info:
+            generate_podcast_script(source_text="Long text", request_mode="standard")
+
+    # Exactly 2 requests: 16384, then 32768
+    assert len(posted_payloads) == 2
+    assert posted_payloads[0]["generationConfig"]["maxOutputTokens"] == 16384
+    assert posted_payloads[1]["generationConfig"]["maxOutputTokens"] == 32768
+    assert "finishReason=MAX_TOKENS" in str(exc_info.value)
+
+
+def test_max_tokens_with_empty_or_missing_parts_classified_as_output_truncated(monkeypatch):
+    """
+    Test Requirement 3:
+    Gemini response with finishReason=MAX_TOKENS and empty parts array
+    must record AI interaction with error_category = 'OUTPUT_TRUNCATED' and finish_reason = 'MAX_TOKENS'.
+    """
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
+    monkeypatch.setattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384)
+    monkeypatch.setattr(settings, "GEMINI_RETRY_COUNT", 1)
+
+    empty_parts_body = {
+        "candidates": [
+            {
+                "content": {"parts": [], "role": "model"},
+                "finishReason": "MAX_TOKENS",
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 2000,
+            "candidatesTokenCount": 1000,
+            "totalTokenCount": 3000,
+            "thoughtsTokenCount": 500,
+        },
+    }
+    resp_empty_parts = httpx.Response(200, json=empty_parts_body)
+
+    recorded_calls = []
+
+    def mock_record(*args, **kwargs):
+        recorded_calls.append(kwargs)
+
+    with patch("httpx.Client.post", return_value=resp_empty_parts), \
+         patch("herald.gemini.client.record_ai_interaction", side_effect=mock_record), \
+         patch("time.sleep"):
+        with pytest.raises(GeminiOutputTruncatedError):
+            generate_podcast_script(source_text="Test source", request_mode="standard", job_id="job-empty-parts-1")
+
+    assert len(recorded_calls) >= 1
+    rec = recorded_calls[0]
+    assert rec["success"] is False
+    assert rec["error_category"] == "OUTPUT_TRUNCATED"
+    assert rec["metadata"]["finish_reason"] == "MAX_TOKENS"
+    assert rec["metadata"]["requested_max_output_tokens"] == 16384
+    assert rec["metadata"]["thought_tokens"] == 500
