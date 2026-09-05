@@ -81,21 +81,51 @@ class GeminiOutputTruncatedError(GeminiError):
     """Model output was cut off by the configured token limit (finishReason=MAX_TOKENS)."""
 
 
-def supports_thinking_budget(model_name: str | None) -> bool:
+def build_script_thinking_config(
+    model_name: str | None,
+    request_mode: str | None = "standard",
+) -> dict[str, Any] | None:
     """
-    Check if a Gemini model supports thinkingConfig (e.g. gemini-2.5, gemini-3.5, *thinking*).
-    Older models like gemini-1.5-flash / gemini-1.0 do NOT support thinkingConfig and will reject it.
+    Build model-appropriate thinkingConfig for script generation.
+    - Brief/Standard + Gemini 3.x -> {"thinkingLevel": "low"}
+    - Brief/Standard + Gemini 2.5 -> {"thinkingBudget": 1024}
+    - Research mode -> None (preserves model's default reasoning behavior without forcing LOW thinking)
+    - Older/unsupported/unknown models -> None (omitted cleanly)
+    """
+    mode_clean = (request_mode or "standard").lower().strip()
+    if mode_clean == "research":
+        return None
+
+    if not model_name:
+        return None
+
+    m = model_name.lower().strip()
+    if "gemini-3." in m or "gemini-3" in m:
+        return {"thinkingLevel": "low"}
+    elif "gemini-2.5" in m or "gemini-2.0-flash-thinking" in m:
+        return {"thinkingBudget": 1024}
+    return None
+
+
+def get_gemini_max_output_tokens_ceiling(model_name: str | None) -> int:
+    """
+    Determine authoritative maximum output token ceiling based on Gemini model family.
+    - Gemini 3.x / Gemini 2.5: 65,536 tokens
+    - Gemini 2.0 / Gemini 1.5: 8,192 tokens
+    - Gemini 1.0 / Gemini Pro: 4,096 tokens
+    - Unknown/unspecified: 8,192 tokens
     """
     if not model_name:
-        return True
+        return 16384
     m = model_name.lower().strip()
-    if "gemini-1.5" in m or "gemini-1.0" in m or m == "gemini-pro":
-        return False
-    if "gemini-2.5" in m or "gemini-3." in m or "thinking" in m or "gemini-2.0-flash-thinking" in m:
-        return True
-    if m.startswith("gemini-2."):
-        return True
-    return False
+    if "gemini-3." in m or "gemini-3" in m or "gemini-2.5" in m:
+        return 65536
+    elif "gemini-2.0" in m or "gemini-1.5" in m:
+        return 8192
+    elif "gemini-1.0" in m or m == "gemini-pro":
+        return 4096
+    return 8192
+
 
 
 def _record_gemini_interaction(
@@ -799,7 +829,6 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     last_finish_reason = ""
 
     base_max_tokens = getattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384) or getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 4096) or 16384
-    MAX_SCRIPT_OUTPUT_CEILING = 65536
     current_max_tokens = base_max_tokens
 
     for attempt in range(1, max_attempts + 1):
@@ -817,8 +846,9 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 "responseMimeType": "application/json",
                 "responseSchema": schema_dict,
             }
-            if supports_thinking_budget(model):
-                gen_config["thinkingConfig"] = {"thinkingBudget": 1024}
+            thinking_cfg = build_script_thinking_config(model, request_mode=mode_clean)
+            if thinking_cfg:
+                gen_config["thinkingConfig"] = thinking_cfg
 
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": prompt_content}]}],
@@ -1020,9 +1050,13 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 logger.warning(
                     f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{max_attempts}: {e}"
                 )
-                if attempt < max_attempts:
-                    next_tokens = min(current_max_tokens * 2, MAX_SCRIPT_OUTPUT_CEILING)
-                    logger.info(f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens")
+                model_ceiling = get_gemini_max_output_tokens_ceiling(model)
+                effective_ceiling = max(base_max_tokens, model_ceiling)
+                next_tokens = min(current_max_tokens * 2, effective_ceiling)
+                if next_tokens > current_max_tokens and attempt < max_attempts:
+                    logger.info(
+                        f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens (ceiling: {effective_ceiling})"
+                    )
                     current_max_tokens = next_tokens
                     time.sleep(backoff)
                     backoff *= 2.0

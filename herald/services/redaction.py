@@ -133,10 +133,22 @@ def redact_text(text: str | None) -> str:
     return result
 
 
+# Safe numeric telemetry keys allowed through dictionary scrubbing when numeric or None
+SAFE_NUMERIC_TELEMETRY_KEYS = {
+    "prompt_tokens",
+    "completion_tokens",
+    "candidate_tokens",
+    "total_tokens",
+    "thought_tokens",
+    "requested_max_output_tokens",
+}
+
+
 def redact_dict(d: dict[str, Any] | None) -> dict[str, Any]:
     """
     Recursively scrub a metadata dictionary for sensitive keys and secret values.
     Used for arbitrary runtime/debug metadata.
+    Preserves exact numeric telemetry fields (e.g. thought_tokens, prompt_tokens) when numeric or None.
     """
     if not d or not isinstance(d, dict):
         return {}
@@ -144,7 +156,22 @@ def redact_dict(d: dict[str, Any] | None) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for k, v in d.items():
         k_str = str(k)
-        if any(bad in k_str.lower() for bad in SENSITIVE_METADATA_KEYS):
+        k_lower = k_str.lower()
+
+        # Narrow safe exception for exact numeric telemetry fields (integers, floats, None)
+        if k_lower in SAFE_NUMERIC_TELEMETRY_KEYS:
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cleaned[k_str] = v
+                continue
+            elif v is None:
+                cleaned[k_str] = None
+                continue
+            else:
+                # Disallow non-numeric values for token telemetry keys to prevent secret smuggling
+                cleaned[k_str] = "[REDACTED]"
+                continue
+
+        if any(bad in k_lower for bad in SENSITIVE_METADATA_KEYS):
             cleaned[k_str] = "[REDACTED]"
         elif isinstance(v, dict):
             cleaned[k_str] = redact_dict(v)
@@ -176,7 +203,21 @@ def sanitize_content_dict(d: dict[str, Any] | None) -> dict[str, Any]:
     credential_keys = {"api_key", "token", "secret", "password", "credential", "auth", "authorization", "bot_token"}
     for k, v in d.items():
         k_str = str(k)
-        if any(bad in k_str.lower() for bad in credential_keys):
+        k_lower = k_str.lower()
+
+        # Narrow safe exception for exact numeric telemetry fields
+        if k_lower in SAFE_NUMERIC_TELEMETRY_KEYS:
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cleaned[k_str] = v
+                continue
+            elif v is None:
+                cleaned[k_str] = None
+                continue
+            else:
+                cleaned[k_str] = "[REDACTED]"
+                continue
+
+        if any(bad in k_lower for bad in credential_keys):
             cleaned[k_str] = "[REDACTED]"
         elif isinstance(v, dict):
             cleaned[k_str] = sanitize_content_dict(v)

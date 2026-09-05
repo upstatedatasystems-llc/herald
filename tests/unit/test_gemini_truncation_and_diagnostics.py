@@ -9,15 +9,24 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from herald.config import settings
+from herald.core.pipeline import process_herald_request
+from herald.db.models import Base, JobState, PodcastJob
 from herald.gemini.client import (
     GeminiOutputTruncatedError,
     _extract_tokens,
+    build_script_thinking_config,
     generate_podcast_script,
-    supports_thinking_budget,
+    get_gemini_max_output_tokens_ceiling,
 )
-from herald.services.redaction import sanitize_error
+from herald.services.redaction import (
+    redact_dict,
+    sanitize_content_dict,
+    sanitize_error,
+)
 
 
 def _make_gemini_response(
@@ -100,20 +109,50 @@ def test_extract_tokens_includes_thought_tokens():
     assert _extract_tokens(None) == (None, None, None, None)
 
 
-def test_supports_thinking_budget():
-    """Test model capability helper for thinking config support."""
-    assert supports_thinking_budget("gemini-3.5-flash") is True
-    assert supports_thinking_budget("gemini-2.5-flash") is True
-    assert supports_thinking_budget("gemini-2.5-pro") is True
-    assert supports_thinking_budget("gemini-2.0-flash-thinking-exp") is True
-    assert supports_thinking_budget("gemini-1.5-flash") is False
-    assert supports_thinking_budget("gemini-1.5-pro") is False
-    assert supports_thinking_budget("gemini-1.0-pro") is False
-
-
-def test_case_a_normal_valid_gemini_json(monkeypatch):
+def test_build_script_thinking_config_matrix():
     """
-    Test Matrix A: Normal valid Gemini JSON with finishReason=STOP succeeds on first attempt.
+    Test model contract for thinking configuration:
+    - Brief + Gemini 3.x -> thinkingLevel=low
+    - Standard + Gemini 3.x -> thinkingLevel=low
+    - Brief/Standard + Gemini 2.5 -> thinkingBudget=1024
+    - Research mode -> None (never forced to LOW thinking)
+    - Unsupported/older models -> None
+    """
+    # 1. Gemini 3.x in brief/standard
+    assert build_script_thinking_config("gemini-3.5-flash", "brief") == {"thinkingLevel": "low"}
+    assert build_script_thinking_config("gemini-3.5-flash", "standard") == {"thinkingLevel": "low"}
+    assert build_script_thinking_config("gemini-3.0-pro", "standard") == {"thinkingLevel": "low"}
+
+    # 2. Gemini 2.5 in brief/standard
+    assert build_script_thinking_config("gemini-2.5-flash", "brief") == {"thinkingBudget": 1024}
+    assert build_script_thinking_config("gemini-2.5-flash", "standard") == {"thinkingBudget": 1024}
+    assert build_script_thinking_config("gemini-2.5-pro", "standard") == {"thinkingBudget": 1024}
+    assert build_script_thinking_config("gemini-2.0-flash-thinking-exp", "standard") == {"thinkingBudget": 1024}
+
+    # 3. Research mode MUST NOT receive LOW thinking override
+    assert build_script_thinking_config("gemini-3.5-flash", "research") is None
+    assert build_script_thinking_config("gemini-2.5-flash", "research") is None
+
+    # 4. Older/unsupported models
+    assert build_script_thinking_config("gemini-1.5-flash", "standard") is None
+    assert build_script_thinking_config("gemini-1.5-pro", "brief") is None
+    assert build_script_thinking_config("gemini-1.0-pro", "standard") is None
+    assert build_script_thinking_config("unknown-model", "standard") is None
+    assert build_script_thinking_config(None, "standard") is None
+
+
+def test_get_gemini_max_output_tokens_ceiling():
+    """Test model family token ceilings."""
+    assert get_gemini_max_output_tokens_ceiling("gemini-3.5-flash") == 65536
+    assert get_gemini_max_output_tokens_ceiling("gemini-2.5-pro") == 65536
+    assert get_gemini_max_output_tokens_ceiling("gemini-1.5-flash") == 8192
+    assert get_gemini_max_output_tokens_ceiling("gemini-1.0-pro") == 4096
+    assert get_gemini_max_output_tokens_ceiling("custom-unknown") == 8192
+
+
+def test_case_a_normal_valid_gemini_json_gemini_3x(monkeypatch):
+    """
+    Test Matrix A: Normal valid Gemini JSON with gemini-3.5-flash sends thinkingLevel=low.
     """
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
     monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
@@ -129,14 +168,14 @@ def test_case_a_normal_valid_gemini_json(monkeypatch):
 
     with patch("httpx.Client.post", side_effect=mock_post), \
          patch("herald.gemini.client.record_ai_interaction") as mock_record:
-        res = generate_podcast_script(source_text="Test source text", job_id="test-job-1")
+        res = generate_podcast_script(source_text="Test source text", request_mode="standard", job_id="test-job-1")
 
     assert res.episode_title == "Test Episode"
     assert len(posted_payloads) == 1
-    # Verify thinking config is present for gemini-3.5-flash
+    # Verify thinkingLevel: low is sent for gemini-3.5-flash
     gen_cfg = posted_payloads[0]["generationConfig"]
     assert gen_cfg["maxOutputTokens"] == 16384
-    assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 1024}
+    assert gen_cfg["thinkingConfig"] == {"thinkingLevel": "low"}
 
     # Verify telemetry recorded
     assert mock_record.called
@@ -238,29 +277,86 @@ def test_case_c_and_d_truncated_json_adaptive_retry(monkeypatch):
     assert rec1["metadata"]["thought_tokens"] == 2000
 
 
-def test_case_e_repeated_truncation_fails_as_output_truncated(monkeypatch):
+def test_case_e_already_at_ceiling_fails_without_identical_retry(monkeypatch):
     """
-    Test Matrix E: Repeated truncation across all retry attempts results in a controlled
-    GeminiOutputTruncatedError rather than generic schema error.
+    Test that when already at the model output token ceiling (65536) and finishReason=MAX_TOKENS,
+    it does NOT issue a second request at the identical ceiling and fails immediately as GeminiOutputTruncatedError.
     """
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
     monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
-    monkeypatch.setattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 16384)
-    monkeypatch.setattr(settings, "GEMINI_RETRY_COUNT", 2)
+    monkeypatch.setattr(settings, "GEMINI_SCRIPT_MAX_OUTPUT_TOKENS", 65536)
+    monkeypatch.setattr(settings, "GEMINI_RETRY_COUNT", 3)
 
     resp_trunc = _make_gemini_response(
         raw_text='{"episode_title": "Never finishes...',
         finish_reason="MAX_TOKENS",
     )
 
-    with patch("httpx.Client.post", return_value=resp_trunc), \
+    posted_calls = []
+
+    def mock_post(url, json=None, headers=None):
+        posted_calls.append(json)
+        return resp_trunc
+
+    with patch("httpx.Client.post", side_effect=mock_post), \
          patch("time.sleep"):
         with pytest.raises(GeminiOutputTruncatedError) as exc_info:
             generate_podcast_script(source_text="Massive article", job_id="test-job-4")
 
+    # Only 1 call should have been made because doubling 65536 exceeds model ceiling 65536
+    assert len(posted_calls) == 1
     assert "finishReason=MAX_TOKENS" in str(exc_info.value)
     cat, msg = sanitize_error(exc_info.value)
     assert cat == "OUTPUT_TRUNCATED"
+
+
+def test_gemini_script_thinking_gemini_25(monkeypatch):
+    """
+    Test that Gemini 2.5 uses numeric thinkingBudget: 1024.
+    """
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+
+    mock_resp = _make_gemini_response(finish_reason="STOP")
+    posted_payloads = []
+
+    def mock_post(url, json=None, headers=None):
+        posted_payloads.append(json)
+        return mock_resp
+
+    with patch("httpx.Client.post", side_effect=mock_post):
+        generate_podcast_script(source_text="Test source text", request_mode="standard", job_id="test-job-5")
+
+    assert len(posted_payloads) == 1
+    gen_cfg = posted_payloads[0]["generationConfig"]
+    assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 1024}
+
+
+def test_gemini_script_thinking_omitted_for_research(monkeypatch):
+    """
+    Test that Research mode script generation does NOT have LOW thinkingConfig forced upon it.
+    """
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
+
+    mock_resp = _make_gemini_response(finish_reason="STOP")
+    posted_payloads = []
+
+    def mock_post(url, json=None, headers=None):
+        posted_payloads.append(json)
+        return mock_resp
+
+    with patch("httpx.Client.post", side_effect=mock_post):
+        generate_podcast_script(
+            source_text="Test source text",
+            request_mode="research",
+            research_dossier={"summary": "Detailed research dossier"},
+            job_id="test-job-6",
+        )
+
+    assert len(posted_payloads) == 1
+    gen_cfg = posted_payloads[0]["generationConfig"]
+    assert "thinkingConfig" not in gen_cfg
 
 
 def test_gemini_script_thinking_omitted_for_unsupported_models(monkeypatch):
@@ -280,8 +376,104 @@ def test_gemini_script_thinking_omitted_for_unsupported_models(monkeypatch):
         return mock_resp
 
     with patch("httpx.Client.post", side_effect=mock_post):
-        generate_podcast_script(source_text="Test source text", job_id="test-job-5")
+        generate_podcast_script(source_text="Test source text", job_id="test-job-7")
 
     assert len(posted_payloads) == 1
     gen_cfg = posted_payloads[0]["generationConfig"]
     assert "thinkingConfig" not in gen_cfg
+
+
+def test_safe_numeric_telemetry_and_credential_redaction():
+    """
+    Test safe numeric telemetry allowlist:
+    SAFE:
+    - thought_tokens: 1500
+    - requested_max_output_tokens: 16384
+    - prompt_tokens: 3226
+    - completion_tokens: 1200
+    - total_tokens: 4426
+    - finish_reason: "MAX_TOKENS"
+
+    UNSAFE:
+    - access_token: "abc123"
+    - api_token: "abc123"
+    - telegram_bot_token: "abc123"
+    - prompt_tokens: "injected_string" (non-numeric token key)
+    """
+    raw_meta = {
+        "thought_tokens": 1500,
+        "requested_max_output_tokens": 16384,
+        "prompt_tokens": 3226,
+        "completion_tokens": 1200,
+        "total_tokens": 4426,
+        "finish_reason": "MAX_TOKENS",
+        "access_token": "secret_access_token_value",
+        "api_token": "secret_api_token_value",
+        "telegram_bot_token": "secret_bot_token_value",
+        "candidate_tokens": None,
+    }
+
+    clean = redact_dict(raw_meta)
+
+    # Safe numeric values preserved
+    assert clean["thought_tokens"] == 1500
+    assert clean["requested_max_output_tokens"] == 16384
+    assert clean["prompt_tokens"] == 3226
+    assert clean["completion_tokens"] == 1200
+    assert clean["total_tokens"] == 4426
+    assert clean["candidate_tokens"] is None
+    assert clean["finish_reason"] == "MAX_TOKENS"
+
+    # Credentials redacted
+    assert clean["access_token"] == "[REDACTED]"
+    assert clean["api_token"] == "[REDACTED]"
+    assert clean["telegram_bot_token"] == "[REDACTED]"
+
+    # Non-numeric string in token telemetry key redacted
+    smuggle_dict = {"prompt_tokens": "smuggled_string_value"}
+    clean_smuggle = redact_dict(smuggle_dict)
+    assert clean_smuggle["prompt_tokens"] == "[REDACTED]"
+
+    # Test sanitize_content_dict
+    clean_content = sanitize_content_dict(raw_meta)
+    assert clean_content["thought_tokens"] == 1500
+    assert clean_content["requested_max_output_tokens"] == 16384
+    assert clean_content["access_token"] == "[REDACTED]"
+
+
+def test_pipeline_output_truncated_propagation(monkeypatch):
+    """
+    Test pipeline-level propagation: when Gemini fails with GeminiOutputTruncatedError,
+    the job state transitions to FAILED_FINAL with error_code = OUTPUT_TRUNCATED,
+    and SCRIPTING_FAILED diagnostic event records error_category = OUTPUT_TRUNCATED.
+    """
+    from herald.core.pipeline import HeraldRequest
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "dummy_key")
+    monkeypatch.setattr(settings, "AI_PROVIDER", "gemini")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine)
+    db = TestingSession()
+
+    def mock_trunc_gen(*args, **kwargs):
+        raise GeminiOutputTruncatedError("Gemini output truncated by max_output_tokens limit (finishReason=MAX_TOKENS)")
+
+    with patch("herald.gemini.client.generate_podcast_script", side_effect=mock_trunc_gen):
+        req = HeraldRequest(
+            source_text="Some long source article text",
+            request_mode="standard",
+        )
+        resp = process_herald_request(db=db, req=req)
+
+    assert resp.status == JobState.FAILED_FINAL.value
+    assert "truncated" in resp.message.lower()
+
+    # Query DB job
+    job = db.query(PodcastJob).filter_by(id=resp.job_id).first()
+    assert job is not None
+    assert job.status == JobState.FAILED_FINAL.value
+    assert job.error_code == "OUTPUT_TRUNCATED"
+    assert "truncated" in job.error_detail.lower()
+    db.close()
