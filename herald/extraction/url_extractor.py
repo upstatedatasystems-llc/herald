@@ -15,6 +15,10 @@ class ArticleExtractionError(Exception):
     """Raised when an article URL cannot be fetched or contains insufficient content."""
 
 
+class DNSResolutionError(ArticleExtractionError):
+    """Raised when DNS resolution for a URL hostname fails (network/retrieval failure)."""
+
+
 class SourceAccessBlockedError(ArticleExtractionError):
     """Raised when access to an article URL is blocked by paywall, bot protection, interstitial, or publisher restrictions."""
 
@@ -60,7 +64,7 @@ def is_ip_allowed(ip_str: str) -> bool:
     return ip_clean not in ("169.254.169.254", "fd00:ec2::254")
 
 
-def validate_url_host(url: str) -> tuple[str, int, str]:
+def validate_url_host(url: str, dns_retries: int = 1) -> tuple[str, int, str]:
     """
     Validate URL scheme, credentials, port, and resolve all host IPs to prevent SSRF.
     Returns (hostname, port, primary_resolved_ip).
@@ -90,10 +94,20 @@ def validate_url_host(url: str) -> tuple[str, int, str]:
     except ValueError as ve:
         raise SSRFVulnerabilityError(f"Invalid URL port number: {ve}")
 
-    try:
-        addr_info = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        raise SSRFVulnerabilityError(f"DNS resolution failed for hostname '{hostname}': {e}")
+    last_gai_err = None
+    addr_info = None
+    max_attempts = max(1, dns_retries + 1)
+    for attempt in range(max_attempts):
+        try:
+            addr_info = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            break
+        except socket.gaierror as e:
+            last_gai_err = e
+            if attempt < max_attempts - 1:
+                time.sleep(0.5)
+
+    if addr_info is None:
+        raise DNSResolutionError(f"DNS lookup failed for hostname '{hostname}'.") from last_gai_err
 
     resolved_ips: list[str] = []
     for family, socktype, proto, canonname, sockaddr in addr_info:
@@ -106,7 +120,7 @@ def validate_url_host(url: str) -> tuple[str, int, str]:
             resolved_ips.append(ip_str)
 
     if not resolved_ips:
-        raise SSRFVulnerabilityError(f"Could not resolve valid public IP for host '{hostname}'")
+        raise DNSResolutionError(f"DNS lookup failed to resolve IP addresses for hostname '{hostname}'.")
 
     return hostname, port, resolved_ips[0]
 
@@ -262,7 +276,7 @@ def extract_article_from_url(
         try:
             validate_url_host(candidate_canonical)
             canonical_url = candidate_canonical
-        except SSRFVulnerabilityError:
+        except (SSRFVulnerabilityError, ArticleExtractionError):
             pass
 
     return title, full_text, canonical_url

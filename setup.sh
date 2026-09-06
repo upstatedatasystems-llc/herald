@@ -539,6 +539,8 @@ if [ -z "$(get_env_val "TELEGRAM_MAX_AUDIO_BYTES")" ]; then set_env_val "TELEGRA
 if [ -z "$(get_env_val "ALLOWED_VOICES")" ]; then set_env_val "ALLOWED_VOICES" "af_heart,af_bella,af_sarah,am_adam,am_michael"; fi
 if [ -z "$(get_env_val "KOKORO_VOICE")" ]; then set_env_val "KOKORO_VOICE" "af_heart"; fi
 if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"; fi
+if [ -z "$(get_env_val "HERALD_DNS_PRIMARY")" ]; then set_env_val "HERALD_DNS_PRIMARY" "1.1.1.1"; fi
+if [ -z "$(get_env_val "HERALD_DNS_SECONDARY")" ]; then set_env_val "HERALD_DNS_SECONDARY" "8.8.8.8"; fi
 
 echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
 

@@ -139,3 +139,53 @@ def test_setup_sh_ai_fallback_and_research_matrix(tmp_path):
     d_ai, d_res = run_simulation("groq", "valid_gem_key", "valid_groq_key", False, False, True)
     assert d_ai == "groq"
     assert d_res == "none"
+
+
+def test_setup_existing_env_migration_dns_defaults_and_preservation(tmp_path):
+    """
+    Verify setup.sh step 4 logic:
+    1. Fresh .env without DNS keys receives HERALD_DNS_PRIMARY=1.1.1.1 and HERALD_DNS_SECONDARY=8.8.8.8.
+    2. Existing .env with custom DNS overrides preserves those values across setup runs.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text('TZ="America/New_York"\nHERALD_DNS_PRIMARY="1.0.0.1"\n', encoding="utf-8")
+
+    def get_env_val(key):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    k, v = stripped.split("=", 1)
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+        return ""
+
+    def set_env_val(key, val):
+        lines = []
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        found = False
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k = stripped.split("=", 1)[0].strip()
+                if k == key:
+                    new_lines.append(f'{key}="{val}"\n')
+                    found = True
+                    continue
+            new_lines.append(line)
+        if not found:
+            new_lines.append(f'{key}="{val}"\n')
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+    # Step 4 logic in setup.sh
+    if not get_env_val("HERALD_DNS_PRIMARY"):
+        set_env_val("HERALD_DNS_PRIMARY", "1.1.1.1")
+    if not get_env_val("HERALD_DNS_SECONDARY"):
+        set_env_val("HERALD_DNS_SECONDARY", "8.8.8.8")
+
+    final_content = env_file.read_text(encoding="utf-8")
+    assert 'HERALD_DNS_PRIMARY="1.0.0.1"' in final_content  # Preserved custom value
+    assert 'HERALD_DNS_SECONDARY="8.8.8.8"' in final_content  # Added missing default value

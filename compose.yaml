@@ -81,6 +81,9 @@ services:
       dockerfile: docker/Dockerfile.worker
     container_name: herald-worker
     restart: unless-stopped
+    dns:
+      - ${HERALD_DNS_PRIMARY:-1.1.1.1}
+      - ${HERALD_DNS_SECONDARY:-8.8.8.8}
     security_opt:
       - no-new-privileges:true
     logging:
@@ -115,6 +118,9 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: herald-telegram-bot
     restart: unless-stopped
+    dns:
+      - ${HERALD_DNS_PRIMARY:-1.1.1.1}
+      - ${HERALD_DNS_SECONDARY:-8.8.8.8}
     command: ["python", "-u", "-m", "apps.telegram_bot.main"]
     security_opt:
       - no-new-privileges:true
@@ -152,6 +158,9 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: herald-api
     restart: unless-stopped
+    dns:
+      - ${HERALD_DNS_PRIMARY:-1.1.1.1}
+      - ${HERALD_DNS_SECONDARY:-8.8.8.8}
     security_opt:
       - no-new-privileges:true
     logging:

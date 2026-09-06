@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     HERALD_WORK_DIR: str = "/data/herald"
     HERALD_MIN_DISK_MB: int = 500
     HERALD_METRICS_ENABLED: bool = True
+    HERALD_DNS_PRIMARY: str = "1.1.1.1"
+    HERALD_DNS_SECONDARY: str = "8.8.8.8"
 
     # Concurrency Profile & Limits
     HERALD_CONCURRENCY_PROFILE: str = "auto"

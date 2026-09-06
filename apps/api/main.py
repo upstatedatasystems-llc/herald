@@ -31,6 +31,7 @@ from herald.extraction.email_parser import (
 from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
+    DNSResolutionError,
     SourceAccessBlockedError,
     SSRFVulnerabilityError,
     extract_article_from_url,
@@ -644,7 +645,55 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
                 failure_email_html=fail_email["html"],
                 error_category="SOURCE_ACCESS_BLOCKED",
             )
-        except (SSRFVulnerabilityError, ArticleExtractionError) as e:
+        except DNSResolutionError as de:
+            record_stage_metric(
+                job_id=job.id,
+                stage="URL_EXTRACTION",
+                started_at=t_url0,
+                finished_at=datetime.now(UTC),
+                status="failed",
+                metadata_json={"error": str(de), "category": "DNS_RESOLUTION_FAILURE"},
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(de), error_category="DNS_RESOLUTION_FAILURE"
+            )
+            fail_email = format_failure_email(job.id, source_url, "DNS_RESOLUTION_FAILURE", str(de))
+            return IntakeResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=False,
+                message=f"URL retrieval failed: {de}",
+                failure_email_text=fail_email["text"],
+                failure_email_html=fail_email["html"],
+                error_category="DNS_RESOLUTION_FAILURE",
+            )
+        except SSRFVulnerabilityError as se:
+            record_stage_metric(
+                job_id=job.id,
+                stage="URL_EXTRACTION",
+                started_at=t_url0,
+                finished_at=datetime.now(UTC),
+                status="failed",
+                metadata_json={"error": str(se), "category": "SSRF_PROTECTION"},
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(se), error_category="SSRF_PROTECTION"
+            )
+            fail_email = format_failure_email(job.id, source_url, "SSRF_PROTECTION", str(se))
+            return IntakeResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=False,
+                message=f"Security violation: {se}",
+                failure_email_text=fail_email["text"],
+                failure_email_html=fail_email["html"],
+                error_category="SSRF_PROTECTION",
+            )
+        except ArticleExtractionError as e:
             record_stage_metric(
                 job_id=job.id,
                 stage="URL_EXTRACTION",

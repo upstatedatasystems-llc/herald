@@ -41,3 +41,38 @@ def test_validate_url_host_blocks_localhost():
 
     with pytest.raises(SSRFVulnerabilityError, match="strictly prohibited"):
         validate_url_host("http://localhost.localdomain/api")
+
+
+def test_validate_url_host_blocks_credentials_and_ports():
+    with pytest.raises(SSRFVulnerabilityError, match="embedded user credentials"):
+        validate_url_host("https://user:pass@example.com/article")
+
+    with pytest.raises(SSRFVulnerabilityError, match="Invalid URL port number"):
+        validate_url_host("https://example.com:99999/article")
+
+
+def test_validate_url_host_dns_resolution_error_classification(monkeypatch):
+    import socket
+    from unittest.mock import patch
+    from herald.extraction.url_extractor import DNSResolutionError
+
+    def mock_gai_fail(host, port, family=0, type=0, proto=0, flags=0):
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", mock_gai_fail)
+
+    with patch("time.sleep", return_value=None):
+        with pytest.raises(DNSResolutionError, match="DNS lookup failed for hostname 'archive.ph'"):
+            validate_url_host("https://archive.ph/test", dns_retries=1)
+
+
+def test_validate_url_host_ssrf_prohibited_ip(monkeypatch):
+    import socket
+
+    def mock_metadata_ip(host, port, family=0, type=0, proto=0, flags=0):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", mock_metadata_ip)
+
+    with pytest.raises(SSRFVulnerabilityError, match="Security Violation"):
+        validate_url_host("https://cloud-metadata.internal/test", dns_retries=1)

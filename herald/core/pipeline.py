@@ -15,6 +15,7 @@ from herald.db.state_machine import transition_job_state
 from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
+    DNSResolutionError,
     SourceAccessBlockedError,
     SSRFVulnerabilityError,
     extract_article_from_url,
@@ -191,6 +192,16 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 is_duplicate=False,
                 message=f"Security violation: {e}",
                 error_category="SSRF_PROTECTION",
+            )
+        except DNSResolutionError as e:
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.URL.value,
+                is_duplicate=False,
+                message=f"URL retrieval failed: {e}",
+                error_category="EXTRACTION_FAILURE",
             )
         except (ArticleExtractionError, SourceAccessBlockedError) as e:
             return HeraldResponse(
