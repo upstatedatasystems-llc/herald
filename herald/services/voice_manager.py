@@ -3,11 +3,13 @@ Voice catalog and persistent voice sample management for Herald.
 Pre-renders and caches fixed voice sample audio files.
 """
 
+import json
 import logging
 import os
 import shutil
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +164,20 @@ def ensure_voice_sample(
 
             os.replace(temp_mp3, sample_mp3)
             logger.info(f"Generated and cached voice sample for '{v_clean}' at '{sample_mp3}'")
+
+            # Update persistent versioned manifest
+            try:
+                manifest = load_voice_sample_manifest()
+                manifest[v_clean] = {
+                    "text_hash": compute_sample_text_hash(),
+                    "speed": 1.0,
+                    "format": "mp3",
+                    "file_path": str(sample_mp3),
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+                save_voice_sample_manifest(manifest)
+            except Exception as me:
+                logger.debug(f"Failed to update voice sample manifest for '{v_clean}': {me}")
         finally:
             if temp_wav.exists():
                 temp_wav.unlink(missing_ok=True)
@@ -169,6 +185,96 @@ def ensure_voice_sample(
                 temp_mp3.unlink(missing_ok=True)
 
     return sample_mp3
+
+
+def get_voice_sample_manifest_path() -> Path:
+    """Return path to voice samples cache manifest JSON."""
+    return get_voice_samples_dir() / "manifest.json"
+
+
+def load_voice_sample_manifest() -> dict[str, Any]:
+    """Load cached voice sample manifest from disk."""
+    p = get_voice_sample_manifest_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_voice_sample_manifest(manifest: dict[str, Any]) -> None:
+    """Save voice sample manifest to disk atomically."""
+    p = get_voice_sample_manifest_path()
+    try:
+        tmp_p = p.with_suffix(".tmp.json")
+        tmp_p.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(tmp_p, p)
+    except Exception as e:
+        logger.warning(f"Failed to write voice sample manifest: {e}")
+
+
+def compute_sample_text_hash(text: str = VOICE_SAMPLE_TEXT) -> str:
+    """Compute deterministic short hash of the canonical preview sample text."""
+    import hashlib
+
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def get_cached_voice_sample(voice: str) -> Path | None:
+    """
+    Check if a voice preview sample is already prewarmed and valid on disk.
+    Returns Path if available, None on cache miss.
+    """
+    v_clean = voice.lower().strip()
+    sample_mp3 = get_voice_sample_path(v_clean)
+    if not is_valid_sample_audio(sample_mp3):
+        return None
+
+    manifest = load_voice_sample_manifest()
+    entry = manifest.get(v_clean)
+    curr_hash = compute_sample_text_hash()
+
+    if entry and entry.get("text_hash") == curr_hash:
+        return sample_mp3
+
+    # Fallback if valid audio exists even if manifest has not recorded it yet
+    if not entry and is_valid_sample_audio(sample_mp3):
+        return sample_mp3
+
+    return None
+
+
+def prewarm_all_voice_samples(
+    kokoro_client: KokoroClient | None = None,
+    force: bool = False,
+    db: Session | None = None,
+) -> dict[str, bool]:
+    """
+    Prewarm all allowed voice sample MP3s.
+    Generates missing or outdated voice preview files into the voice sample cache.
+    Returns mapping of voice_id -> success boolean.
+    """
+    allowed = settings.get_allowed_voices_list()
+    results: dict[str, bool] = {}
+    client = kokoro_client or KokoroClient()
+
+    for v in allowed:
+        try:
+            cached = get_cached_voice_sample(v)
+            if cached and not force:
+                logger.info(f"Voice sample for '{v}' already prewarmed: {cached}")
+                results[v] = True
+                continue
+
+            logger.info(f"Prewarming voice sample for '{v}'...")
+            ensure_voice_sample(voice=v, kokoro_client=client, db=db)
+            results[v] = True
+        except Exception as e:
+            logger.error(f"Failed to prewarm voice sample for '{v}': {e}")
+            results[v] = False
+
+    return results
 
 
 def get_all_voice_metadata() -> list[dict[str, Any]]:
@@ -186,3 +292,21 @@ def get_all_voice_metadata() -> list[dict[str, Any]]:
         )
         results.append({"voice_id": v, **meta})
     return results
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Herald Voice Prewarm CLI")
+    parser.add_argument("--prewarm", action="store_true", help="Prewarm all voice samples")
+    parser.add_argument(
+        "--force", action="store_true", help="Force regenerate existing voice samples"
+    )
+    args = parser.parse_args()
+
+    if args.prewarm:
+        print("Prewarming all Herald voice preview samples...")
+        res = prewarm_all_voice_samples(force=args.force)
+        for vid, ok in res.items():
+            status_str = "SUCCESS" if ok else "FAILED"
+            print(f"  {vid}: {status_str}")

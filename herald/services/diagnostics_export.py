@@ -414,6 +414,13 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             (staging_dir / "errors.json").write_text(json.dumps(err_dict, indent=2), encoding="utf-8")
             included_files.append("errors.json")
 
+        # 11b. failure-diagnostics.json (if auto_diagnostics_json exists)
+        if job.auto_diagnostics_json:
+            (staging_dir / "failure-diagnostics.json").write_text(
+                json.dumps(redact_dict(job.auto_diagnostics_json), indent=2), encoding="utf-8"
+            )
+            included_files.append("failure-diagnostics.json")
+
         # 12. Research files (conditional on research data)
         if job.research_grounding_json or job.research_json or job.research_audit_json:
             research_dir = staging_dir / "research"

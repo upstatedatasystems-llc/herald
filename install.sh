@@ -488,6 +488,12 @@ fi
 echo "⚙️  Running Herald configuration setup..."
 ./setup.sh "${SETUP_ARGS[@]}"
 
+# Ensure voice sample cache is prewarmed in herald-worker
+if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
+    echo "🔊 Ensuring voice sample cache is prewarmed in herald-worker..."
+    docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm || true
+fi
+
 # 12. Mandatory Acceptance Gate
 echo ""
 echo "🔍 Running mandatory installation acceptance validation..."

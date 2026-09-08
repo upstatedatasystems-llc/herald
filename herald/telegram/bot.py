@@ -32,6 +32,7 @@ from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
     ensure_voice_sample,
+    get_cached_voice_sample,
     get_voice_sample_path,
     is_valid_sample_audio,
 )
@@ -55,11 +56,13 @@ from herald.telegram.formatters import (
     format_help,
     format_queued,
     format_quickstart,
+    format_rerun_confirmation,
     format_settings,
     format_voices_browser,
     get_job_display_title,
 )
 from herald.telegram.resolver import resolve_user_job
+from herald.telegram.typing import TelegramTypingNotifier
 from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.telegram.bot")
@@ -406,7 +409,9 @@ def handle_telegram_command(
 
     elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
         ai_provider = get_ai_provider()
-        if not ai_provider or not ai_provider.is_configured():
+        research_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+
+        if (not ai_provider or not ai_provider.is_configured()) and not research_configured:
             client.send_message(
                 chat_id=chat_id,
                 text="ℹ️ <b>AI Provider is not configured.</b>\nHerald is running in deterministic <b>Literal</b> mode (no AI API keys required).",
@@ -417,27 +422,54 @@ def handle_telegram_command(
 
         client.send_message(
             chat_id=chat_id,
-            text="🔄 <i>Testing AI provider connection...</i>",
+            text="🔄 <i>Testing AI provider connections...</i>",
             reply_to_message_id=msg_id,
             parse_mode="HTML",
         )
-        res = ai_provider.check_connection(timeout_seconds=5.0, force_refresh=True)
-        prov_name = html.escape(res.get("provider", "AI"))
-        model_name = html.escape(res.get("model", "default"))
-        if res.get("connected"):
-            cap_note = "Ready for brief, standard, and research requests." if prov_name.lower() == "gemini" else "Ready for brief and standard requests (Research mode requires Gemini)."
-            client.send_message(
-                chat_id=chat_id,
-                text=f"✅ <b>{prov_name} Connected Successfully!</b>\n\nModel: <code>{model_name}</code>\nStatus: {cap_note}",
-                parse_mode="HTML",
-            )
+
+        res_std = (
+            ai_provider.check_connection(timeout_seconds=5.0, force_refresh=True)
+            if ai_provider
+            else {}
+        )
+        prov_name = html.escape(res_std.get("provider", "Standard AI"))
+        std_model = html.escape(res_std.get("model", settings.GEMINI_MODEL))
+
+        if res_std.get("connected"):
+            std_status = f"✅ <b>{prov_name} (Standard):</b> Connected\n• Model: <code>{std_model}</code>"
         else:
-            err = html.escape(res.get("error") or "Unknown error")
-            client.send_message(
-                chat_id=chat_id,
-                text=f"❌ <b>{prov_name} Connection Failed</b>\n\nError: <code>{err}</code>\n\nNote: Literal mode remains 100% operational.",
-                parse_mode="HTML",
+            std_err = html.escape(res_std.get("error") or "Not configured")
+            std_status = f"❌ <b>{prov_name} (Standard):</b> Failed\n• Error: <code>{std_err}</code>"
+
+        # Independent research check
+        if research_configured:
+            from herald.ai.gemini_provider import GeminiProvider
+
+            res_res = GeminiProvider().check_research_connection(
+                timeout_seconds=5.0, force_refresh=True
             )
+            res_model = html.escape(res_res.get("model", settings.GEMINI_RESEARCH_MODEL))
+            if res_res.get("connected"):
+                research_status = f"✅ <b>Gemini Research:</b> Connected\n• Model: <code>{res_model}</code> (Google Search Grounding ready)"
+            else:
+                r_err = html.escape(res_res.get("error") or "Unknown error")
+                research_status = (
+                    f"❌ <b>Gemini Research:</b> Unavailable\n• Error: <code>{r_err}</code>"
+                )
+        else:
+            research_status = "⚪ <b>Gemini Research:</b> Not configured (GEMINI_API_KEY required for Grounded Research)"
+
+        full_check_text = (
+            f"🤖 <b>AI Provider Diagnostics</b>\n\n"
+            f"{std_status}\n\n"
+            f"{research_status}\n\n"
+            f"<i>Literal mode remains 100% operational regardless of AI status.</i>"
+        )
+        client.send_message(
+            chat_id=chat_id,
+            text=full_check_text,
+            parse_mode="HTML",
+        )
 
     elif cmd_clean == "queue":
         owner = get_paired_owner(db)
@@ -661,7 +693,8 @@ def handle_telegram_content_message(
     )
 
     try:
-        response: HeraldResponse = process_herald_request(db=db, req=req)
+        with TelegramTypingNotifier(client=client, chat_id=chat_id):
+            response: HeraldResponse = process_herald_request(db=db, req=req)
     except Exception as e:
         logger.exception("Error processing Telegram request: %s", redact_text(str(e)))
         client.send_message(
@@ -706,7 +739,7 @@ def handle_telegram_content_message(
             )
         return
 
-    if response.is_duplicate:
+    if response.is_duplicate and not response.rerun_of_job_id:
         existing_job = db.query(PodcastJob).filter_by(id=response.job_id).first()
         if existing_job:
             # Recovery path: job is awaiting approval but card was never delivered
@@ -769,10 +802,38 @@ def handle_telegram_content_message(
         return
 
     job = db.query(PodcastJob).filter_by(id=response.job_id).first()
+    prior_job = (
+        db.query(PodcastJob).filter_by(id=response.rerun_of_job_id).first()
+        if response.rerun_of_job_id
+        else None
+    )
+
+    # Case D: Duplicate content match with confirmation OFF -> prompt for rerun confirmation before scripting
+    if response.status == JobState.AWAITING_RERUN_CONFIRMATION.value and job and prior_job:
+        app_text, reply_markup = format_rerun_confirmation(new_job=job, prior_job=prior_job)
+        try:
+            sent_msg = client.send_message(
+                chat_id=chat_id,
+                text=app_text,
+                reply_markup=reply_markup,
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                job.telegram_approval_message_id = sent_msg["message_id"]
+                job.approval_requested_at = datetime.now(UTC)
+                db.commit()
+        except Exception as e:
+            logger.error(f"Failed to deliver Telegram rerun confirmation card for job '{job.id}': {e}")
+        return
+
     eta_info = calculate_job_eta(db, job) if job else {}
 
+    # Case B & Case C: Script generated and awaiting approval (prior_job populated if Case C duplicate)
     if response.status == JobState.AWAITING_APPROVAL.value and job:
-        app_text, reply_markup = format_approval(job, job.script_json, eta_info)
+        app_text, reply_markup = format_approval(
+            job, job.script_json, eta_info, prior_job=prior_job
+        )
         try:
             sent_msg = client.send_message(
                 chat_id=chat_id,
@@ -789,7 +850,7 @@ def handle_telegram_content_message(
             logger.error(f"Failed to deliver Telegram approval card for job '{job.id}': {e}")
         return
 
-    # Rich queued card (confirmation is OFF or directly queued)
+    # Case A: Rich queued card (unique + confirmation OFF or directly queued)
     if job:
         queued_text = format_queued(job, job.script_json, eta_info)
     else:
@@ -937,6 +998,95 @@ def handle_telegram_callback_query(
                 logger.warning(f"Failed to return to settings message markup: {e}")
         return
 
+    elif raw_data.startswith("h2:rerun_approve:"):
+        job_id = raw_data[len("h2:rerun_approve:") :]
+        job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+        if (
+            not job
+            or job.telegram_user_id != user_id
+            or job.telegram_chat_id != chat_id
+            or job.transport != "telegram"
+        ):
+            client.answer_callback_query(
+                cb_id, text="Unauthorized: Access denied.", show_alert=True
+            )
+            return
+
+        if job.status != JobState.AWAITING_RERUN_CONFIRMATION.value:
+            if job.status in (
+                JobState.SCRIPTING.value,
+                JobState.SCRIPT_READY.value,
+                JobState.QUEUED_TTS.value,
+                JobState.SYNTHESIZING.value,
+                JobState.ENCODING.value,
+                JobState.COMPLETE.value,
+            ):
+                client.answer_callback_query(
+                    cb_id, text="Rerun already confirmed and generating."
+                )
+            elif job.status == JobState.CANCELLED.value:
+                client.answer_callback_query(
+                    cb_id, text="Job was already cancelled.", show_alert=True
+                )
+            else:
+                client.answer_callback_query(
+                    cb_id,
+                    text=f"Cannot confirm rerun for job in state {job.status}.",
+                    show_alert=True,
+                )
+            return
+
+        client.answer_callback_query(cb_id, text="Rerun confirmed! Generating script...")
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text="🔄 <b>Rerun Confirmed</b>\n\nGenerating script and preparing audio synthesis...",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        from herald.core.pipeline import execute_script_generation
+
+        with TelegramTypingNotifier(client=client, chat_id=chat_id):
+            gen_resp = execute_script_generation(
+                db,
+                job,
+                hold_for_approval=False,
+                is_duplicate=True,
+                rerun_of_job_id=job.rerun_of_job_id,
+            )
+        db.refresh(job)
+
+        if gen_resp.status == JobState.QUEUED_TTS.value:
+            eta_info = calculate_job_eta(db, job)
+            queued_text = format_queued(job, job.script_json, eta_info)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=queued_text,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to edit message to queued card: {e}")
+        else:
+            safe_err = html.escape(gen_resp.message or "Script generation failed.")
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"❌ <b>Rerun Failed:</b> {safe_err}",
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+        return
+
     elif raw_data.startswith("h2:approve:"):
         job_id = raw_data[len("h2:approve:") :]
         job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
@@ -1053,12 +1203,35 @@ def handle_telegram_callback_query(
             )
             return
 
+        prior_state = job.status
+        if prior_state not in (
+            JobState.AWAITING_APPROVAL.value,
+            JobState.AWAITING_RERUN_CONFIRMATION.value,
+        ):
+            if prior_state == JobState.CANCELLED.value:
+                client.answer_callback_query(cb_id, text="Job already cancelled.")
+            elif prior_state in (JobState.QUEUED_TTS.value, JobState.SYNTHESIZING.value):
+                client.answer_callback_query(
+                    cb_id,
+                    text="Job is already synthesizing and cannot be cancelled.",
+                    show_alert=True,
+                )
+            else:
+                client.answer_callback_query(
+                    cb_id,
+                    text=f"Cannot cancel job in state {prior_state}.",
+                    show_alert=True,
+                )
+            return
+
         now = datetime.now(UTC)
         updated_count = (
             db.query(PodcastJob)
             .filter(
                 PodcastJob.id == job_id,
-                PodcastJob.status == JobState.AWAITING_APPROVAL.value,
+                PodcastJob.status.in_(
+                    [JobState.AWAITING_APPROVAL.value, JobState.AWAITING_RERUN_CONFIRMATION.value]
+                ),
                 PodcastJob.telegram_user_id == user_id,
                 PodcastJob.telegram_chat_id == chat_id,
             )
@@ -1074,7 +1247,7 @@ def handle_telegram_callback_query(
         if updated_count == 1:
             transition_rec = JobStateTransition(
                 job_id=job_id,
-                from_state=JobState.AWAITING_APPROVAL.value,
+                from_state=prior_state,
                 to_state=JobState.CANCELLED.value,
                 component="telegram-approval",
                 message="Cancelled by user",
@@ -1120,7 +1293,7 @@ def handle_telegram_callback_query(
             ):
                 client.answer_callback_query(
                     cb_id,
-                    text="Job is already synthesizing and cannot be cancelled.",
+                    text="Job has already started synthesis.",
                     show_alert=True,
                 )
                 return
@@ -1205,15 +1378,15 @@ def handle_telegram_callback_query(
 
         meta = VOICE_METADATA.get(v_name, {})
         disp_name = meta.get("display_name", v_name)
-        sample_path = get_voice_sample_path(v_name)
+        cached_sample = get_cached_voice_sample(v_name)
 
-        # Cache hit: fast immediate delivery (voice selection kept in voice browser)
-        if is_valid_sample_audio(sample_path):
+        # Cache hit: fast immediate delivery (zero interactive TTS wait)
+        if cached_sample:
             client.answer_callback_query(cb_id, text=f"Playing sample for {disp_name}...")
             caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
             client.send_audio(
                 chat_id=chat_id,
-                audio_path=sample_path,
+                audio_path=cached_sample,
                 title=f"Sample: {disp_name}",
                 performer="Herald",
                 caption=caption,

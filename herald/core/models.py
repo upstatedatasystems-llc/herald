@@ -33,3 +33,4 @@ class HeraldResponse(BaseModel):
     episode_title: str | None = None
     estimated_minutes: int | None = None
     error_category: str | None = None
+    rerun_of_job_id: str | None = None

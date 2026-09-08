@@ -51,10 +51,15 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
     }
 
 
-def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
+def calculate_job_eta(
+    db: Session,
+    job: PodcastJob,
+    measured_first_chunk_rtf: float | None = None,
+) -> dict[str, Any]:
     """
     Calculate approximate best-effort completion time for a podcast job.
-    Uses weighted RTF from recent successful Kokoro request metrics when available.
+    Uses weighted RTF from recent successful Kokoro request metrics when available,
+    and blends empirical first-chunk RTF (clamped [0.5, 10.0]) when available.
     Counts only jobs created ahead of the target job in QUEUED_TTS, SYNTHESIZING, or ENCODING.
     """
     fallback_rtf = getattr(settings, "TTS_ESTIMATED_REALTIME_FACTOR", 2.4)
@@ -110,6 +115,37 @@ def calculate_job_eta(db: Session, job: PodcastJob) -> dict[str, Any]:
                 rtf_source = "historical"
     except Exception:
         pass
+
+    # Blend first-chunk empirical RTF if provided or recorded
+    first_chunk_rtf = measured_first_chunk_rtf
+    if first_chunk_rtf is None:
+        try:
+            from herald.db.models import JobProcessingMetric
+
+            c1_metric = (
+                db.query(JobProcessingMetric)
+                .filter(
+                    JobProcessingMetric.job_id == job.id,
+                    JobProcessingMetric.stage == "KOKORO_REQUEST",
+                    JobProcessingMetric.sequence_index == 1,
+                    JobProcessingMetric.status == "success",
+                )
+                .first()
+            )
+            if (
+                c1_metric
+                and c1_metric.duration_ms
+                and c1_metric.audio_duration_ms
+                and c1_metric.audio_duration_ms > 0
+            ):
+                first_chunk_rtf = c1_metric.duration_ms / float(c1_metric.audio_duration_ms)
+        except Exception:
+            pass
+
+    if first_chunk_rtf is not None:
+        clamped_c1 = min(10.0, max(0.5, float(first_chunk_rtf)))
+        realtime_factor = round(0.5 * clamped_c1 + 0.5 * realtime_factor, 3)
+        rtf_source = f"first_chunk_blended ({rtf_source})"
 
     # 1. Estimate duration for current job
     dur_info = calculate_script_duration(job.script_json, job.custom_speed or settings.KOKORO_SPEED)

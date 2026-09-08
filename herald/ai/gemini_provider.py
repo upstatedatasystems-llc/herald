@@ -116,6 +116,15 @@ class GeminiProvider(AIProvider):
                     "model": model,
                     "error": "authentication failed",
                 }
+            elif resp.status_code == 404:
+                res = {
+                    "provider": self.provider_name,
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": f"model '{model}' unavailable or not found (404)",
+                    "error_category": "AI_MODEL_UNAVAILABLE",
+                }
             elif resp.status_code == 429:
                 res = {
                     "provider": self.provider_name,
@@ -155,3 +164,105 @@ class GeminiProvider(AIProvider):
         self._cached_health = res
         self._cache_timestamp = now
         return res
+
+    def check_research_connection(
+        self, timeout_seconds: float = 5.0, force_refresh: bool = False
+    ) -> dict[str, Any]:
+        """
+        Check Gemini Grounded Research model connectivity independently.
+        Validates GEMINI_RESEARCH_MODEL availability and Google Search Grounding readiness.
+        """
+        if not self.is_configured():
+            return {
+                "provider": "Gemini Research",
+                "configured": False,
+                "connected": False,
+                "model": self.research_model,
+                "error": "API key not configured",
+            }
+
+        key = settings.GEMINI_API_KEY.strip()
+        model = self.research_model.strip()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": key}
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"maxOutputTokens": 5},
+        }
+
+        try:
+            from herald.gemini.client import _is_gemini_model_not_found_response
+
+            with httpx.Client(timeout=timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+
+            if resp.status_code == 200:
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": True,
+                    "model": model,
+                    "error": None,
+                }
+            elif resp.status_code == 404:
+                is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": f"research model '{model}' unavailable or not found (404): {err_msg}",
+                    "error_category": "AI_MODEL_UNAVAILABLE",
+                }
+            elif resp.status_code in (401, 403):
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": "authentication failed",
+                }
+            elif resp.status_code == 429:
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": "rate limit exceeded",
+                }
+            elif resp.status_code == 400:
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": f"grounding tool failure: {resp.text}",
+                }
+            else:
+                return {
+                    "provider": "Gemini Research",
+                    "configured": True,
+                    "connected": False,
+                    "model": model,
+                    "error": f"API returned status {resp.status_code}",
+                }
+        except httpx.TimeoutException:
+            return {
+                "provider": "Gemini Research",
+                "configured": True,
+                "connected": False,
+                "model": model,
+                "error": "connection timed out",
+            }
+        except Exception as e:
+            err_str = str(e)
+            if key and key in err_str:
+                err_str = err_str.replace(key, "[REDACTED]")
+            return {
+                "provider": "Gemini Research",
+                "configured": True,
+                "connected": False,
+                "model": model,
+                "error": f"network error: {err_str}",
+            }

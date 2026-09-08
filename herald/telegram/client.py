@@ -144,6 +144,20 @@ class TelegramClient:
 
         return self._request("POST", "sendMessage", timeout=15.0, json=payload)
 
+    def send_chat_action(
+        self,
+        chat_id: int | str,
+        action: str = "typing",
+        timeout: float = 10.0,
+    ) -> bool:
+        """Send chat action status (e.g. 'typing')."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "action": action,
+        }
+        res = self._request("POST", "sendChatAction", timeout=timeout, json=payload)
+        return bool(res)
+
     def edit_message_text(
         self,
         chat_id: int | str,

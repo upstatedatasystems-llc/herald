@@ -81,6 +81,52 @@ class GeminiOutputTruncatedError(GeminiError):
     """Model output was cut off by the configured token limit (finishReason=MAX_TOKENS)."""
 
 
+class GeminiModelUnavailableError(GeminiError):
+    """The requested Gemini model was not found, is deprecated, or is unavailable."""
+
+    error_category = "AI_MODEL_UNAVAILABLE"
+    retryable = False
+
+
+def _is_gemini_model_not_found_response(resp: Any) -> tuple[bool, str]:
+    """
+    Check whether an HTTP response indicates that the requested Gemini model is unavailable / not found.
+    Distinguishes model 404 from other resource 404s.
+    Returns (is_model_unavailable, error_message).
+    """
+    if getattr(resp, "status_code", None) != 404:
+        return False, ""
+
+    try:
+        data = resp.json()
+        err = data.get("error", {})
+        msg = str(err.get("message", ""))
+        status = str(err.get("status", "")).upper()
+        msg_l = msg.lower()
+        has_model_mention = "model" in msg_l or "models/" in msg_l
+        if has_model_mention and (
+            status == "NOT_FOUND"
+            or "not found" in msg_l
+            or "not supported" in msg_l
+            or "no longer available" in msg_l
+            or "is deprecated" in msg_l
+        ):
+            return True, msg or resp.text
+    except Exception:
+        text = getattr(resp, "text", "")
+        text_l = text.lower()
+        has_model_mention = "model" in text_l or "models/" in text_l
+        if has_model_mention and (
+            "not found" in text_l
+            or "not supported" in text_l
+            or "no longer available" in text_l
+            or "is deprecated" in text_l
+        ):
+            return True, text
+
+    return False, ""
+
+
 def build_script_thinking_config(
     model_name: str | None,
     request_mode: str | None = "standard",
@@ -349,6 +395,11 @@ Report your comprehensive grounded findings in detail.
                     metadata={"research_depth": depth},
                 )
                 interaction_recorded = True
+                is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+                if is_unavail:
+                    raise GeminiModelUnavailableError(
+                        f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+                    )
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -479,7 +530,7 @@ Report your comprehensive grounded findings in detail.
                     metadata={"research_depth": depth},
                 )
                 interaction_recorded = True
-            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
+            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError)):
                 raise
             if attempt == max_attempts:
                 raise GeminiError(f"Grounded research failed: {e}")
@@ -624,6 +675,11 @@ Requirements:
                     provider_request_id=req_id,
                 )
                 interaction_recorded = True
+                is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+                if is_unavail:
+                    raise GeminiModelUnavailableError(
+                        f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+                    )
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -732,7 +788,7 @@ Requirements:
                     error=e,
                 )
                 interaction_recorded = True
-            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError)):
+            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError)):
                 raise
             if attempt == max_attempts:
                 raise GeminiError(f"Dossier normalization failed: {e}")
@@ -937,6 +993,11 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     metadata={"mode": mode_clean},
                 )
                 interaction_recorded = True
+                is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+                if is_unavail:
+                    raise GeminiModelUnavailableError(
+                        f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+                    )
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -1072,7 +1133,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     metadata={"mode": mode_clean},
                 )
                 interaction_recorded = True
-            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiOutputTruncatedError)):
+            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiOutputTruncatedError, GeminiModelUnavailableError)):
                 raise
             last_error = str(e)
             logger.error(f"Gemini client error on attempt {attempt}: {e}")
@@ -1361,6 +1422,11 @@ Return the corrected PodcastScriptResponse JSON now.
             provider_request_id=req_id,
         )
         interaction_recorded = True
+        is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+        if is_unavail:
+            raise GeminiModelUnavailableError(
+                f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+            )
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)
@@ -1644,6 +1710,11 @@ Return the corrected PodcastScriptResponse JSON now.
             provider_request_id=req_id,
         )
         interaction_recorded = True
+        is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+        if is_unavail:
+            raise GeminiModelUnavailableError(
+                f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+            )
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)

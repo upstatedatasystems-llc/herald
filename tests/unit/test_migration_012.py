@@ -71,17 +71,23 @@ def test_migration_012_from_revision_011(alembic_config):
     command.upgrade(cfg, "012_telegram_approval_delivery")
 
     # 3. Query upgraded row and verify defaults
-    Session = sessionmaker(bind=engine)
-    with Session() as db:
-        job = db.query(PodcastJob).filter_by(id="job-uuid-1").first()
-        assert job is not None
-        assert job.approval_required is False or job.approval_required == 0
-        assert job.approval_requested_at is None
-        assert job.approved_at is None
-        assert job.telegram_approval_message_id is None
-        assert job.telegram_delivery_message_id is None
-        assert job.telegram_audio_file_id is None
-        assert job.telegram_document_file_id is None
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT approval_required, approval_requested_at, approved_at, "
+                "telegram_approval_message_id, telegram_delivery_message_id, "
+                "telegram_audio_file_id, telegram_document_file_id "
+                "FROM podcast_jobs WHERE id='job-uuid-1'"
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0] is False or row[0] == 0
+        assert row[1] is None
+        assert row[2] is None
+        assert row[3] is None
+        assert row[4] is None
+        assert row[5] is None
+        assert row[6] is None
 
 
 def test_migration_012_from_revision_010(alembic_config):

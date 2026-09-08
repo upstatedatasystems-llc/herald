@@ -17,7 +17,7 @@ from herald.gemini.schema import (
 
 def test_research_model_configuration_difference():
     assert settings.GEMINI_MODEL == "gemini-3.5-flash"
-    assert settings.GEMINI_RESEARCH_MODEL == "gemini-2.5-flash"
+    assert settings.GEMINI_RESEARCH_MODEL == "gemini-3.6-flash"
     assert settings.GEMINI_RESEARCH_MODEL != settings.GEMINI_MODEL
 
 

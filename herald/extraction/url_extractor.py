@@ -9,18 +9,22 @@ from bs4 import BeautifulSoup
 
 class SSRFVulnerabilityError(Exception):
     """Raised when a URL resolves to a prohibited internal or private IP address."""
+    error_category = "SSRF_PROTECTION"
 
 
 class ArticleExtractionError(Exception):
     """Raised when an article URL cannot be fetched or contains insufficient content."""
+    error_category = "EXTRACTION_FAILURE"
 
 
 class DNSResolutionError(ArticleExtractionError):
     """Raised when DNS resolution for a URL hostname fails (network/retrieval failure)."""
+    error_category = "DNS_RESOLUTION_ERROR"
 
 
 class SourceAccessBlockedError(ArticleExtractionError):
     """Raised when access to an article URL is blocked by paywall, bot protection, interstitial, or publisher restrictions."""
+    error_category = "SOURCE_ACCESS_BLOCKED"
 
 
 BOT_PAYWALL_MARKERS = (

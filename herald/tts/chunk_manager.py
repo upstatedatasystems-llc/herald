@@ -305,6 +305,22 @@ def synthesize_single_chunk(
                         logger.info(
                             f"Job '{job_id}' progress: {max_completed}/{total_chunks} chunks completed"
                         )
+                        # Safe non-fatal milestone notification hook
+                        try:
+                            from herald.services.progress_notifier import notify_tts_chunk_progress
+
+                            notify_tts_chunk_progress(
+                                db=db,
+                                job=job,
+                                chunk_index=chunk.index,
+                                total_chunks=total_chunks,
+                                chunk_audio_duration_s=audio_dur_sec or 0.0,
+                                chunk_synthesis_duration_s=elapsed_ms / 1000.0,
+                            )
+                        except Exception as pe:
+                            logger.debug(
+                                f"Non-fatal chunk progress notification failed for job '{job_id}': {pe}"
+                            )
 
                     record_job_diagnostic_event(
                         job_id,

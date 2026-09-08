@@ -39,7 +39,7 @@ def test_complete_job_immutability_and_cleaned_up_audio(tmp_path):
         db.add(old_job)
         db.commit()
 
-        # Case 1: Audio file is present on disk -> duplicate returned
+        # Case 1: Audio file is present on disk -> duplicate returned with new job and rerun lineage
         req1 = HeraldRequest(
             transport="telegram",
             requester_identity="telegram:999",
@@ -50,8 +50,8 @@ def test_complete_job_immutability_and_cleaned_up_audio(tmp_path):
         )
         res1 = process_herald_request(db, req1)
         assert res1.is_duplicate is True
-        assert res1.job_id == "job-complete-old"
-        assert res1.status == JobState.COMPLETE.value
+        assert res1.rerun_of_job_id == "job-complete-old"
+        assert res1.job_id != "job-complete-old"
 
         # Verify old_job was NOT mutated
         reloaded_old = db.query(PodcastJob).filter_by(id="job-complete-old").first()
@@ -71,7 +71,8 @@ def test_complete_job_immutability_and_cleaned_up_audio(tmp_path):
             custom_title="Episode Title",
         )
         res2 = process_herald_request(db, req2)
-        assert res2.is_duplicate is False
+        assert res2.is_duplicate is True
+        assert res2.rerun_of_job_id is not None
         assert res2.job_id != "job-complete-old"
 
         # Verify old job still exists and is still COMPLETE

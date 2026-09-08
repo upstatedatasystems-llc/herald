@@ -10,6 +10,11 @@ from typing import Any
 from herald.config import settings
 from herald.db.models import PodcastJob, RequestMode
 from herald.services.eta_calculator import calculate_script_duration
+from herald.services.settings_fingerprint import (
+    are_generation_settings_identical,
+    format_settings_display,
+    get_job_generation_settings,
+)
 
 
 def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
@@ -177,9 +182,11 @@ def format_approval(
     job: PodcastJob,
     script_json: dict | None,
     eta_info: dict | None = None,
+    prior_job: PodcastJob | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     Format interactive approval card message with Approve and Cancel buttons.
+    If prior_job is provided, includes prior run context and settings comparison (Case C).
     Returns:
         (text, reply_markup_dict)
     """
@@ -209,8 +216,33 @@ def format_approval(
 
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
 
+    prior_section = ""
+    header_title = "📋 <b>Podcast Ready for Approval</b>"
+    button_approve_text = "✅ Approve & Generate"
+
+    if prior_job:
+        header_title = "🔄 <b>Podcast Rerun Ready for Approval</b>"
+        button_approve_text = "✅ Approve Rerun & Generate"
+        p_dt = prior_job.created_at
+        p_date_str = p_dt.strftime("%b %d, %H:%M UTC") if p_dt else "earlier"
+        p_status = prior_job.status
+        p_short = html.escape(prior_job.id[:8])
+
+        curr_s = get_job_generation_settings(job)
+        prior_s = get_job_generation_settings(prior_job)
+        if are_generation_settings_identical(curr_s, prior_s):
+            settings_line = "• <b>Settings:</b> Identical to prior run\n"
+        else:
+            diff_text = f"Prior: {format_settings_display(prior_s)} ➔ New: {format_settings_display(curr_s)}"
+            settings_line = f"• <b>Settings Changes:</b>\n  {html.escape(diff_text)}\n"
+
+        prior_section = (
+            f"\n🔄 <b>Prior Generation:</b> Job <code>{p_short}</code> ({html.escape(p_status)}, {html.escape(p_date_str)})\n"
+            f"{settings_line}"
+        )
+
     text = (
-        f"📋 <b>Podcast Ready for Approval</b>\n\n"
+        f"{header_title}\n\n"
         f"<b>{title}</b>{desc_section}\n"
         f"• <b>Mode:</b> {mode_str}\n"
         f"• <b>Source:</b> {source_words:,} words\n"
@@ -218,7 +250,8 @@ def format_approval(
         f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
         f"{ai_line}\n"
         f"• <b>Estimated Range:</b> {html.escape(eta_range)}\n"
-        f"• <b>Job ID:</b> <code>{short_id}</code>\n\n"
+        f"• <b>Job ID:</b> <code>{short_id}</code>\n"
+        f"{prior_section}\n"
         f"<i>Review details above and approve to start audio synthesis:</i>"
     )
 
@@ -226,7 +259,7 @@ def format_approval(
         "inline_keyboard": [
             [
                 {
-                    "text": "✅ Approve & Generate",
+                    "text": button_approve_text,
                     "callback_data": f"h2:approve:{job.id}",
                 },
                 {
@@ -237,6 +270,68 @@ def format_approval(
         ]
     }
 
+    return text, reply_markup
+
+
+def format_rerun_confirmation(
+    new_job: PodcastJob,
+    prior_job: PodcastJob,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Format interactive rerun confirmation card for duplicate content when confirmation is off (Case D).
+    Returns:
+        (text, reply_markup_dict)
+    """
+    title_raw = get_job_display_title(new_job) or get_job_display_title(prior_job)
+    title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
+
+    p_dt = prior_job.created_at
+    p_date_str = p_dt.strftime("%b %d, %H:%M UTC") if p_dt else "earlier"
+    p_status = prior_job.status
+    p_short_id = html.escape(prior_job.id[:8])
+
+    curr_settings = get_job_generation_settings(new_job)
+    prior_settings = get_job_generation_settings(prior_job)
+    same_settings = are_generation_settings_identical(curr_settings, prior_settings)
+
+    mode_str = html.escape(curr_settings.get("mode", "standard").capitalize())
+    voice_str = html.escape(curr_settings.get("voice", "af_heart"))
+    speed_val = float(curr_settings.get("speed", 1.0))
+
+    if same_settings:
+        settings_info = (
+            f"• <b>Settings:</b> Identical to prior run\n"
+            f"  (Mode: <code>{mode_str}</code>, Voice: <code>{voice_str}</code> @ {speed_val:.1f}x)"
+        )
+    else:
+        diff_str = f"Prior: {format_settings_display(prior_settings)} ➔ New: {format_settings_display(curr_settings)}"
+        settings_info = (
+            f"• <b>Settings Modified:</b>\n"
+            f"  {html.escape(diff_str)}"
+        )
+
+    text = (
+        f"🔄 <b>Prior Generation Found</b>\n\n"
+        f"<b>{title}</b>\n\n"
+        f"This content was previously processed in job <code>{p_short_id}</code> ({html.escape(p_status)}, {html.escape(p_date_str)}).\n\n"
+        f"{settings_info}\n\n"
+        f"<i>Would you like to run this content again as a new generation?</i>"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🔄 Confirm Rerun",
+                    "callback_data": f"h2:rerun_approve:{new_job.id}",
+                },
+                {
+                    "text": "❌ Cancel",
+                    "callback_data": f"h2:deny:{new_job.id}",
+                },
+            ]
+        ]
+    }
     return text, reply_markup
 
 
@@ -482,6 +577,13 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
             f"• <b>Error:</b> <code>{err_code}</code>\n"
             f"• <i>{err_det}</i>"
         )
+        if job.auto_diagnostics_json:
+            diags = job.auto_diagnostics_json if isinstance(job.auto_diagnostics_json, list) else [job.auto_diagnostics_json]
+            if diags:
+                latest = diags[-1]
+                probe_summary = latest.get("summary")
+                if probe_summary:
+                    error_section += f"\n• <b>Probe:</b> <code>{html.escape(str(probe_summary))}</code>"
 
     audio_line = ""
     if job.audio_duration_seconds:
@@ -561,3 +663,41 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
     reply_markup = {"inline_keyboard": keyboard}
 
     return text, reply_markup
+
+
+def format_first_chunk_progress(
+    job: PodcastJob,
+    total_chunks: int,
+    eta_range: str,
+) -> str:
+    """
+    Format milestone notification card sent when chunk 1 finishes synthesis.
+    Includes truthful AI provider/model attribution, Kokoro voice/speed, chunk progress, and updated ETA.
+    """
+    title_raw = get_job_display_title(job)
+    title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
+    short_id = html.escape(job.id[:8])
+
+    # Truthful attribution
+    ai_prov, ai_model = get_job_ai_identity(job)
+    if job.request_mode == RequestMode.LITERAL.value:
+        ai_line = "• <b>Script:</b> Literal reader (zero AI calls)"
+    elif ai_prov and ai_model:
+        ai_line = f"• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
+    else:
+        ai_line = "• <b>AI:</b> <code>None</code>"
+
+    voice = html.escape(job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
+    speed = float(job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
+    tts_line = f"• <b>Voice Synthesis:</b> Kokoro TTS (<code>{voice}</code> @ {speed:.1f}x)"
+
+    return (
+        f"⏳ <b>Audio Synthesis in Progress</b>\n\n"
+        f"<b>{title}</b>\n"
+        f"• <b>Progress:</b> First segment synthesized (1/{total_chunks})\n"
+        f"• <b>Remaining ETA:</b> {html.escape(eta_range)}\n"
+        f"{ai_line}\n"
+        f"{tts_line}\n"
+        f"• <b>Job ID:</b> <code>{short_id}</code>\n\n"
+        f"<i>Encoding and delivering audio file as soon as all segments complete.</i>"
+    )

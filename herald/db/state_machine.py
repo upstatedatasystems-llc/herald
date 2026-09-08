@@ -7,6 +7,7 @@ from herald.db.models import JobState, JobStateTransition, PodcastJob
 VALID_TRANSITIONS: dict[str, set[str]] = {
     JobState.RECEIVED.value: {
         JobState.VALIDATING.value,
+        JobState.AWAITING_RERUN_CONFIRMATION.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,
@@ -26,6 +27,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     },
     JobState.SOURCE_READY.value: {
         JobState.SCRIPTING.value,
+        JobState.AWAITING_RERUN_CONFIRMATION.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,
@@ -44,6 +46,13 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         JobState.CANCELLED.value,
     },
     JobState.AWAITING_APPROVAL.value: {
+        JobState.QUEUED_TTS.value,
+        JobState.CANCELLED.value,
+        JobState.FAILED_RETRYABLE.value,
+        JobState.FAILED_FINAL.value,
+    },
+    JobState.AWAITING_RERUN_CONFIRMATION.value: {
+        JobState.SCRIPTING.value,
         JobState.QUEUED_TTS.value,
         JobState.CANCELLED.value,
         JobState.FAILED_RETRYABLE.value,

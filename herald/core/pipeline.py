@@ -35,6 +35,10 @@ from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.performance_metrics import record_stage_metric
 from herald.services.redaction import sanitize_error
+from herald.services.settings_fingerprint import (
+    build_generation_settings_snapshot,
+    get_job_generation_settings,
+)
 
 logger = logging.getLogger("herald.core.pipeline")
 
@@ -66,6 +70,75 @@ def _resolve_response_title(
         if ep_t:
             return ep_t
     return "Herald Episode"
+ 
+
+def find_prior_content_candidate(
+    db: Session,
+    source_hash: str,
+    source_url: str | None = None,
+    exclude_job_id: str | None = None,
+) -> PodcastJob | None:
+    """
+    Deterministically find the most relevant prior job matching content.
+    Hierarchy:
+      Tier 1: Active jobs (in-flight)
+      Tier 2: COMPLETE jobs
+      Tier 3: CANCELLED jobs
+      Tier 4: FAILED jobs
+      Tie-breaker: created_at DESC (most recent first)
+    """
+    if source_url:
+        candidate_filter = or_(
+            PodcastJob.source_hash == source_hash,
+            and_(PodcastJob.source_url.isnot(None), PodcastJob.source_url == source_url),
+        )
+    else:
+        candidate_filter = (PodcastJob.source_hash == source_hash)
+
+    query = db.query(PodcastJob).filter(candidate_filter)
+    if exclude_job_id:
+        query = query.filter(PodcastJob.id != exclude_job_id)
+
+    candidates = query.all()
+    if not candidates:
+        return None
+
+    active_states = {
+        JobState.RECEIVED.value,
+        JobState.VALIDATING.value,
+        JobState.EXTRACTING.value,
+        JobState.SOURCE_READY.value,
+        JobState.SCRIPTING.value,
+        JobState.SCRIPT_READY.value,
+        JobState.AWAITING_APPROVAL.value,
+        JobState.AWAITING_RERUN_CONFIRMATION.value,
+        JobState.QUEUED_TTS.value,
+        JobState.SYNTHESIZING.value,
+        JobState.ENCODING.value,
+        JobState.AUDIO_READY.value,
+        JobState.UPLOADING.value,
+        JobState.DELIVERING.value,
+    }
+
+    def _tier_rank(j: PodcastJob) -> int:
+        if j.status in active_states:
+            return 1
+        elif j.status == JobState.COMPLETE.value:
+            return 2
+        elif j.status == JobState.CANCELLED.value:
+            return 3
+        else:
+            return 4
+
+    def _sort_key(j: PodcastJob):
+        dt = j.created_at
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        ts = dt.timestamp() if dt else 0.0
+        return (_tier_rank(j), -ts)
+
+    sorted_candidates = sorted(candidates, key=_sort_key)
+    return sorted_candidates[0]
 
 
 def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
@@ -184,6 +257,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             source_url = canon_url
             extracted_text = f"Title: {art_title}\n\n{art_text}" if art_title else art_text
         except SSRFVulnerabilityError as e:
+            try:
+                from herald.services.failure_diagnostics import collect_failure_diagnostics
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error: {diag_err}")
             return HeraldResponse(
                 job_id="",
                 status=JobState.FAILED_FINAL.value,
@@ -194,6 +272,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 error_category="SSRF_PROTECTION",
             )
         except DNSResolutionError as e:
+            try:
+                from herald.services.failure_diagnostics import collect_failure_diagnostics
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error: {diag_err}")
             return HeraldResponse(
                 job_id="",
                 status=JobState.FAILED_FINAL.value,
@@ -204,6 +287,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 error_category="EXTRACTION_FAILURE",
             )
         except (ArticleExtractionError, SourceAccessBlockedError) as e:
+            try:
+                from herald.services.failure_diagnostics import collect_failure_diagnostics
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error: {diag_err}")
             return HeraldResponse(
                 job_id="",
                 status=JobState.FAILED_FINAL.value,
@@ -241,77 +329,21 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         if ext_title and ext_title != "Herald Episode":
             resolved_title = ext_title
 
-    # 3. Content deduplication check
-    candidate_filter = (
-        or_(
-            PodcastJob.source_hash == source_hash,
-            and_(PodcastJob.source_url.isnot(None), PodcastJob.source_url == source_url),
-        )
-        if source_url
-        else (PodcastJob.source_hash == source_hash)
+    # 3. Settings snapshot and content candidate lookup
+    settings_snapshot = build_generation_settings_snapshot(
+        mode=mode_val,
+        research_depth=req.research_depth,
+        voice=req.custom_voice,
+        speed=req.custom_speed,
+        custom_title=resolved_title,
+        chunk_chars=req.tts_chunk_chars,
+        verify=req.verify_final_script,
     )
-    existing_candidates = (
-        db.query(PodcastJob)
-        .filter(candidate_filter)
-        .filter(PodcastJob.status != JobState.FAILED_FINAL.value)
-        .all()
+    prior_job = find_prior_content_candidate(
+        db, source_hash=source_hash, source_url=source_url
     )
 
-    req_voice = (req.custom_voice or "").strip()
-    req_speed = round(float(req.custom_speed), 2) if req.custom_speed is not None else None
-    req_title = resolved_title
-    req_chunk = req.tts_chunk_chars or 500
-    req_verify = bool(req.verify_final_script)
-    req_depth = (req.research_depth or "").lower().strip()
-
-    duplicate_job = None
-    for c_job in existing_candidates:
-        c_mode = c_job.request_mode
-        c_depth = (c_job.research_depth or "").lower().strip()
-        c_voice = (c_job.custom_voice or c_job.kokoro_voice or "").strip()
-        c_speed = (
-            round(float(c_job.custom_speed or c_job.kokoro_speed), 2)
-            if (c_job.custom_speed or c_job.kokoro_speed) is not None
-            else None
-        )
-        c_title = (c_job.custom_title or "").strip()
-        c_chunk = c_job.tts_chunk_chars if c_job.tts_chunk_chars is not None else 500
-        c_verify = bool(c_job.verify_final_script)
-
-        if (
-            c_mode == mode_val
-            and c_depth == req_depth
-            and c_voice == req_voice
-            and c_speed == req_speed
-            and c_title == req_title
-            and c_chunk == req_chunk
-            and c_verify == req_verify
-        ):
-            # If the candidate is complete, only treat as duplicate if local MP3 is present
-            if c_job.status == JobState.COMPLETE.value:
-                if c_job.local_audio_path and os.path.exists(c_job.local_audio_path):
-                    duplicate_job = c_job
-                    break
-                else:
-                    # Audio cleaned up - do not treat as duplicate; allow creating a new job
-                    continue
-            else:
-                duplicate_job = c_job
-                break
-
-    if duplicate_job:
-        ep_title = _resolve_response_title(duplicate_job)
-        return HeraldResponse(
-            job_id=duplicate_job.id,
-            status=duplicate_job.status,
-            request_mode=duplicate_job.request_mode,
-            source_type=duplicate_job.source_type,
-            is_duplicate=True,
-            message="Identical source content and settings already processed.",
-            episode_title=ep_title,
-        )
-
-    # 4. Create PodcastJob
+    # 4. Create PodcastJob (every intentional request gets its own immutable record)
     job_id = str(uuid.uuid4())
     telegram_chat = (
         int(req.delivery_target)
@@ -349,9 +381,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         source_text=deduped_text,
         custom_voice=req.custom_voice,
         custom_speed=req.custom_speed,
-        custom_title=req_title,
+        custom_title=resolved_title,
         tts_chunk_chars=req.tts_chunk_chars or 500,
         verify_final_script=req.verify_final_script,
+        rerun_of_job_id=prior_job.id if prior_job else None,
+        generation_settings_json=settings_snapshot,
         status=JobState.RECEIVED.value,
     )
 
@@ -380,28 +414,98 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     request_mode=existing.request_mode,
                     source_type=existing.source_type,
                     is_duplicate=True,
+                    rerun_of_job_id=existing.rerun_of_job_id,
                     message="Telegram message already accepted.",
                     episode_title=ep_title,
                 )
         raise e
 
-    transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
-    transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
-    record_job_diagnostic_event(job.id, "INFO", "intake", "INTAKE_RECEIVED", f"Accepted {req.transport} intake request (mode={mode_val})", db=db)
-    if source_url:
+    # Case D: Duplicate content + hold_for_approval == False
+    # Prompt the user for rerun confirmation BEFORE running any scripting / AI calls.
+    if prior_job is not None and not req.hold_for_approval:
+        transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
+        transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
+        transition_job_state(
+            db, job, JobState.AWAITING_RERUN_CONFIRMATION.value, component="herald-core"
+        )
         record_job_diagnostic_event(
             job.id,
             "INFO",
-            "extraction",
-            "EXTRACTION_COMPLETE",
-            f"Extracted article from source URL ({len(job.source_text or '')} chars)",
-            metadata={"source_url": source_url, "char_count": len(job.source_text or "")},
+            "intake",
+            "AWAITING_RERUN_CONFIRMATION",
+            f"Prior content match found (job {prior_job.id}, status {prior_job.status}); awaiting user rerun confirmation before scripting.",
+            metadata={"prior_job_id": prior_job.id, "prior_status": prior_job.status},
             db=db,
         )
-    transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
-    record_job_diagnostic_event(job.id, "INFO", "scripting", "SCRIPTING_BEGIN", f"Starting script generation for mode '{mode_val}'", db=db)
+        db.commit()
+        ep_title = _resolve_response_title(job, custom_title=job.custom_title)
+        return HeraldResponse(
+            job_id=job.id,
+            status=job.status,
+            request_mode=job.request_mode,
+            source_type=job.source_type,
+            is_duplicate=True,
+            rerun_of_job_id=prior_job.id,
+            message="Prior generation found; confirmation required before synthesis.",
+            episode_title=ep_title,
+        )
 
-    # 5. Generate Script
+    # Cases A, B, C: Proceed directly to script generation
+    return execute_script_generation(
+        db,
+        job,
+        hold_for_approval=req.hold_for_approval,
+        is_duplicate=(prior_job is not None),
+        rerun_of_job_id=prior_job.id if prior_job else None,
+    )
+
+
+def execute_script_generation(
+    db: Session,
+    job: PodcastJob,
+    hold_for_approval: bool,
+    is_duplicate: bool = False,
+    rerun_of_job_id: str | None = None,
+) -> HeraldResponse:
+    """
+    Execute script generation, verification, and transition to either AWAITING_APPROVAL or QUEUED_TTS.
+    Can be called for initial jobs (Cases A, B, C) or upon approving a rerun in AWAITING_RERUN_CONFIRMATION (Case D).
+    """
+    mode_val = job.request_mode
+    source_url = job.source_url
+
+    if job.status == JobState.RECEIVED.value:
+        transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
+        transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "intake",
+            "INTAKE_RECEIVED",
+            f"Accepted {job.transport} intake request (mode={mode_val})",
+            db=db,
+        )
+        if source_url:
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "extraction",
+                "EXTRACTION_COMPLETE",
+                f"Extracted article from source URL ({len(job.source_text or '')} chars)",
+                metadata={"source_url": source_url, "char_count": len(job.source_text or "")},
+                db=db,
+            )
+
+    transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
+    record_job_diagnostic_event(
+        job.id,
+        "INFO",
+        "scripting",
+        "SCRIPTING_BEGIN",
+        f"Starting script generation for mode '{mode_val}'",
+        db=db,
+    )
+
     try:
         if mode_val == RequestMode.LITERAL.value:
             logger.info(f"Generating Literal script for job '{job.id}' (zero AI requests)")
@@ -425,7 +529,12 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             # Multi-stage grounded research workflow
             if not job.research_grounding_json:
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "RESEARCH_GROUNDING_BEGIN", f"Starting grounded research (depth={job.research_depth or 'medium'})", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_GROUNDING_BEGIN",
+                    f"Starting grounded research (depth={job.research_depth or 'medium'})",
+                    db=db,
                 )
                 grounded_data = generate_grounded_research(
                     source_text=job.source_text,
@@ -442,13 +551,21 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     "research",
                     "RESEARCH_GROUNDING_COMPLETE",
                     f"Grounded research complete ({job.research_source_count} sources, {job.research_search_count} searches)",
-                    metadata={"sources_count": job.research_source_count, "search_count": job.research_search_count},
+                    metadata={
+                        "sources_count": job.research_source_count,
+                        "search_count": job.research_search_count,
+                    },
                     db=db,
                 )
 
             if not job.research_json:
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "RESEARCH_NORMALIZATION_BEGIN", "Normalizing research claims and sources into structured dossier", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_NORMALIZATION_BEGIN",
+                    "Normalizing research claims and sources into structured dossier",
+                    db=db,
                 )
                 dossier = normalize_research_dossier(
                     source_text=job.source_text,
@@ -459,7 +576,12 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.research_model = settings.GEMINI_RESEARCH_MODEL
                 db.commit()
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "RESEARCH_NORMALIZATION_COMPLETE", "Research dossier normalized successfully", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_NORMALIZATION_COMPLETE",
+                    "Research dossier normalized successfully",
+                    db=db,
                 )
 
             if not job.script_json:
@@ -475,7 +597,12 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
 
             if not job.research_audit_json:
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "RESEARCH_AUDIT_BEGIN", "Auditing research script against grounding sources", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "RESEARCH_AUDIT_BEGIN",
+                    "Auditing research script against grounding sources",
+                    db=db,
                 )
                 audit = audit_research_script(
                     source_text=job.source_text,
@@ -491,14 +618,23 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     "research",
                     "RESEARCH_AUDIT_COMPLETE",
                     f"Research audit completed (has_material_issues={bool((job.research_audit_json or {}).get('has_material_issues'))})",
-                    metadata={"has_material_issues": bool((job.research_audit_json or {}).get("has_material_issues"))},
+                    metadata={
+                        "has_material_issues": bool(
+                            (job.research_audit_json or {}).get("has_material_issues")
+                        )
+                    },
                     db=db,
                 )
 
             audit_data = job.research_audit_json or {}
             if audit_data.get("has_material_issues") and job.research_repair_count == 0:
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "SCRIPT_REPAIR_BEGIN", "Repairing research script based on audit findings", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "SCRIPT_REPAIR_BEGIN",
+                    "Repairing research script based on audit findings",
+                    db=db,
                 )
                 repaired = repair_research_script(
                     source_text=job.source_text,
@@ -511,7 +647,12 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.research_repair_count = 1
                 db.commit()
                 record_job_diagnostic_event(
-                    job.id, "INFO", "research", "SCRIPT_REPAIR_COMPLETE", "Research script repair completed", db=db
+                    job.id,
+                    "INFO",
+                    "research",
+                    "SCRIPT_REPAIR_COMPLETE",
+                    "Research script repair completed",
+                    db=db,
                 )
         else:
             # Brief or Standard AI mode
@@ -526,7 +667,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job_id=job.id,
             )
             job.script_json = script_resp.model_dump()
-            m_val = getattr(provider, "configured_model", None) or getattr(provider, "model_name", None) or settings.GEMINI_MODEL
+            m_val = (
+                getattr(provider, "configured_model", None)
+                or getattr(provider, "model_name", None)
+                or settings.GEMINI_MODEL
+            )
             job.gemini_model = m_val if isinstance(m_val, str) else settings.GEMINI_MODEL
             db.commit()
             record_stage_metric(
@@ -631,28 +776,42 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         ep_title = _resolve_response_title(
             job, custom_title=job.custom_title, script_obj=script_obj
         )
-        dur_info = calculate_script_duration(script_obj, job.custom_speed or settings.KOKORO_SPEED)
+        dur_info = calculate_script_duration(
+            script_obj, job.custom_speed or settings.KOKORO_SPEED
+        )
 
-        if req.hold_for_approval:
+        if hold_for_approval:
             job.approval_required = True
             job.approval_requested_at = None
             job.telegram_approval_message_id = None
-            transition_job_state(db, job, JobState.AWAITING_APPROVAL.value, component="herald-core")
-            record_job_diagnostic_event(job.id, "INFO", "approval", "APPROVAL_REQUESTED", "Job held for user approval", db=db)
+            transition_job_state(
+                db, job, JobState.AWAITING_APPROVAL.value, component="herald-core"
+            )
+            record_job_diagnostic_event(
+                job.id, "INFO", "approval", "APPROVAL_REQUESTED", "Job held for user approval", db=db
+            )
             db.commit()
             return HeraldResponse(
                 job_id=job.id,
                 status=job.status,
                 request_mode=job.request_mode,
                 source_type=job.source_type,
-                is_duplicate=False,
+                is_duplicate=is_duplicate,
+                rerun_of_job_id=rerun_of_job_id,
                 message="Script ready and awaiting approval.",
                 episode_title=ep_title,
                 estimated_minutes=dur_info.get("estimated_minutes"),
             )
 
         transition_job_state(db, job, JobState.QUEUED_TTS.value, component="herald-core")
-        record_job_diagnostic_event(job.id, "INFO", "queue", "QUEUED_FOR_TTS", "Job queued for Kokoro TTS synthesis", db=db)
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "queue",
+            "QUEUED_FOR_TTS",
+            "Job queued for Kokoro TTS synthesis",
+            db=db,
+        )
         db.commit()
 
         return HeraldResponse(
@@ -660,7 +819,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             status=job.status,
             request_mode=job.request_mode,
             source_type=job.source_type,
-            is_duplicate=False,
+            is_duplicate=is_duplicate,
+            rerun_of_job_id=rerun_of_job_id,
             message="Accepted and queued for TTS synthesis.",
             episode_title=ep_title,
             estimated_minutes=dur_info.get("estimated_minutes"),
@@ -669,6 +829,17 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         logger.error(f"Script generation failure for job '{job.id}': {e}")
         cat, safe_msg = sanitize_error(e)
         eff_cat = cat if cat and cat != "UNKNOWN_ERROR" else "SCRIPT_GENERATION_FAILED"
+        try:
+            from herald.services.failure_diagnostics import collect_failure_diagnostics
+            collect_failure_diagnostics(
+                stage="scripting",
+                error=e,
+                job_id=job.id,
+                attempt=job.attempt_count or 1,
+                db=db,
+            )
+        except Exception as diag_err:
+            logger.warning(f"Failure diagnostics capture error: {diag_err}")
         record_job_diagnostic_event(
             job.id,
             "ERROR",
@@ -691,7 +862,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             status=job.status,
             request_mode=job.request_mode,
             source_type=job.source_type,
-            is_duplicate=False,
+            is_duplicate=is_duplicate,
+            rerun_of_job_id=rerun_of_job_id,
             message=f"Script generation failed: {safe_msg}",
             error_category=eff_cat,
         )

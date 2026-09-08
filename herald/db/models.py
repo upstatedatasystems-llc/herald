@@ -29,6 +29,7 @@ class JobState(str, enum.Enum):
     SCRIPTING = "SCRIPTING"
     SCRIPT_READY = "SCRIPT_READY"
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    AWAITING_RERUN_CONFIRMATION = "AWAITING_RERUN_CONFIRMATION"
     QUEUED_TTS = "QUEUED_TTS"
     SYNTHESIZING = "SYNTHESIZING"
     ENCODING = "ENCODING"
@@ -81,6 +82,8 @@ class PodcastJob(Base):
     custom_title = Column(String(255), nullable=True)
     tts_chunk_chars = Column(Integer, nullable=True, default=500)
     verify_final_script = Column(Boolean, nullable=True, default=False)
+    rerun_of_job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="SET NULL"), nullable=True, index=True)
+    generation_settings_json = Column(JSON, nullable=True)
 
     gmail_received_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -155,6 +158,9 @@ class PodcastJob(Base):
     telegram_delivery_message_id = Column(BigInteger, nullable=True)
     telegram_audio_file_id = Column(Text, nullable=True)
     telegram_document_file_id = Column(Text, nullable=True)
+    first_chunk_progress_claimed_at = Column(DateTime(timezone=True), nullable=True)
+    telegram_progress_message_id = Column(BigInteger, nullable=True)
+    auto_diagnostics_json = Column(JSON, nullable=True)
 
     # Error details
     error_code = Column(String(100), nullable=True)

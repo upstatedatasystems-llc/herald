@@ -20,18 +20,20 @@ SETUP_SCRIPT_PATH = Path(__file__).parent.parent.parent / "setup.sh"
 
 def get_bash_executable() -> str | None:
     """Find bash executable across Linux, macOS, and Windows (Git Bash)."""
-    b = shutil.which("bash") or shutil.which("bash.exe")
-    if b:
-        return b
     git_path = shutil.which("git")
     if git_path:
         candidates = [
             os.path.join(os.path.dirname(os.path.dirname(git_path)), "bin", "bash.exe"),
             os.path.join(os.path.dirname(os.path.dirname(git_path)), "usr", "bin", "bash.exe"),
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
         ]
         for c in candidates:
             if os.path.exists(c):
                 return c
+    b = shutil.which("bash") or shutil.which("bash.exe")
+    if b and "system32" not in b.lower():
+        return b
     return None
 
 

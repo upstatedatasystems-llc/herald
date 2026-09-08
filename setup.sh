@@ -177,6 +177,11 @@ os.chmod(filepath, 0o600)
 
 if [ -f "$ENV_FILE" ]; then
     echo "ℹ️  Existing configuration found in ${ENV_FILE}."
+    EXISTING_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
+    if [ "$EXISTING_RES_M" = "gemini-2.5-flash" ]; then
+        echo "🔄 Migrating GEMINI_RESEARCH_MODEL from former default gemini-2.5-flash to gemini-3.6-flash..."
+        set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
+    fi
 fi
 
 # 1. Telegram Bot Token
@@ -242,6 +247,7 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "AI_PROVIDER" "gemini"
             set_env_val "GEMINI_API_KEY" "$GEMINI_KEY"
             set_env_val "GEMINI_MODEL" "gemini-3.5-flash"
+            set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
             set_env_val "RESEARCH_PROVIDER" "gemini"
             ;;
         3)
@@ -455,7 +461,12 @@ RES_PROV=$(get_env_val "RESEARCH_PROVIDER")
 if [ "$RES_PROV" = "gemini" ]; then
     G_RES_K=$(get_env_val "GEMINI_API_KEY")
     G_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
-    G_RES_M=${G_RES_M:-"gemini-2.5-flash"}
+    if [ "$G_RES_M" = "gemini-2.5-flash" ]; then
+        echo "🔄 Migrating GEMINI_RESEARCH_MODEL from former default gemini-2.5-flash to gemini-3.6-flash..."
+        G_RES_M="gemini-3.6-flash"
+        set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
+    fi
+    G_RES_M=${G_RES_M:-"gemini-3.6-flash"}
     if [ -z "$G_RES_K" ]; then
         echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
         set_env_val "RESEARCH_PROVIDER" "none"
@@ -623,6 +634,12 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     # Check herald-worker
     if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
         echo "✅ Herald Worker daemon is running."
+        echo "🔊 Prewarming Kokoro voice sample cache in herald-worker..."
+        if docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm; then
+            echo "✅ Voice sample cache prewarmed."
+        else
+            echo "⚠️  Voice sample prewarming encountered an issue (non-fatal, will generate on demand)."
+        fi
     else
         echo "❌ Error: Herald Worker container is not running. Check 'docker compose logs herald-worker'." >&2
         docker compose logs herald-worker >&2 || true

@@ -35,6 +35,14 @@ GENERIC_PATTERNS = [
         re.compile(r"(password['\"]?\s*[:=]\s*['\"]?)([^'\"\s\r\n,]+)(['\"]?)", re.IGNORECASE),
         r"\1[REDACTED_PASSWORD]\3",
     ),
+    (
+        re.compile(r"([?&](?:token|key|api_key|secret|password)=)([^&\s]+)", re.IGNORECASE),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(r"\b(sk-[a-zA-Z0-9_-]{15,}|gsk_[a-zA-Z0-9_-]{15,})\b", re.IGNORECASE),
+        "[REDACTED_API_KEY]",
+    ),
 ]
 
 # Sensitive dictionary keys for metadata redaction
@@ -280,7 +288,11 @@ def sanitize_error(error: Exception | str | None) -> tuple[str, str]:
 
     # Classify error category
     lower_msg = sanitized_msg.lower()
-    if "outputtruncated" in cat.lower() or "truncated" in lower_msg or "max_tokens" in lower_msg or "token limit" in lower_msg:
+    if hasattr(error, "error_category") and getattr(error, "error_category"):
+        cat = getattr(error, "error_category")
+    elif "modelunavailable" in cat.lower() or "model is unavailable" in lower_msg:
+        cat = "AI_MODEL_UNAVAILABLE"
+    elif "outputtruncated" in cat.lower() or "truncated" in lower_msg or "max_tokens" in lower_msg or "token limit" in lower_msg:
         cat = "OUTPUT_TRUNCATED"
     elif "auth" in lower_msg or "401" in lower_msg or "403" in lower_msg or "permission" in lower_msg or "api key" in lower_msg:
         cat = "AUTHENTICATION_FAILED"
