@@ -10,15 +10,16 @@ from sqlalchemy.orm import sessionmaker
 from herald.config import settings
 from herald.db.models import Base
 from herald.services.voice_manager import (
+    HERALD_VOICE_SAMPLE_CACHE_VERSION,
     VOICE_SAMPLE_TEXT,
+    compute_sample_text_hash,
     convert_wav_to_mp3,
     ensure_voice_sample,
     is_valid_sample_audio,
+    save_voice_sample_manifest,
 )
 from herald.telegram.auth import generate_pairing_code, verify_and_claim_pairing_code
 from herald.telegram.bot import (
-    _IN_FLIGHT_VOICE_SAMPLES,
-    _VOICE_SAMPLE_LOCK,
     handle_telegram_callback_query,
     handle_telegram_command,
 )
@@ -128,13 +129,12 @@ def test_missing_ffmpeg_fails_in_production(monkeypatch, tmp_path):
     assert res.stat().st_size > 0
 
 
-def test_voice_sample_callback_non_blocking_and_in_flight_dedup(db_session, monkeypatch, tmp_path):
+def test_voice_sample_callback_cache_miss_returns_unavailable_without_synthesis(
+    db_session, monkeypatch, tmp_path
+):
     """
-    Test that cache miss:
-    1. Acknowledges callback promptly
-    2. Submits background task and returns to polling loop immediately
-    3. Allows processing other commands while sample is generating
-    4. Deduplicates duplicate same-voice requests
+    On cache miss, bot immediately responds with an unavailable alert.
+    Zero Kokoro calls or runtime synthesis tasks are permitted.
     """
     monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
     monkeypatch.setattr("herald.services.voice_manager.settings.HERALD_WORK_DIR", str(tmp_path))
@@ -144,74 +144,28 @@ def test_voice_sample_callback_non_blocking_and_in_flight_dedup(db_session, monk
 
     mock_client = MagicMock(spec=TelegramClient)
 
-    # Clean in-flight set before test
-    with _VOICE_SAMPLE_LOCK:
-        _IN_FLIGHT_VOICE_SAMPLES.clear()
-
-    synth_started = False
-    synth_can_finish = False
-
-    def slow_ensure(voice, db=None, kokoro_client=None):
-        nonlocal synth_started, synth_can_finish
-        synth_started = True
-        while not synth_can_finish:
-            time.sleep(0.05)
-        p = tmp_path / f"sample_{voice}.mp3"
-        p.write_bytes(b"dummy mp3 data")
-        return p
-
     cb_query = {
-        "id": "cb-slow-1",
+        "id": "cb-miss-1",
         "from": {"id": 12345},
         "message": {"message_id": 701, "chat": {"id": 12345, "type": "private"}},
         "data": "h2:voice:sample:af_bella",
     }
 
-    with patch("herald.telegram.bot.ensure_voice_sample", side_effect=slow_ensure):
-        # 1. Trigger sample callback
-        t0 = time.monotonic()
+    with patch("herald.telegram.bot.get_cached_voice_sample", return_value=None) as mock_get_cached:
         handle_telegram_callback_query(db_session, mock_client, cb_query)
-        elapsed = time.monotonic() - t0
 
-        # Returning must be near-instantaneous (< 0.5s), NOT blocked on slow generation!
-        assert elapsed < 0.5
-        mock_client.answer_callback_query.assert_called_with(
-            "cb-slow-1",
-            text="Preparing voice sample for Bella... Herald will send it shortly.",
+        mock_get_cached.assert_called_once_with("af_bella")
+        mock_client.answer_callback_query.assert_called_once_with(
+            "cb-miss-1",
+            text="⚠️ Voice preview is unavailable on this Herald installation.\nRebuild the voice preview cache and try again.",
+            show_alert=True,
         )
-
-        # 2. Process another command (e.g. /status) WHILE sample is generating in background
-        status_msg = {"chat": {"id": 12345, "type": "private"}, "from": {"id": 12345}, "message_id": 702}
-        handle_telegram_command(db_session, mock_client, status_msg, "status", "")
-        assert mock_client.send_message.called
-
-        # 3. Duplicate same-voice click while in-flight -> prompt acknowledgment without launching 2nd task
-        cb_dup = {
-            "id": "cb-slow-dup",
-            "from": {"id": 12345},
-            "message": {"message_id": 703, "chat": {"id": 12345, "type": "private"}},
-            "data": "h2:voice:sample:af_bella",
-        }
-        handle_telegram_callback_query(db_session, mock_client, cb_dup)
-        mock_client.answer_callback_query.assert_called_with(
-            "cb-slow-dup",
-            text="Sample for Bella is already being prepared...",
-            show_alert=False,
-        )
-
-        # Allow background task to complete
-        synth_can_finish = True
-        time.sleep(0.3)
-
-    # Verify background task sent audio and cleared in-flight
-    assert mock_client.send_audio.called
-    with _VOICE_SAMPLE_LOCK:
-        assert "af_bella" not in _IN_FLIGHT_VOICE_SAMPLES
+        assert not mock_client.send_audio.called
 
 
-def test_voice_sample_callback_generic_error_on_failure(db_session, monkeypatch, tmp_path):
+def test_voice_sample_callback_cache_hit_sends_audio(db_session, monkeypatch, tmp_path):
     """
-    On background synthesis failure, user receives a generic error without leaking raw exceptions.
+    On cache hit, bot plays cached sample immediately.
     """
     monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
     monkeypatch.setattr("herald.services.voice_manager.settings.HERALD_WORK_DIR", str(tmp_path))
@@ -220,30 +174,27 @@ def test_voice_sample_callback_generic_error_on_failure(db_session, monkeypatch,
     verify_and_claim_pairing_code(db_session, code, user_id=12345, chat_id=12345, username="owner")
 
     mock_client = MagicMock(spec=TelegramClient)
-
-    with _VOICE_SAMPLE_LOCK:
-        _IN_FLIGHT_VOICE_SAMPLES.clear()
+    sample_file = tmp_path / "sample_af_heart.mp3"
+    sample_file.write_bytes(b"dummy mp3 data")
 
     cb_query = {
-        "id": "cb-err-1",
+        "id": "cb-hit-1",
         "from": {"id": 12345},
-        "message": {"message_id": 704, "chat": {"id": 12345, "type": "private"}},
-        "data": "h2:voice:sample:af_sarah",
+        "message": {"message_id": 702, "chat": {"id": 12345, "type": "private"}},
+        "data": "h2:voice:sample:af_heart",
     }
 
-    with patch("herald.telegram.bot.ensure_voice_sample", side_effect=Exception("Internal secret db connection failed: /etc/passwd")):
+    with patch("herald.telegram.bot.get_cached_voice_sample", return_value=sample_file):
         handle_telegram_callback_query(db_session, mock_client, cb_query)
-        time.sleep(0.3)
 
-    # Verify generic user message and in-flight cleanup
-    mock_client.send_message.assert_called_once()
-    sent_text = mock_client.send_message.call_args[1]["text"]
-    assert "Voice sample generation failed. Please try again." in sent_text
-    assert "/etc/passwd" not in sent_text
-    assert "secret" not in sent_text
-
-    with _VOICE_SAMPLE_LOCK:
-        assert "af_sarah" not in _IN_FLIGHT_VOICE_SAMPLES
+        mock_client.answer_callback_query.assert_called_once_with(
+            "cb-hit-1",
+            text="Playing sample for Heart...",
+        )
+        mock_client.send_audio.assert_called_once()
+        call_kwargs = mock_client.send_audio.call_args[1]
+        assert call_kwargs["audio_path"] == sample_file
+        assert "Heart" in call_kwargs["title"]
 
 
 def test_voice_browser_html_safety_escaping(monkeypatch):
@@ -378,10 +329,20 @@ def test_voice_sample_audio_delivery_clean_and_media_callback_safe(db_session, m
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=77777, chat_id=77777, username="owner")
 
-    # Seed sample audio (filename is sample_<voice>.mp3)
+    # Seed sample audio (filename is sample_<voice>.mp3) and manifest
     sample_file = tmp_path / "voice_samples" / "sample_af_sarah.mp3"
     sample_file.parent.mkdir(parents=True, exist_ok=True)
     sample_file.write_bytes(b"dummy audio data for sample")
+    save_voice_sample_manifest({
+        "af_sarah": {
+            "voice_id": "af_sarah",
+            "sample_text_hash": compute_sample_text_hash(),
+            "speed": 1.0,
+            "format": "mp3",
+            "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
+            "file_path": str(sample_file),
+        }
+    })
 
     mock_client = MagicMock(spec=TelegramClient)
 
@@ -418,3 +379,77 @@ def test_voice_sample_audio_delivery_clean_and_media_callback_safe(db_session, m
     assert prefs["default_voice"] == "af_sarah"
     # edit_message_text must NOT be called on non-text audio message!
     assert not mock_client.edit_message_text.called
+
+
+def test_get_cached_voice_sample_rejects_orphans_and_version_mismatch(monkeypatch, tmp_path):
+    """
+    get_cached_voice_sample must reject:
+    1. Orphan files on disk without manifest entry
+    2. Files with mismatched sample_text_hash
+    3. Files with mismatched speed or format
+    4. Files with mismatched cache_version
+    """
+    from herald.services.voice_manager import get_cached_voice_sample
+
+    monkeypatch.setenv("HERALD_MOCK_TTS", "1")
+    monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
+    monkeypatch.setattr("herald.services.voice_manager.settings.HERALD_WORK_DIR", str(tmp_path))
+
+    sample_file = tmp_path / "voice_samples" / "sample_af_bella.mp3"
+    sample_file.parent.mkdir(parents=True, exist_ok=True)
+    sample_file.write_bytes(b"dummy mp3 data")
+
+    # 1. Orphan file (no manifest at all)
+    assert get_cached_voice_sample("af_bella") is None
+
+    # 2. Manifest with wrong version
+    save_voice_sample_manifest({
+        "af_bella": {
+            "voice_id": "af_bella",
+            "sample_text_hash": compute_sample_text_hash(),
+            "speed": 1.0,
+            "format": "mp3",
+            "cache_version": "v0_legacy",
+            "file_path": str(sample_file),
+        }
+    })
+    assert get_cached_voice_sample("af_bella") is None
+
+    # 3. Manifest with wrong text hash
+    save_voice_sample_manifest({
+        "af_bella": {
+            "voice_id": "af_bella",
+            "sample_text_hash": "different_hash",
+            "speed": 1.0,
+            "format": "mp3",
+            "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
+            "file_path": str(sample_file),
+        }
+    })
+    assert get_cached_voice_sample("af_bella") is None
+
+    # 4. Manifest with wrong speed
+    save_voice_sample_manifest({
+        "af_bella": {
+            "voice_id": "af_bella",
+            "sample_text_hash": compute_sample_text_hash(),
+            "speed": 1.5,
+            "format": "mp3",
+            "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
+            "file_path": str(sample_file),
+        }
+    })
+    assert get_cached_voice_sample("af_bella") is None
+
+    # 5. Matching manifest -> successfully cached
+    save_voice_sample_manifest({
+        "af_bella": {
+            "voice_id": "af_bella",
+            "sample_text_hash": compute_sample_text_hash(),
+            "speed": 1.0,
+            "format": "mp3",
+            "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
+            "file_path": str(sample_file),
+        }
+    })
+    assert get_cached_voice_sample("af_bella") == sample_file

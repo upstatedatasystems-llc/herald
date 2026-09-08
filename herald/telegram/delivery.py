@@ -230,6 +230,23 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             job.error_code = "TELEGRAM_DELIVERY_FAILED"
             job.error_detail = str(de)[:500]
 
+            diag_rec = None
+            try:
+                from herald.services.failure_diagnostics import (
+                    collect_failure_diagnostics,
+                    format_concise_failure_summary,
+                )
+                diag_rec = collect_failure_diagnostics(
+                    stage="delivery",
+                    error=de,
+                    target_url="https://api.telegram.org",
+                    job_id=job.id,
+                    attempt=job.delivery_attempt_count,
+                    db=db,
+                )
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error in delivery for job '{job.id}': {diag_err}")
+
             record_job_diagnostic_event(
                 job.id,
                 "ERROR",
@@ -248,9 +265,11 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                     component="telegram-delivery",
                     message=f"Telegram delivery failed after {job.delivery_attempt_count} attempts: {de}",
                 )
+                diag_line = f"\n{format_concise_failure_summary(diag_rec)}" if diag_rec else ""
                 client.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ Podcast delivery failed permanently after multiple attempts.\nJob ID: {job.id[:8]}",
+                    text=f"⚠️ <b>Podcast delivery failed permanently after multiple attempts.</b>\nJob ID: <code>{job.id[:8]}</code>{diag_line}\n\nUse <code>/diagnostics {job.id[:8]}</code> for support details.",
+                    parse_mode="HTML",
                 )
             else:
                 backoff_secs = 15 * (2 ** (job.delivery_attempt_count - 1))

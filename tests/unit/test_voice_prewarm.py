@@ -7,6 +7,7 @@ import pytest
 
 from herald.config import settings
 from herald.services.voice_manager import (
+    HERALD_VOICE_SAMPLE_CACHE_VERSION,
     VOICE_SAMPLE_TEXT,
     compute_sample_text_hash,
     ensure_voice_sample,
@@ -31,9 +32,12 @@ def mock_tts_env(monkeypatch, tmp_path):
 def test_manifest_lifecycle():
     manifest_data = {
         "af_heart": {
+            "voice_id": "af_heart",
+            "sample_text_hash": compute_sample_text_hash(),
             "text_hash": compute_sample_text_hash(),
             "speed": 1.0,
             "format": "mp3",
+            "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
             "file_path": "/tmp/test.mp3",
         }
     }
@@ -41,7 +45,8 @@ def test_manifest_lifecycle():
 
     loaded = load_voice_sample_manifest()
     assert "af_heart" in loaded
-    assert loaded["af_heart"]["text_hash"] == compute_sample_text_hash()
+    assert loaded["af_heart"]["sample_text_hash"] == compute_sample_text_hash()
+    assert loaded["af_heart"]["cache_version"] == HERALD_VOICE_SAMPLE_CACHE_VERSION
 
 
 def test_get_cached_voice_sample_miss_and_hit():

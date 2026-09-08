@@ -598,6 +598,19 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             job.error_detail = str(e)
             job.failed_stage = JobState.SYNTHESIZING.value
 
+            try:
+                from herald.services.failure_diagnostics import collect_failure_diagnostics
+                collect_failure_diagnostics(
+                    stage="tts",
+                    error=e,
+                    target_url=getattr(settings, "KOKORO_API_URL", "http://kokoro:8880"),
+                    job_id=job.id,
+                    attempt=job.synthesis_attempt_count or 1,
+                    db=db,
+                )
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error in worker for job '{job.id}': {diag_err}")
+
             # Calculate bounded exponential retry backoff (15s, 30s, 60s...)
             attempts = job.synthesis_attempt_count or 1
             backoff_sec = min(300, 15 * (2 ** (attempts - 1)))

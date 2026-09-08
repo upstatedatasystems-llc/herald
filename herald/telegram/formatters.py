@@ -27,7 +27,7 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
         return None, None
 
     if mode == RequestMode.RESEARCH.value:
-        model = getattr(job, "research_model", None) or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-2.5-flash")
+        model = getattr(job, "research_model", None) or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
         return "Gemini", model
 
     # Check ai_interactions first for authoritative evidence

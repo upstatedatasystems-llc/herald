@@ -41,7 +41,7 @@ echo "========================================================"
 echo ""
 
 # 1. Verify .env Existence and Permissions (0600)
-echo "[1/7] Checking configuration file and permissions..."
+echo "[1/8] Checking configuration file and permissions..."
 if [ ! -f "$ENV_FILE" ]; then
     report_fail "Configuration file '${ENV_FILE}' not found."
 else
@@ -74,7 +74,7 @@ get_env_key() {
 }
 
 # 2. Check for Placeholder Secrets and Provider Configuration
-echo "[2/7] Auditing credentials and AI provider consistency..."
+echo "[2/8] Auditing credentials and AI provider consistency..."
 KNOWN_PLACEHOLDERS=(
     "your-telegram-bot-token-from-botfather"
     "herald_secure_password"
@@ -183,7 +183,7 @@ case "$RES_PROV" in
 esac
 
 # 3. Check Default Service States
-echo "[3/7] Verifying default container service states..."
+echo "[3/8] Verifying default container service states..."
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
     report_fail "Docker Engine or Docker Compose v2 is not available."
 else
@@ -229,7 +229,7 @@ else
 fi
 
 # 4. Check Migration Container Status
-echo "[4/7] Verifying schema migration container completion..."
+echo "[4/8] Verifying schema migration container completion..."
 MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
 if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
     report_pass "Migration container (herald-migration) exited successfully with code 0."
@@ -238,7 +238,7 @@ else
 fi
 
 # 5. Authoritative Live Alembic Revision Parity Check (Dynamic Head)
-echo "[5/7] Verifying database schema matches dynamic Alembic head..."
+echo "[5/8] Verifying database schema matches dynamic Alembic head..."
 if command -v docker >/dev/null 2>&1; then
     HEADS_OUT=$(docker compose run --rm --no-deps --entrypoint alembic herald-migration heads 2>/dev/null || true)
     # Extract revision IDs (leading token on revision line)
@@ -265,7 +265,7 @@ else
 fi
 
 # 6. Verify Default Profile Isolation (n8n and herald-api NOT running)
-echo "[6/7] Verifying default profile isolation (optional services disabled)..."
+echo "[6/8] Verifying default profile isolation (optional services disabled)..."
 ALLOW_LEGACY="${HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES:-0}"
 RUNNING_SERVICES=$(docker compose ps --services --filter "status=running" 2>/dev/null || true)
 
@@ -286,7 +286,7 @@ else
 fi
 
 # 7. Check Runtime Disk Space Headroom (HERALD_MIN_DISK_MB runtime minimum)
-echo "[7/7] Verifying runtime disk headroom..."
+echo "[7/8] Verifying runtime disk headroom..."
 MIN_DISK_MB="${HERALD_MIN_DISK_MB:-500}"
 AVAIL_KB=$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
 AVAIL_MB=$((AVAIL_KB / 1024))
@@ -296,10 +296,25 @@ else
     report_fail "Available disk space (${AVAIL_MB} MB) is below runtime threshold (${MIN_DISK_MB} MB)."
 fi
 
+# 8. Verify Voice Preview Cache and Manifest Parity
+echo "[8/8] Verifying voice preview cache and manifest completeness..."
+if [ "${HERALD_TEST_ALLOW_VOICES:-0}" = "1" ]; then
+    report_pass "Voice preview cache check bypassed for test harness."
+elif docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
+    CHECK_CMD='import sys; from herald.config import settings; from herald.services.voice_manager import load_voice_sample_manifest, get_cached_voice_sample; manifest = load_voice_sample_manifest(); allowed = settings.get_allowed_voices_list(); missing = [v for v in allowed if not get_cached_voice_sample(v) or v not in manifest]; (print("Missing voice preview samples: " + str(missing)) or sys.exit(1)) if missing else print("All voice previews verified.")'
+    if CHECK_OUTPUT=$(docker compose exec -T herald-worker python -c "$CHECK_CMD" 2>&1); then
+        report_pass "Voice preview cache contains valid audio and manifest entries for all allowed voices."
+    else
+        report_fail "Voice preview cache incomplete: ${CHECK_OUTPUT}"
+    fi
+else
+    report_fail "Cannot verify voice preview cache because herald-worker is not running."
+fi
+
 echo ""
 echo "========================================================"
 if [ "$FAILURES" -eq 0 ]; then
-    echo "🎉 Acceptance Validation Passed: All 7 checks succeeded."
+    echo "🎉 Acceptance Validation Passed: All 8 checks succeeded."
     echo "========================================================"
     exit 0
 else

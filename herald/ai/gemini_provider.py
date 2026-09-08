@@ -207,14 +207,24 @@ class GeminiProvider(AIProvider):
                 }
             elif resp.status_code == 404:
                 is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
-                return {
-                    "provider": "Gemini Research",
-                    "configured": True,
-                    "connected": False,
-                    "model": model,
-                    "error": f"research model '{model}' unavailable or not found (404): {err_msg}",
-                    "error_category": "AI_MODEL_UNAVAILABLE",
-                }
+                if is_unavail:
+                    return {
+                        "provider": "Gemini Research",
+                        "configured": True,
+                        "connected": False,
+                        "model": model,
+                        "error": f"research model '{model}' unavailable or not found (404): {err_msg}",
+                        "error_category": "AI_MODEL_UNAVAILABLE",
+                    }
+                else:
+                    return {
+                        "provider": "Gemini Research",
+                        "configured": True,
+                        "connected": False,
+                        "model": model,
+                        "error": f"HTTP 404 error: {err_msg}",
+                        "error_category": "AI_SERVER_ERROR",
+                    }
             elif resp.status_code in (401, 403):
                 return {
                     "provider": "Gemini Research",

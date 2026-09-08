@@ -203,11 +203,6 @@ class TelegramClient:
 
         return self._request("POST", "answerCallbackQuery", timeout=timeout, json=payload)
 
-    def send_chat_action(self, chat_id: int | str, action: str = "typing") -> dict[str, Any]:
-        """Send chat status action (e.g. typing, upload_document, record_voice)."""
-        payload = {"chat_id": chat_id, "action": action}
-        return self._request("POST", "sendChatAction", timeout=10.0, json=payload)
-
     def send_audio(
         self,
         chat_id: int | str,

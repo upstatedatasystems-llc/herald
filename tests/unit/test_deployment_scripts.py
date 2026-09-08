@@ -515,7 +515,7 @@ def test_acceptance_location_independent_from_outside_repo(tmp_path):
         cwd=outside_dir,
     )
     assert res.returncode == 0
-    assert "Acceptance Validation Passed: All 7 checks succeeded." in res.stdout
+    assert "Acceptance Validation Passed: All 8 checks succeeded." in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -880,7 +880,10 @@ def test_setup_pairing_failure_when_cli_nonzero(tmp_path):
     (fake_bin / "docker").write_text(
         "#!/usr/bin/env bash\n"
         "if [ \"$1\" = \"compose\" ]; then\n"
-        "    if [ \"$2\" = \"exec\" ]; then echo 'Fatal DB Error' >&2; exit 1; fi\n"
+        "    if [ \"$2\" = \"exec\" ]; then\n"
+        "        if echo \"$*\" | grep -q \"voice_manager\"; then exit 0; fi\n"
+        "        echo 'Fatal DB Error' >&2; exit 1\n"
+        "    fi\n"
         "    if [ \"$2\" = \"ps\" ]; then\n"
         "        if [ \"$3\" = \"-q\" ]; then echo \"cid_ok\"; exit 0; fi\n"
         "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"

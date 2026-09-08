@@ -5,8 +5,9 @@ with atomic CAS claiming, accurate provider/TTS attribution, and extended ETA v2
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from herald.db.models import PodcastJob
@@ -29,7 +30,7 @@ def notify_tts_chunk_progress(
 ) -> bool:
     """
     Handle progress milestone notification when a TTS chunk completes.
-    Strictly fires only once for chunk_index == 1 using an atomic CAS DB claim.
+    Strictly fires only once for chunk_index == 1 using an atomic CAS DB claim with retry lease.
     Returns True if first-chunk milestone notification was sent, False otherwise.
     """
     if chunk_index != 1:
@@ -38,14 +39,18 @@ def notify_tts_chunk_progress(
     if job.transport != "telegram" or not job.telegram_chat_id:
         return False
 
-    # Atomic CAS claim to guarantee exactly-once milestone notification
+    # Atomic CAS claim with 30s lease expiration to guarantee safe retry if send fails
     now = datetime.now(UTC)
+    lease_threshold = now - timedelta(seconds=30)
     updated_rows = (
         db.query(PodcastJob)
         .filter(
             PodcastJob.id == job.id,
-            PodcastJob.first_chunk_progress_claimed_at.is_(None),
             PodcastJob.telegram_progress_message_id.is_(None),
+            or_(
+                PodcastJob.first_chunk_progress_claimed_at.is_(None),
+                PodcastJob.first_chunk_progress_claimed_at < lease_threshold,
+            ),
         )
         .update(
             {"first_chunk_progress_claimed_at": now},
@@ -79,6 +84,17 @@ def notify_tts_chunk_progress(
     client = telegram_client or TelegramClient()
     if not client.is_configured:
         logger.debug("Telegram client not configured; cannot deliver first-chunk milestone.")
+        try:
+            db.query(PodcastJob).filter(
+                PodcastJob.id == job.id,
+                PodcastJob.telegram_progress_message_id.is_(None),
+            ).update(
+                {"first_chunk_progress_claimed_at": None},
+                synchronize_session=False,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
         return False
 
     try:
@@ -111,9 +127,33 @@ def notify_tts_chunk_progress(
                 db=db,
             )
             return True
+        else:
+            # Did not get valid message_id; clear claim for retry
+            try:
+                db.query(PodcastJob).filter(
+                    PodcastJob.id == job.id,
+                    PodcastJob.telegram_progress_message_id.is_(None),
+                ).update(
+                    {"first_chunk_progress_claimed_at": None},
+                    synchronize_session=False,
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
     except Exception as e:
         logger.warning(
             f"Non-fatal error delivering first-chunk milestone notification for job '{job.id}': {e}"
         )
+        try:
+            db.query(PodcastJob).filter(
+                PodcastJob.id == job.id,
+                PodcastJob.telegram_progress_message_id.is_(None),
+            ).update(
+                {"first_chunk_progress_claimed_at": None},
+                synchronize_session=False,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
 
     return False

@@ -171,7 +171,9 @@ def test_diagnostics_timeout_bound():
             timeout_seconds=1.5,
         )
 
-        mock_sock.settimeout.assert_called_once_with(1.5)
+        assert mock_sock.settimeout.called
+        timeout_arg = mock_sock.settimeout.call_args[0][0]
+        assert timeout_arg == pytest.approx(1.5, abs=0.05)
 
 
 def test_diagnostics_multi_attempt_history_preservation(in_memory_db):

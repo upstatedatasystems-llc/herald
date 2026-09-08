@@ -471,8 +471,8 @@ if [ "$RES_PROV" = "gemini" ]; then
         echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
         set_env_val "RESEARCH_PROVIDER" "none"
     else
-        G_RES_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s"\nheader = "x-goog-api-key: %s"\n' "$G_RES_M" "$G_RES_K" | call_curl_config)
-        if echo "$G_RES_RESP" | grep -q '"name":'; then
+        G_RES_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"\nheader = "x-goog-api-key: %s"\nheader = "Content-Type: application/json"\ndata = "{\\"contents\\":[{\\"role\\":\\"user\\",\\"parts\\":[{\\"text\\":\\"ping\\"}]}],\\"tools\\":[{\\"google_search\\":{}}],\\"generationConfig\\":{\\"maxOutputTokens\\":5}}"\n' "$G_RES_M" "$G_RES_K" | call_curl_config)
+        if echo "$G_RES_RESP" | grep -q -E '"candidates":|"name":'; then
             echo "✅ Gemini Research model '${G_RES_M}' verified."
         else
             echo "⚠️  Gemini Research verification for '${G_RES_M}' failed. Disabling RESEARCH_PROVIDER."
@@ -638,7 +638,8 @@ if command -v docker &> /dev/null && docker compose version &> /dev/null; then
         if docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm; then
             echo "✅ Voice sample cache prewarmed."
         else
-            echo "⚠️  Voice sample prewarming encountered an issue (non-fatal, will generate on demand)."
+            echo "❌ Error: Voice sample cache prewarming failed." >&2
+            exit 1
         fi
     else
         echo "❌ Error: Herald Worker container is not running. Check 'docker compose logs herald-worker'." >&2

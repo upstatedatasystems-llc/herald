@@ -166,3 +166,74 @@ def test_non_telegram_transport_ignored(db_session):
     )
     assert res is False
     mock_client.send_message.assert_not_called()
+
+
+def test_progress_claim_retry_on_failure_and_lease_expiry(db_session):
+    """
+    If send_message fails, the CAS claim is cleared to allow immediate retry.
+    If a claim was somehow abandoned without a message_id and is >30s old, the lease expires and allows retry.
+    """
+    from datetime import timedelta
+
+    now = datetime.now(UTC)
+    job = PodcastJob(
+        id="job-milestone-retry",
+        transport="telegram",
+        telegram_chat_id=12345,
+        telegram_message_id=987,
+        source_hash="hash-retry-1",
+        source_text="Sample text",
+        status=JobState.SYNTHESIZING.value,
+        created_at=now,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    mock_client = MagicMock(spec=TelegramClient)
+    mock_client.is_configured = True
+    mock_client.send_message.side_effect = Exception("Telegram API timeout")
+
+    # 1. First attempt fails on send
+    res1 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=1,
+        total_chunks=3,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res1 is False
+    db_session.refresh(job)
+    assert job.telegram_progress_message_id is None
+    # Claim must have been cleared on failure!
+    assert job.first_chunk_progress_claimed_at is None
+
+    # 2. Immediate retry succeeds
+    mock_client.send_message.side_effect = None
+    mock_client.send_message.return_value = {"message_id": 5555}
+    res2 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=1,
+        total_chunks=3,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res2 is True
+    db_session.refresh(job)
+    assert job.telegram_progress_message_id == 5555
+    assert job.first_chunk_progress_claimed_at is not None
+
+    # 3. Third attempt is ignored because message_id is set
+    res3 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=1,
+        total_chunks=3,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res3 is False

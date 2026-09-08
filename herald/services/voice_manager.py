@@ -25,6 +25,8 @@ logger = logging.getLogger("herald.services.voice_manager")
 # Standard fixed comparison text used across all voice previews
 VOICE_SAMPLE_TEXT = "Hello, this is Herald reading your text with Kokoro TTS."
 
+HERALD_VOICE_SAMPLE_CACHE_VERSION = "v1"
+
 VOICE_METADATA: dict[str, dict[str, str]] = {
     "af_heart": {
         "display_name": "Heart",
@@ -169,9 +171,12 @@ def ensure_voice_sample(
             try:
                 manifest = load_voice_sample_manifest()
                 manifest[v_clean] = {
+                    "voice_id": v_clean,
+                    "sample_text_hash": compute_sample_text_hash(),
                     "text_hash": compute_sample_text_hash(),
                     "speed": 1.0,
                     "format": "mp3",
+                    "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
                     "file_path": str(sample_mp3),
                     "generated_at": datetime.now(UTC).isoformat(),
                 }
@@ -223,8 +228,9 @@ def compute_sample_text_hash(text: str = VOICE_SAMPLE_TEXT) -> str:
 
 def get_cached_voice_sample(voice: str) -> Path | None:
     """
-    Check if a voice preview sample is already prewarmed and valid on disk.
+    Check if a voice preview sample is already prewarmed, recorded in manifest, and valid on disk.
     Returns Path if available, None on cache miss.
+    Rejects orphan files not tracked in the manifest or with mismatched version/settings.
     """
     v_clean = voice.lower().strip()
     sample_mp3 = get_voice_sample_path(v_clean)
@@ -233,16 +239,22 @@ def get_cached_voice_sample(voice: str) -> Path | None:
 
     manifest = load_voice_sample_manifest()
     entry = manifest.get(v_clean)
+    if not entry or not isinstance(entry, dict):
+        # Reject orphan files without valid manifest entry
+        return None
+
     curr_hash = compute_sample_text_hash()
+    text_hash = entry.get("sample_text_hash") or entry.get("text_hash")
+    if text_hash != curr_hash:
+        return None
+    if entry.get("speed") != 1.0:
+        return None
+    if entry.get("format") != "mp3":
+        return None
+    if entry.get("cache_version") != HERALD_VOICE_SAMPLE_CACHE_VERSION:
+        return None
 
-    if entry and entry.get("text_hash") == curr_hash:
-        return sample_mp3
-
-    # Fallback if valid audio exists even if manifest has not recorded it yet
-    if not entry and is_valid_sample_audio(sample_mp3):
-        return sample_mp3
-
-    return None
+    return sample_mp3
 
 
 def prewarm_all_voice_samples(
@@ -305,8 +317,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.prewarm:
+        import sys
+
         print("Prewarming all Herald voice preview samples...")
         res = prewarm_all_voice_samples(force=args.force)
+        all_ok = True
         for vid, ok in res.items():
             status_str = "SUCCESS" if ok else "FAILED"
             print(f"  {vid}: {status_str}")
+            if not ok:
+                all_ok = False
+        if not all_ok:
+            sys.exit(1)
+        sys.exit(0)

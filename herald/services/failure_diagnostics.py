@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import socket
 import ssl
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -65,9 +66,13 @@ def _probe_network_target(
 ) -> dict[str, Any]:
     """
     Perform a safe, stage-aware network probe against target_url with strict anti-SSRF protections.
-    Resolves DNS, validates all IPs with is_ip_allowed, and connects directly to the validated IP.
+    Bounded by total deadline <= 5.0s. Probes up to 3 candidate IPs, reporting per-address and overall status.
     Aborts immediately on SSRF violations without opening TCP sockets.
     """
+    start_time = time.monotonic()
+    total_deadline_sec = min(max(0.5, float(timeout_seconds)), 5.0)
+    deadline = start_time + total_deadline_sec
+
     try:
         parsed = urlparse(target_url)
     except Exception as e:
@@ -138,61 +143,112 @@ def _probe_network_target(
                 "summary": f"SSRF: Blocked prohibited IP {ip_str}",
             }
 
-    primary_ip = resolved_ips[0]
+    # 3. Direct TCP & TLS Probing across candidate IPs (up to 3) bounded by deadline
+    candidate_ips = resolved_ips[:3]
+    per_ip_results: dict[str, Any] = {}
+    last_tcp_error: str | None = None
+    last_tls_error: str | None = None
+    connected_ip: str | None = None
 
-    # 3. Direct TCP Connection to pre-validated IP
-    family = socket.AF_INET6 if ":" in primary_ip else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    sock.settimeout(min(timeout_seconds, 2.0))
-    try:
-        sock.connect((primary_ip, port))
-    except Exception as e:
-        sock.close()
-        return {
-            "status": "TCP_FAILURE",
-            "hostname": hostname,
-            "port": port,
-            "resolved_ips": resolved_ips,
-            "connected_ip": primary_ip,
-            "dns_status": "SUCCESS",
-            "tcp_status": "FAILED",
-            "tcp_error": str(e),
-            "summary": f"DNS: OK • TCP: Failed ({primary_ip}:{port} - {e})",
-        }
+    for ip_str in candidate_ips:
+        now_t = time.monotonic()
+        rem_sec = deadline - now_t
+        if rem_sec <= 0.1:
+            per_ip_results[ip_str] = {"tcp": "SKIPPED", "error": "Deadline exceeded"}
+            continue
 
-    # 4. TLS Handshake if HTTPS
-    if scheme == "https":
+        per_ip_timeout = min(rem_sec, 2.0)
+        family = socket.AF_INET6 if ":" in ip_str else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(per_ip_timeout)
+
+        ip_res: dict[str, Any] = {"ip": ip_str}
+        tcp_ok = False
         try:
-            context = ssl.create_default_context()
-            tls_sock = context.wrap_socket(sock, server_hostname=hostname)
-            tls_sock.close()
+            sock.connect((ip_str, port))
+            tcp_ok = True
+            ip_res["tcp"] = "SUCCESS"
+            if not connected_ip:
+                connected_ip = ip_str
         except Exception as e:
             sock.close()
-            return {
-                "status": "TLS_FAILURE",
-                "hostname": hostname,
-                "port": port,
-                "resolved_ips": resolved_ips,
-                "connected_ip": primary_ip,
-                "dns_status": "SUCCESS",
-                "tcp_status": "SUCCESS",
-                "tls_status": "FAILED",
-                "tls_error": str(e),
-                "summary": f"DNS: OK • TCP: OK • TLS: Failed ({hostname} - {e})",
-            }
+            last_tcp_error = str(e)
+            ip_res["tcp"] = "FAILED"
+            ip_res["tcp_error"] = str(e)
+            per_ip_results[ip_str] = ip_res
+            continue
+
+        if scheme == "https" and tcp_ok:
+            now_t2 = time.monotonic()
+            rem_sec2 = deadline - now_t2
+            if rem_sec2 <= 0.1:
+                sock.close()
+                ip_res["tls"] = "SKIPPED"
+                per_ip_results[ip_str] = ip_res
+                continue
+
+            try:
+                context = ssl.create_default_context()
+                tls_sock = context.wrap_socket(sock, server_hostname=hostname)
+                tls_sock.close()
+                ip_res["tls"] = "SUCCESS"
+            except Exception as e:
+                sock.close()
+                last_tls_error = str(e)
+                ip_res["tls"] = "FAILED"
+                ip_res["tls_error"] = str(e)
+                per_ip_results[ip_str] = ip_res
+                continue
+        else:
+            sock.close()
+            ip_res["tls"] = "N/A"
+
+        per_ip_results[ip_str] = ip_res
+
+    probed_count = len(per_ip_results)
+    tcp_success_count = sum(1 for r in per_ip_results.values() if r.get("tcp") == "SUCCESS")
+    tls_success_count = sum(1 for r in per_ip_results.values() if r.get("tls") == "SUCCESS")
+    tls_failed_count = sum(1 for r in per_ip_results.values() if r.get("tls") == "FAILED")
+
+    if tcp_success_count == 0:
+        overall_status = "TCP_FAILURE"
+        tcp_status = "FAILED"
+        tls_status = "N/A"
+        summary = (
+            f"DNS: OK • TCP: Failed ({candidate_ips[0]}:{port} - {last_tcp_error})"
+            if probed_count == 1
+            else f"DNS: OK • TCP: Failed ({probed_count} IPs unreachable - {last_tcp_error})"
+        )
+    elif scheme == "https" and tls_failed_count > 0 and tls_success_count == 0:
+        overall_status = "TLS_FAILURE"
+        tcp_status = "SUCCESS"
+        tls_status = "FAILED"
+        summary = f"DNS: OK • TCP: OK • TLS: Failed ({hostname} - {last_tls_error})"
+    elif tcp_success_count < probed_count:
+        overall_status = "PARTIAL_SUCCESS"
+        tcp_status = "MIXED"
+        tls_status = "SUCCESS" if (scheme != "https" or tls_success_count > 0) else "FAILED"
+        summary = f"DNS: OK • TCP: Mixed ({tcp_success_count}/{probed_count} IPs reachable)"
     else:
-        sock.close()
+        overall_status = "SUCCESS"
+        tcp_status = "SUCCESS"
+        tls_status = "SUCCESS" if scheme == "https" else "N/A"
+        summary = "DNS: OK • TCP: OK" + (" • TLS: OK" if scheme == "https" else "")
 
     return {
-        "status": "SUCCESS",
+        "status": overall_status,
         "hostname": hostname,
         "port": port,
         "resolved_ips": resolved_ips,
-        "connected_ip": primary_ip,
+        "probed_ips": list(per_ip_results.keys()),
+        "connected_ip": connected_ip or candidate_ips[0],
         "dns_status": "SUCCESS",
-        "tcp_status": "SUCCESS",
-        "tls_status": "SUCCESS" if scheme == "https" else "N/A",
-        "summary": "DNS: OK • TCP: OK" + (" • TLS: OK" if scheme == "https" else ""),
+        "tcp_status": tcp_status,
+        "tcp_error": last_tcp_error or "",
+        "tls_status": tls_status,
+        "tls_error": last_tls_error or "",
+        "per_ip_results": per_ip_results,
+        "summary": summary,
     }
 
 
@@ -207,12 +263,14 @@ def collect_failure_diagnostics(
 ) -> dict[str, Any]:
     """
     Collect stage-aware failure diagnostics at failure boundary.
-    Safely executes probes, preserves multi-attempt history in DB, and generates error summary.
+    Safely executes probes, preserves multi-attempt history in DB, captures structured AI fields,
+    and generates concise error summary.
     """
     error_cat, safe_msg = sanitize_error(error)
     error_type = type(error).__name__ if isinstance(error, Exception) else "Error"
 
     probe_result: dict[str, Any] | None = None
+    ai_diag: dict[str, Any] | None = None
     summary = ""
 
     # Check for HTTP 403 in error message or type
@@ -224,12 +282,30 @@ def collect_failure_diagnostics(
         summary = probe_result.get("summary", "")
         if is_http_403:
             summary = f"HTTP 403: Publisher blocked automated retrieval ({probe_result.get('summary', '')})"
-    elif stage in ("ai_script", "gemini", "research"):
-        # Model diagnostics (no network probe against URL)
+    elif stage in ("scripting", "ai_script", "gemini", "research", "ai"):
+        prov = getattr(settings, "RESEARCH_PROVIDER" if stage == "research" else "AI_PROVIDER", "none")
+        cfg_model = getattr(settings, "GEMINI_RESEARCH_MODEL" if stage == "research" else "GEMINI_MODEL", "")
+        status_code = getattr(error, "status_code", None) or getattr(error, "http_status", None)
+        is_retryable = error_cat in ("AI_RATE_LIMITED", "AI_TIMEOUT", "AI_SERVER_ERROR", "TEMPORARY_UNAVAILABLE")
+        ai_diag = {
+            "provider": prov,
+            "configured_model": cfg_model,
+            "http_status": status_code,
+            "error_category": error_cat,
+            "retryable": is_retryable,
+        }
         if error_cat == "AI_MODEL_UNAVAILABLE":
             summary = f"AI: Model Unavailable (404) - {safe_msg}"
         else:
             summary = f"AI: {error_cat} - {safe_msg}"
+    elif stage in ("tts", "kokoro"):
+        probe_url = target_url or getattr(settings, "KOKORO_API_URL", "http://kokoro:8880")
+        probe_result = _probe_network_target(probe_url, timeout_seconds=min(timeout_seconds, 2.0))
+        summary = f"TTS: {error_cat} ({probe_result.get('summary', '')})"
+    elif stage in ("delivery", "telegram"):
+        probe_url = target_url or "https://api.telegram.org"
+        probe_result = _probe_network_target(probe_url, timeout_seconds=min(timeout_seconds, 2.0))
+        summary = f"Delivery: {error_cat} ({probe_result.get('summary', '')})"
     else:
         summary = f"{stage.upper()}: {error_cat} - {safe_msg}"
 
@@ -251,6 +327,9 @@ def collect_failure_diagnostics(
     if probe_result:
         record["network_probe"] = probe_result
 
+    if ai_diag:
+        record["ai_diagnostics"] = ai_diag
+
     # Redact any accidental secret in the full dictionary
     sanitized_record = redact_dict(record)
 
@@ -267,3 +346,13 @@ def collect_failure_diagnostics(
             logger.warning(f"Failed to save auto_diagnostics_json for job '{job_id}': {db_err}")
 
     return sanitized_record
+
+
+def format_concise_failure_summary(diag_record: dict[str, Any]) -> str:
+    """Format a concise, user-friendly failure diagnostics line for Telegram notifications."""
+    summary = diag_record.get("summary") or diag_record.get("error_message") or ""
+    if summary:
+        return f"• <b>Diagnostic:</b> {summary}"
+    stage = (diag_record.get("stage") or "pipeline").upper()
+    cat = diag_record.get("error_category") or "ERROR"
+    return f"• <b>Diagnostic:</b> {stage} ({cat})"

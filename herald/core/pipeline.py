@@ -87,13 +87,12 @@ def find_prior_content_candidate(
       Tier 4: FAILED jobs
       Tie-breaker: created_at DESC (most recent first)
     """
-    if source_url:
-        candidate_filter = or_(
-            PodcastJob.source_hash == source_hash,
-            and_(PodcastJob.source_url.isnot(None), PodcastJob.source_url == source_url),
-        )
-    else:
-        candidate_filter = (PodcastJob.source_hash == source_hash)
+    candidate_filter = and_(
+        PodcastJob.source_hash == source_hash,
+        PodcastJob.source_text.isnot(None),
+        PodcastJob.source_text != "",
+        or_(PodcastJob.failed_stage.is_(None), PodcastJob.failed_stage != "EXTRACTION"),
+    )
 
     query = db.query(PodcastJob).filter(candidate_filter)
     if exclude_job_id:
@@ -248,9 +247,84 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     extracted_text = ""
     source_url = None
     canonical_title = None
+    job: PodcastJob | None = None
+
+    telegram_chat = (
+        int(req.delivery_target)
+        if req.transport == "telegram"
+        and req.delivery_target
+        and str(req.delivery_target).lstrip("-").isdigit()
+        else None
+    )
+    telegram_msg = (
+        int(req.transport_message_id)
+        if req.transport == "telegram"
+        and req.transport_message_id
+        and str(req.transport_message_id).isdigit()
+        else None
+    )
+    telegram_user = (
+        int(str(req.requester_identity).replace("telegram:", ""))
+        if req.transport == "telegram"
+        and str(req.requester_identity).replace("telegram:", "").isdigit()
+        else None
+    )
 
     if req.source_url and req.source_url.strip():
         source_url = req.source_url.strip()
+        provisional_hash = compute_content_hash("", source_url)
+        job_id = str(uuid.uuid4())
+
+        job = PodcastJob(
+            id=job_id,
+            transport=req.transport,
+            telegram_chat_id=telegram_chat,
+            telegram_message_id=telegram_msg,
+            telegram_user_id=telegram_user,
+            sender_email=req.requester_identity if req.transport != "telegram" else None,
+            request_mode=mode_val,
+            research_depth=req.research_depth,
+            source_type=SourceType.URL.value,
+            source_url=source_url,
+            source_hash=provisional_hash,
+            source_text="",
+            custom_voice=req.custom_voice,
+            custom_speed=req.custom_speed,
+            custom_title=req.custom_title,
+            tts_chunk_chars=req.tts_chunk_chars or 500,
+            verify_final_script=req.verify_final_script,
+            status=JobState.EXTRACTING.value,
+        )
+        try:
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+        except Exception as e:
+            db.rollback()
+            if req.transport == "telegram" and telegram_chat and telegram_msg:
+                existing = (
+                    db.query(PodcastJob)
+                    .filter(
+                        PodcastJob.transport == "telegram",
+                        PodcastJob.telegram_chat_id == telegram_chat,
+                        PodcastJob.telegram_message_id == telegram_msg,
+                    )
+                    .first()
+                )
+                if existing:
+                    ep_title = _resolve_response_title(existing)
+                    return HeraldResponse(
+                        job_id=existing.id,
+                        status=existing.status,
+                        request_mode=existing.request_mode,
+                        source_type=existing.source_type,
+                        is_duplicate=True,
+                        rerun_of_job_id=existing.rerun_of_job_id,
+                        message="Telegram message already accepted.",
+                        episode_title=ep_title,
+                    )
+            raise e
+
         try:
             art_title, art_text, canon_url = extract_article_from_url(source_url)
             canonical_title = art_title
@@ -259,11 +333,16 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         except SSRFVulnerabilityError as e:
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
-                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
+            job.status = JobState.FAILED_FINAL.value
+            job.failed_stage = "EXTRACTION"
+            job.error_code = "SSRF_PROTECTION"
+            job.error_detail = str(e)
+            db.commit()
             return HeraldResponse(
-                job_id="",
+                job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
                 request_mode=mode_val,
                 source_type=SourceType.URL.value,
@@ -274,11 +353,16 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         except DNSResolutionError as e:
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
-                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
+            job.status = JobState.FAILED_FINAL.value
+            job.failed_stage = "EXTRACTION"
+            job.error_code = "EXTRACTION_FAILURE"
+            job.error_detail = str(e)
+            db.commit()
             return HeraldResponse(
-                job_id="",
+                job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
                 request_mode=mode_val,
                 source_type=SourceType.URL.value,
@@ -289,11 +373,36 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         except (ArticleExtractionError, SourceAccessBlockedError) as e:
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
-                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, db=db)
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
+            job.status = JobState.FAILED_FINAL.value
+            job.failed_stage = "EXTRACTION"
+            job.error_code = "EXTRACTION_FAILURE"
+            job.error_detail = str(e)
+            db.commit()
             return HeraldResponse(
-                job_id="",
+                job_id=job.id,
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.URL.value,
+                is_duplicate=False,
+                message=f"URL extraction failed: {e}",
+                error_category="EXTRACTION_FAILURE",
+            )
+        except Exception as e:
+            try:
+                from herald.services.failure_diagnostics import collect_failure_diagnostics
+                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
+            except Exception as diag_err:
+                logger.warning(f"Failure diagnostics capture error: {diag_err}")
+            job.status = JobState.FAILED_FINAL.value
+            job.failed_stage = "EXTRACTION"
+            job.error_code = "EXTRACTION_FAILURE"
+            job.error_detail = str(e)
+            db.commit()
+            return HeraldResponse(
+                job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
                 request_mode=mode_val,
                 source_type=SourceType.URL.value,
@@ -305,6 +414,21 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         extracted_text = req.source_text or ""
 
     if not extracted_text.strip():
+        if job:
+            job.status = JobState.FAILED_FINAL.value
+            job.failed_stage = "EXTRACTION"
+            job.error_code = "EMPTY_SOURCE"
+            job.error_detail = "No usable source text or valid URL was provided."
+            db.commit()
+            return HeraldResponse(
+                job_id=job.id,
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=source_type,
+                is_duplicate=False,
+                message="No usable source text or valid URL was provided.",
+                error_category="EMPTY_SOURCE",
+            )
         return HeraldResponse(
             job_id="",
             status=JobState.FAILED_FINAL.value,
@@ -340,85 +464,78 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         verify=req.verify_final_script,
     )
     prior_job = find_prior_content_candidate(
-        db, source_hash=source_hash, source_url=source_url
-    )
-
-    # 4. Create PodcastJob (every intentional request gets its own immutable record)
-    job_id = str(uuid.uuid4())
-    telegram_chat = (
-        int(req.delivery_target)
-        if req.transport == "telegram"
-        and req.delivery_target
-        and str(req.delivery_target).lstrip("-").isdigit()
-        else None
-    )
-    telegram_msg = (
-        int(req.transport_message_id)
-        if req.transport == "telegram"
-        and req.transport_message_id
-        and str(req.transport_message_id).isdigit()
-        else None
-    )
-    telegram_user = (
-        int(str(req.requester_identity).replace("telegram:", ""))
-        if req.transport == "telegram"
-        and str(req.requester_identity).replace("telegram:", "").isdigit()
-        else None
-    )
-
-    job = PodcastJob(
-        id=job_id,
-        transport=req.transport,
-        telegram_chat_id=telegram_chat,
-        telegram_message_id=telegram_msg,
-        telegram_user_id=telegram_user,
-        sender_email=req.requester_identity if req.transport != "telegram" else None,
-        request_mode=mode_val,
-        research_depth=req.research_depth,
-        source_type=source_type,
-        source_url=source_url,
+        db,
         source_hash=source_hash,
-        source_text=deduped_text,
-        custom_voice=req.custom_voice,
-        custom_speed=req.custom_speed,
-        custom_title=resolved_title,
-        tts_chunk_chars=req.tts_chunk_chars or 500,
-        verify_final_script=req.verify_final_script,
-        rerun_of_job_id=prior_job.id if prior_job else None,
-        generation_settings_json=settings_snapshot,
-        status=JobState.RECEIVED.value,
+        source_url=source_url,
+        exclude_job_id=job.id if job else None,
     )
 
-    try:
-        db.add(job)
+    # 4. Finalize PodcastJob (every intentional request gets its own immutable record)
+    if job is not None:
+        job.source_url = source_url
+        job.source_hash = source_hash
+        job.source_text = deduped_text
+        job.custom_title = resolved_title
+        job.rerun_of_job_id = prior_job.id if prior_job else None
+        job.generation_settings_json = settings_snapshot
+        job.status = JobState.RECEIVED.value
         db.commit()
         db.refresh(job)
-    except Exception as e:
-        db.rollback()
-        # Handle concurrent race if another process created this Telegram job
-        if req.transport == "telegram" and telegram_chat and telegram_msg:
-            existing = (
-                db.query(PodcastJob)
-                .filter(
-                    PodcastJob.transport == "telegram",
-                    PodcastJob.telegram_chat_id == telegram_chat,
-                    PodcastJob.telegram_message_id == telegram_msg,
+    else:
+        job_id = str(uuid.uuid4())
+        job = PodcastJob(
+            id=job_id,
+            transport=req.transport,
+            telegram_chat_id=telegram_chat,
+            telegram_message_id=telegram_msg,
+            telegram_user_id=telegram_user,
+            sender_email=req.requester_identity if req.transport != "telegram" else None,
+            request_mode=mode_val,
+            research_depth=req.research_depth,
+            source_type=source_type,
+            source_url=source_url,
+            source_hash=source_hash,
+            source_text=deduped_text,
+            custom_voice=req.custom_voice,
+            custom_speed=req.custom_speed,
+            custom_title=resolved_title,
+            tts_chunk_chars=req.tts_chunk_chars or 500,
+            verify_final_script=req.verify_final_script,
+            rerun_of_job_id=prior_job.id if prior_job else None,
+            generation_settings_json=settings_snapshot,
+            status=JobState.RECEIVED.value,
+        )
+
+        try:
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+        except Exception as e:
+            db.rollback()
+            # Handle concurrent race if another process created this Telegram job
+            if req.transport == "telegram" and telegram_chat and telegram_msg:
+                existing = (
+                    db.query(PodcastJob)
+                    .filter(
+                        PodcastJob.transport == "telegram",
+                        PodcastJob.telegram_chat_id == telegram_chat,
+                        PodcastJob.telegram_message_id == telegram_msg,
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if existing:
-                ep_title = _resolve_response_title(existing)
-                return HeraldResponse(
-                    job_id=existing.id,
-                    status=existing.status,
-                    request_mode=existing.request_mode,
-                    source_type=existing.source_type,
-                    is_duplicate=True,
-                    rerun_of_job_id=existing.rerun_of_job_id,
-                    message="Telegram message already accepted.",
-                    episode_title=ep_title,
-                )
-        raise e
+                if existing:
+                    ep_title = _resolve_response_title(existing)
+                    return HeraldResponse(
+                        job_id=existing.id,
+                        status=existing.status,
+                        request_mode=existing.request_mode,
+                        source_type=existing.source_type,
+                        is_duplicate=True,
+                        rerun_of_job_id=existing.rerun_of_job_id,
+                        message="Telegram message already accepted.",
+                        episode_title=ep_title,
+                    )
+            raise e
 
     # Case D: Duplicate content + hold_for_approval == False
     # Prompt the user for rerun confirmation BEFORE running any scripting / AI calls.

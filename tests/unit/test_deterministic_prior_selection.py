@@ -164,3 +164,60 @@ def test_exclude_job_id(db_session):
     # When excluding itself, should return None
     candidate = find_prior_content_candidate(db_session, source_hash=h, exclude_job_id="job-complete-1")
     assert candidate is None
+
+
+def test_extraction_failure_excluded_from_candidate(db_session):
+    now = datetime.now(UTC)
+    h = "test-hash-extraction-fail"
+
+    failed_extraction = PodcastJob(
+        id="job-failed-ext",
+        status=JobState.FAILED_FINAL.value,
+        failed_stage="EXTRACTION",
+        source_hash=h,
+        source_text="some text",
+        created_at=now,
+    )
+    db_session.add(failed_extraction)
+    db_session.commit()
+
+    candidate = find_prior_content_candidate(db_session, source_hash=h)
+    assert candidate is None
+
+
+def test_empty_source_text_excluded_from_candidate(db_session):
+    now = datetime.now(UTC)
+    h = "test-hash-empty-text"
+
+    provisional = PodcastJob(
+        id="job-provisional",
+        status=JobState.EXTRACTING.value,
+        source_hash=h,
+        source_text="",
+        created_at=now,
+    )
+    db_session.add(provisional)
+    db_session.commit()
+
+    candidate = find_prior_content_candidate(db_session, source_hash=h)
+    assert candidate is None
+
+
+def test_strict_source_hash_matching_ignores_same_url_different_hash(db_session):
+    now = datetime.now(UTC)
+    url = "https://example.com/updated-post"
+
+    job_old_version = PodcastJob(
+        id="job-old-version",
+        status=JobState.COMPLETE.value,
+        source_url=url,
+        source_hash="old-hash-111",
+        source_text="Old version of post content",
+        created_at=now - timedelta(days=1),
+    )
+    db_session.add(job_old_version)
+    db_session.commit()
+
+    # Query with new hash for the same URL must NOT match the old job
+    candidate = find_prior_content_candidate(db_session, source_hash="new-hash-222", source_url=url)
+    assert candidate is None

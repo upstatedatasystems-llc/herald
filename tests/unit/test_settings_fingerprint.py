@@ -80,11 +80,39 @@ def test_are_generation_settings_identical():
         "voice": "af_heart",
         "speed": 1.1,
     }
+    diff_title = {
+        "mode": "standard",
+        "voice": "af_heart",
+        "speed": 1.0,
+        "custom_title": "Custom Title",
+    }
+    diff_chunk = {
+        "mode": "standard",
+        "voice": "af_heart",
+        "speed": 1.0,
+        "chunk_chars": 800,
+    }
+    diff_verify = {
+        "mode": "standard",
+        "voice": "af_heart",
+        "speed": 1.0,
+        "verify": True,
+    }
+    diff_ai = {
+        "mode": "standard",
+        "voice": "af_heart",
+        "speed": 1.0,
+        "ai_provider": "groq",
+    }
 
     assert are_generation_settings_identical(base, same) is True
     assert are_generation_settings_identical(base, diff_mode) is False
     assert are_generation_settings_identical(base, diff_voice) is False
     assert are_generation_settings_identical(base, diff_speed) is False
+    assert are_generation_settings_identical(base, diff_title) is False
+    assert are_generation_settings_identical(base, diff_chunk) is False
+    assert are_generation_settings_identical(base, diff_verify) is False
+    assert are_generation_settings_identical(base, diff_ai) is False
 
 
 def test_research_depth_comparison():

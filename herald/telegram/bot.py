@@ -2,10 +2,8 @@ import html
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -31,7 +29,6 @@ from herald.services.eta_calculator import calculate_job_eta
 from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
-    ensure_voice_sample,
     get_cached_voice_sample,
     get_voice_sample_path,
     is_valid_sample_audio,
@@ -69,11 +66,7 @@ logger = logging.getLogger("herald.telegram.bot")
 
 _START_TIME = datetime.now(UTC)
 
-# Dedicated bounded background threadpool for voice sample pre-rendering (cache miss)
-_VOICE_SAMPLE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="voice-sample")
-_IN_FLIGHT_VOICE_SAMPLES: set[str] = set()
-_VOICE_SAMPLE_LOCK = Lock()
-_MAX_IN_FLIGHT_VOICE_SAMPLES = 10
+
 
 
 def parse_telegram_message_directives(text: str) -> dict[str, Any]:
@@ -409,7 +402,8 @@ def handle_telegram_command(
 
     elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
         ai_provider = get_ai_provider()
-        research_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+        res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+        research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
 
         if (not ai_provider or not ai_provider.is_configured()) and not research_configured:
             client.send_message(
@@ -442,7 +436,9 @@ def handle_telegram_command(
             std_status = f"❌ <b>{prov_name} (Standard):</b> Failed\n• Error: <code>{std_err}</code>"
 
         # Independent research check
-        if research_configured:
+        if res_provider == "none":
+            research_status = "⚪ <b>Gemini Research:</b> Disabled (RESEARCH_PROVIDER=none)"
+        elif research_configured:
             from herald.ai.gemini_provider import GeminiProvider
 
             res_res = GeminiProvider().check_research_connection(
@@ -724,11 +720,20 @@ def handle_telegram_content_message(
             )
         else:
             short_id = response.job_id[:8]
+            diag_line = ""
+            try:
+                from herald.services.failure_diagnostics import format_concise_failure_summary
+                job_rec = db.query(PodcastJob).filter(PodcastJob.id == response.job_id).first()
+                if job_rec and job_rec.auto_diagnostics_json:
+                    diag_line = f"\n{format_concise_failure_summary(job_rec.auto_diagnostics_json[-1])}"
+            except Exception as diag_err:
+                logger.debug("Could not format failure diagnostic line: %s", diag_err)
+
             fail_text = (
                 f"❌ <b>Podcast Generation Failed</b>\n\n"
                 f"• <b>ID:</b> <code>{short_id}</code>\n"
                 f"• <b>Status:</b> <code>{html.escape(response.status)}</code>\n"
-                f"• <b>Reason:</b> {safe_msg}\n\n"
+                f"• <b>Reason:</b> {safe_msg}{diag_line}\n\n"
                 f"Use <code>/diagnostics {short_id}</code> for support details."
             )
             client.send_message(
@@ -767,6 +772,39 @@ def handle_telegram_content_message(
                     logger.error(
                         f"Failed to deliver recovery approval card for job '{existing_job.id}': {e}"
                     )
+                return
+
+            # Recovery path: job is awaiting rerun confirmation but card was never delivered
+            if (
+                existing_job.status == JobState.AWAITING_RERUN_CONFIRMATION.value
+                and not existing_job.telegram_approval_message_id
+            ):
+                prior_job = db.query(PodcastJob).filter_by(id=existing_job.rerun_of_job_id).first() if existing_job.rerun_of_job_id else None
+                if not prior_job and existing_job.source_hash:
+                    prior_job = db.query(PodcastJob).filter(
+                        PodcastJob.source_hash == existing_job.source_hash,
+                        PodcastJob.id != existing_job.id,
+                    ).first()
+                if prior_job:
+                    rerun_text, reply_markup = format_rerun_confirmation(
+                        new_job=existing_job, prior_job=prior_job
+                    )
+                    try:
+                        sent_msg = client.send_message(
+                            chat_id=chat_id,
+                            text=rerun_text,
+                            reply_markup=reply_markup,
+                            reply_to_message_id=msg_id,
+                            parse_mode="HTML",
+                        )
+                        if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                            existing_job.telegram_approval_message_id = sent_msg["message_id"]
+                            existing_job.approval_requested_at = datetime.now(UTC)
+                            db.commit()
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to deliver recovery rerun confirmation card for job '{existing_job.id}': {e}"
+                        )
                 return
 
             if (
@@ -1394,61 +1432,15 @@ def handle_telegram_callback_query(
             )
             return
 
-        # Cache miss: non-blocking background generation with in-flight deduplication & bounded queue
-        with _VOICE_SAMPLE_LOCK:
-            if v_name in _IN_FLIGHT_VOICE_SAMPLES:
-                client.answer_callback_query(
-                    cb_id,
-                    text=f"Sample for {disp_name} is already being prepared...",
-                    show_alert=False,
-                )
-                return
-            if len(_IN_FLIGHT_VOICE_SAMPLES) >= _MAX_IN_FLIGHT_VOICE_SAMPLES:
-                client.answer_callback_query(
-                    cb_id,
-                    text="Voice preview queue is busy. Please try again shortly.",
-                    show_alert=False,
-                )
-                return
-            _IN_FLIGHT_VOICE_SAMPLES.add(v_name)
-
-        client.answer_callback_query(
-            cb_id, text=f"Preparing voice sample for {disp_name}... Herald will send it shortly."
+        # Cache miss: do NOT call Kokoro or synthesize at runtime!
+        logger.warning(
+            f"Voice preview cache miss for voice_id='{v_name}' (display='{disp_name}') in chat {chat_id}"
         )
-
-        def _bg_generate_sample(target_voice: str, target_chat_id: int):
-            try:
-                with SessionLocal() as db_session:
-                    gen_path = ensure_voice_sample(voice=target_voice, db=db_session)
-                v_meta = VOICE_METADATA.get(target_voice, {})
-                d_name = v_meta.get("display_name", target_voice)
-                cap = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(target_voice)}</code> ({html.escape(d_name)})\nSpeed: 1.0x"
-                client.send_audio(
-                    chat_id=target_chat_id,
-                    audio_path=gen_path,
-                    title=f"Sample: {d_name}",
-                    performer="Herald",
-                    caption=cap,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.error(
-                    f"Background voice sample generation failed for '{target_voice}': {e}",
-                    exc_info=True,
-                )
-                try:
-                    client.send_message(
-                        chat_id=target_chat_id,
-                        text="⚠️ <b>Voice sample generation failed. Please try again.</b>",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-            finally:
-                with _VOICE_SAMPLE_LOCK:
-                    _IN_FLIGHT_VOICE_SAMPLES.discard(target_voice)
-
-        _VOICE_SAMPLE_EXECUTOR.submit(_bg_generate_sample, v_name, int(chat_id))
+        client.answer_callback_query(
+            cb_id,
+            text="⚠️ Voice preview is unavailable on this Herald installation.\nRebuild the voice preview cache and try again.",
+            show_alert=True,
+        )
         return
 
     else:
@@ -1502,57 +1494,7 @@ def process_telegram_update(db: Session, client: TelegramClient, update: dict[st
         handle_telegram_content_message(db, client, message)
 
 
-def sweep_unpresented_approval_cards(db: Session, client: TelegramClient) -> int:
-    """
-    Find AWAITING_APPROVAL jobs whose Telegram approval card was not successfully sent yet,
-    and attempt delivery with bounded retries.
-    """
-    now = datetime.now(UTC)
-    unpresented_jobs = (
-        db.query(PodcastJob)
-        .filter(
-            PodcastJob.transport == "telegram",
-            PodcastJob.status == JobState.AWAITING_APPROVAL.value,
-            PodcastJob.telegram_approval_message_id.is_(None),
-            PodcastJob.telegram_chat_id.isnot(None),
-            PodcastJob.attempt_count < 3,
-        )
-        .order_by(PodcastJob.created_at.asc())
-        .limit(5)
-        .all()
-    )
-
-    delivered = 0
-    for job in unpresented_jobs:
-        try:
-            eta_info = calculate_job_eta(db, job)
-            app_text, reply_markup = format_approval(job, job.script_json, eta_info)
-            reply_id = int(job.telegram_message_id) if job.telegram_message_id else None
-            sent_msg = client.send_message(
-                chat_id=job.telegram_chat_id,
-                text=app_text,
-                reply_markup=reply_markup,
-                reply_to_message_id=reply_id,
-                parse_mode="HTML",
-            )
-            if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
-                job.telegram_approval_message_id = sent_msg["message_id"]
-                job.approval_requested_at = now
-                db.commit()
-                delivered += 1
-            else:
-                job.attempt_count = (job.attempt_count or 0) + 1
-                db.commit()
-                logger.warning(
-                    f"Approval card presentation returned no message_id for job '{job.id}' (attempt {job.attempt_count})"
-                )
-        except Exception as e:
-            job.attempt_count = (job.attempt_count or 0) + 1
-            db.commit()
-            logger.warning(
-                f"Failed retry to deliver approval card for job '{job.id}' (attempt {job.attempt_count}): {e}"
-            )
-    return delivered
+from herald.telegram.approval_recovery import sweep_unpresented_approval_cards
 
 
 # Backward compatibility aliases

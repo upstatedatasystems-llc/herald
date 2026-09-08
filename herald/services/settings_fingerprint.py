@@ -71,7 +71,7 @@ def get_job_generation_settings(job: PodcastJob) -> dict[str, Any]:
 def are_generation_settings_identical(prior: dict[str, Any], current: dict[str, Any]) -> bool:
     """
     Compare generation-affecting settings between a prior job and a new request.
-    Evaluates mode, research depth (for research mode), voice, and speed.
+    Evaluates all material fields: mode, research_depth, voice, speed, custom_title, chunk_chars, verify, ai_provider.
     Returns True if generation output would use identical settings, False otherwise.
     """
     m_prior = (prior.get("mode") or "").lower().strip()
@@ -93,6 +93,26 @@ def are_generation_settings_identical(prior: dict[str, Any], current: dict[str, 
     s_prior = round(float(prior.get("speed") or 1.0), 2)
     s_curr = round(float(current.get("speed") or 1.0), 2)
     if s_prior != s_curr:
+        return False
+
+    t_prior = (prior.get("custom_title") or "").strip() or None
+    t_curr = (current.get("custom_title") or "").strip() or None
+    if t_prior != t_curr:
+        return False
+
+    c_prior = int(prior.get("chunk_chars") or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500))
+    c_curr = int(current.get("chunk_chars") or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500))
+    if c_prior != c_curr:
+        return False
+
+    ver_prior = bool(prior.get("verify"))
+    ver_curr = bool(current.get("verify"))
+    if ver_prior != ver_curr:
+        return False
+
+    ai_prior = (prior.get("ai_provider") or getattr(settings, "AI_PROVIDER", "gemini")).lower().strip()
+    ai_curr = (current.get("ai_provider") or getattr(settings, "AI_PROVIDER", "gemini")).lower().strip()
+    if ai_prior != ai_curr:
         return False
 
     return True
