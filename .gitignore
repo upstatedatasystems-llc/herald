@@ -46,6 +46,8 @@ htmlcov/
 *.db
 /data/
 /data/*
+logs/
+/logs/
 /models/
 /models/*
 *.mp3

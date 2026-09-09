@@ -106,7 +106,9 @@ fi
 
 # 1. Non-Root / Operator Safety Check
 check_operator_safety() {
-    if [ "${HERALD_TEST_ALLOW_ROOT:-0}" != "1" ] && [ "$(id -u)" -eq 0 ]; then
+    local uid_val
+    uid_val="$(id -u 2>/dev/null || echo "1000")"
+    if [ "${HERALD_TEST_ALLOW_ROOT:-0}" != "1" ] && [ "${uid_val:-1000}" -eq 0 ]; then
         echo "❌ Error: Do not run the Herald installer directly as root." >&2
         echo "Please run as a standard user with sudo privileges: e.g. curl ... | bash" >&2
         exit 1
@@ -399,7 +401,7 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
         echo "🔄 Restoring repository source to commit ${RESOLVED_SHA}..."
         git checkout "$HERALD_REF" 2>/dev/null || git checkout "$RESOLVED_SHA" 2>/dev/null || true
         git reset --hard "$RESOLVED_SHA"
-        git clean -fd
+        git clean -fd -e logs -e logs/*
 
         # Restore .env if needed and ensure 0600 permissions
         if [ -n "$INSTALL_ENV_BACKUP" ]; then
@@ -411,7 +413,7 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
             INSTALL_ENV_BACKUP=""
         fi
 
-        # Verify clean Git working tree (only ignored files like .env should remain)
+        # Verify clean Git working tree (only ignored files like .env and logs should remain)
         if [ -n "$(git status --porcelain)" ]; then
             echo "❌ Error: Working tree is still dirty after reinstall reset." >&2
             exit 1
@@ -422,6 +424,17 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
     fi
 else
     cd "$HERALD_INSTALL_DIR"
+fi
+
+# Establish persistent installation transcript under logs/
+if [ -z "${HERALD_INSTALL_LOG:-}" ]; then
+    mkdir -p "${HERALD_INSTALL_DIR}/logs"
+    TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+    export HERALD_INSTALL_LOG="${HERALD_INSTALL_DIR}/logs/install-${TIMESTAMP}.log"
+    touch "$HERALD_INSTALL_LOG"
+    chmod 644 "$HERALD_INSTALL_LOG" 2>/dev/null || true
+    echo "📝 Recording installation transcript to ${HERALD_INSTALL_LOG}"
+    exec > >(tee -a "$HERALD_INSTALL_LOG") 2> >(tee -a "$HERALD_INSTALL_LOG" >&2)
 fi
 
 # 8. Check Docker Engine & Compose v2 Prerequisites
@@ -522,13 +535,7 @@ fi
 
 # 12. Start Herald Services & Verify Health
 echo "🚀 Starting Herald services..."
-./setup.sh --start-only "${SETUP_ARGS[@]}"
-
-# Ensure voice sample cache is prewarmed in herald-worker
-if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
-    echo "🔊 Ensuring voice sample cache is prewarmed in herald-worker..."
-    docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm
-fi
+./setup.sh --start-only --no-banner "${SETUP_ARGS[@]}"
 
 # 13. Mandatory Acceptance Gate
 echo ""
@@ -540,8 +547,76 @@ else
     exit 1
 fi
 
+# Retrieve bot username and pairing details for final completion banner
+BOT_NAME="HeraldBot"
+if [ -f ".env" ]; then
+    TG_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    if [ -n "$TG_TOKEN" ]; then
+        TG_ME_RESP=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TG_TOKEN" | curl -s --config - 2>/dev/null || true)
+        BOT_NAME=$(echo "$TG_ME_RESP" | grep -o '"username":"[^"]*' | cut -d'"' -f4 || echo "HeraldBot")
+    fi
+fi
+BOT_NAME="${BOT_NAME:-HeraldBot}"
+
+RAW_PAIRING_OUTPUT=""
+PAIRING_OUTPUT=""
+if RAW_PAIRING_OUTPUT=$(docker compose exec -T telegram-bot python -m herald.telegram.pairing_cli --read-only 2>&1); then
+    PAIRING_OUTPUT=$(echo "$RAW_PAIRING_OUTPUT" | tr -d '\r' | awk 'NR==1{print $0}')
+fi
+
+PAIRING_MODE="UNKNOWN"
+PAIR_CODE=""
+PAIR_EXP="30"
+if [ "$PAIRING_OUTPUT" = "PAIRED" ]; then
+    PAIRING_MODE="PAIRED"
+elif echo "$PAIRING_OUTPUT" | grep -qE '^UNPAIRED:[A-Za-z0-9_-]+:[0-9]+$'; then
+    PAIR_CODE=$(echo "$PAIRING_OUTPUT" | cut -d':' -f2)
+    PAIR_EXP=$(echo "$PAIRING_OUTPUT" | cut -d':' -f3)
+    PAIRING_MODE="UNPAIRED"
+fi
 
 echo ""
 echo "========================================================"
-echo "🎉 Herald installation and acceptance checks passed!    "
+echo "               Herald Setup Complete! /logs for details"
+echo "========================================================"
+echo ""
+echo "Telegram Bot: @${BOT_NAME}"
+
+if [ "$PAIRING_MODE" = "PAIRED" ]; then
+    echo "Owner:        Owner already paired"
+    echo ""
+    echo "Your Telegram account is already paired as the authorized owner."
+elif [ "$PAIRING_MODE" = "UNPAIRED" ]; then
+    echo "Pairing Code: ${PAIR_CODE}"
+    echo "Pairing expires in: ${PAIR_EXP:-30} minutes"
+    echo ""
+    echo "PAIR YOUR ACCOUNT"
+    echo "1. Open a private chat with @${BOT_NAME}"
+    echo "2. Send:"
+    echo "   /pair ${PAIR_CODE}"
+fi
+
+echo ""
+echo "QUICK START"
+echo "- Send an article URL by itself for a Standard podcast."
+echo "- Put \"brief\" above a URL/text for a shorter episode."
+echo "- Put \"research high\" above a URL/text for deep research."
+echo "- Put \"literal\" above text for zero-AI narration."
+echo ""
+echo "TELEGRAM COMMANDS"
+echo "/start        - Quick-start guide"
+echo "/help         - Full usage and directive reference"
+echo "/download     - Download completed podcast MP3 document"
+echo "/status       - System health, queue depth, and uptime"
+echo "/ai_check     - AI provider connection test"
+echo "/queue        - Pending and processing jobs"
+echo "/settings     - Preferences, default voice, and pre-TTS confirmation toggle"
+echo "/diagnostics  - View job diagnostics and download the sanitized support bundle"
+echo "/readme       - Project documentation"
+echo ""
+echo "SERVER COMMANDS"
+echo "Live logs: docker compose logs -f --tail=100"
+echo "Status:    docker compose ps"
+echo "Stop:      docker compose down"
+echo "Start:     docker compose up -d"
 echo "========================================================"

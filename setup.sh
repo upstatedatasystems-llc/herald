@@ -18,6 +18,7 @@ fi
 
 CONFIGURE_ONLY=false
 START_ONLY=false
+NO_BANNER=false
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --start-only)
             START_ONLY=true
+            shift
+            ;;
+        --no-banner)
+            NO_BANNER=true
             shift
             ;;
         *)
@@ -626,6 +631,7 @@ fi
     if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"; fi
     if [ -z "$(get_env_val "HERALD_DNS_PRIMARY")" ]; then set_env_val "HERALD_DNS_PRIMARY" "1.1.1.1"; fi
     if [ -z "$(get_env_val "HERALD_DNS_SECONDARY")" ]; then set_env_val "HERALD_DNS_SECONDARY" "8.8.8.8"; fi
+    if [ -z "$(get_env_val "DIAGNOSTICS_RETENTION_DAYS")" ]; then set_env_val "DIAGNOSTICS_RETENTION_DAYS" "30"; fi
 
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
@@ -658,6 +664,9 @@ if [ "$CONFIGURE_ONLY" = false ]; then
 
     echo ""
     echo "🚀 Starting Herald core services via Docker Compose..."
+
+    mkdir -p logs/diagnostics
+    chmod 755 logs logs/diagnostics 2>/dev/null || true
 
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     docker compose up -d postgres kokoro herald-migration herald-worker telegram-bot
@@ -791,50 +800,52 @@ else
     exit 1
 fi
 
-echo ""
-echo "========================================================"
-echo "               Herald Setup Complete!                  "
-echo "========================================================"
-echo ""
-echo "Telegram Bot: @${BOT_NAME:-HeraldBot}"
+if [ "$NO_BANNER" = false ]; then
+    echo ""
+    echo "========================================================"
+    echo "               Herald Setup Complete! /logs for details"
+    echo "========================================================"
+    echo ""
+    echo "Telegram Bot: @${BOT_NAME:-HeraldBot}"
 
-if [ "$PAIRING_MODE" = "PAIRED" ]; then
-    echo "Owner:        Owner already paired"
+    if [ "$PAIRING_MODE" = "PAIRED" ]; then
+        echo "Owner:        Owner already paired"
+        echo ""
+        echo "Your Telegram account is already paired as the authorized owner."
+    elif [ "$PAIRING_MODE" = "UNPAIRED" ]; then
+        echo "Pairing Code: ${PAIR_CODE}"
+        echo "Pairing expires in: ${PAIR_EXP:-30} minutes"
+        echo ""
+        echo "PAIR YOUR ACCOUNT"
+        echo "1. Open a private chat with @${BOT_NAME:-HeraldBot}"
+        echo "2. Send:"
+        echo "   /pair ${PAIR_CODE}"
+    fi
+
     echo ""
-    echo "Your Telegram account is already paired as the authorized owner."
-elif [ "$PAIRING_MODE" = "UNPAIRED" ]; then
-    echo "Pairing Code: ${PAIR_CODE}"
-    echo "Pairing expires in: ${PAIR_EXP:-30} minutes"
+    echo "QUICK START"
+    echo "- Send an article URL by itself for a Standard podcast."
+    echo "- Put \"brief\" above a URL/text for a shorter episode."
+    echo "- Put \"research high\" above a URL/text for deep research."
+    echo "- Put \"literal\" above text for zero-AI narration."
     echo ""
-    echo "PAIR YOUR ACCOUNT"
-    echo "1. Open a private chat with @${BOT_NAME:-HeraldBot}"
-    echo "2. Send:"
-    echo "   /pair ${PAIR_CODE}"
+    echo "TELEGRAM COMMANDS"
+    echo "/start        - Quick-start guide"
+    echo "/help         - Full usage and directive reference"
+    echo "/download     - Download completed podcast MP3 document"
+    echo "/status       - System health, queue depth, and uptime"
+    echo "/ai_check     - AI provider connection test"
+    echo "/queue        - Pending and processing jobs"
+    echo "/settings     - Preferences, default voice, and pre-TTS confirmation toggle"
+    echo "/diagnostics  - View job diagnostics and download the sanitized support bundle"
+    echo "/readme       - Project documentation"
+    echo ""
+    echo "SERVER COMMANDS"
+    echo "Live logs: docker compose logs -f --tail=100"
+    echo "Status:    docker compose ps"
+    echo "Stop:      docker compose down"
+    echo "Start:     docker compose up -d"
+    echo "========================================================"
 fi
-
-echo ""
-echo "QUICK START"
-echo "- Send an article URL by itself for a Standard podcast."
-echo "- Put \"brief\" above a URL/text for a shorter episode."
-echo "- Put \"research high\" above a URL/text for deep research."
-echo "- Put \"literal\" above text for zero-AI narration."
-echo ""
-echo "TELEGRAM COMMANDS"
-echo "/start        - Quick-start guide"
-echo "/help         - Full usage and directive reference"
-echo "/download     - Download completed podcast MP3 document"
-echo "/status       - System health, queue depth, and uptime"
-echo "/ai_check     - AI provider connection test"
-echo "/queue        - Pending and processing jobs"
-echo "/settings     - Preferences, default voice, and pre-TTS confirmation toggle"
-echo "/diagnostics  - View job diagnostics and download the sanitized support bundle"
-echo "/readme       - Project documentation"
-echo ""
-echo "SERVER COMMANDS"
-echo "Live logs: docker compose logs -f --tail=100"
-echo "Status:    docker compose ps"
-echo "Stop:      docker compose down"
-echo "Start:     docker compose up -d"
-echo "========================================================"
 fi
 

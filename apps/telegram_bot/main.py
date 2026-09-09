@@ -4,13 +4,13 @@ import sys
 from herald.ai.factory import get_ai_provider
 from herald.config import settings
 from herald.db.connection import SessionLocal
-from herald.logging import setup_secure_logging
+from herald.logging import setup_service_logging
 from herald.telegram.auth import get_or_create_active_pairing_code, has_owner
 from herald.telegram.bot import run_telegram_bot
 from herald.telegram.client import TelegramClient
 from herald.tts.kokoro_client import KokoroClient
 
-setup_secure_logging()
+setup_service_logging("telegram-bot")
 logger = logging.getLogger("herald.telegram.daemon")
 
 

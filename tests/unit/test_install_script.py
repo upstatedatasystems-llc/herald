@@ -424,7 +424,7 @@ def test_reinstall_forced_cleans_source_and_preserves_env(tmp_path):
     subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
 
-    (repo_dir / ".gitignore").write_text(".env\n")
+    (repo_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
     (repo_dir / "compose.yaml").write_text("services: {}\n")
     (repo_dir / "setup.sh").write_text("#!/usr/bin/env bash\necho 'Setup mock'\n")
     (repo_dir / "scripts").mkdir()
@@ -540,7 +540,7 @@ def test_install_normal_clone_success_and_ref_selection(tmp_path):
     )
     assert res.returncode == 0
     assert f"Checked out commit {feature_sha}" in res.stdout
-    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert "Herald Setup Complete! /logs for details" in res.stdout
     assert (target_dir / "feature.txt").exists()
 
 
@@ -590,7 +590,7 @@ def test_install_setup_failure_propagates(tmp_path):
         },
     )
     assert res.returncode != 0
-    assert "Herald installation and acceptance checks passed!" not in res.stdout
+    assert "Herald Setup Complete! /logs for details" not in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -639,7 +639,7 @@ def test_install_acceptance_failure_propagates(tmp_path):
         },
     )
     assert res.returncode != 0
-    assert "Herald installation and acceptance checks passed!" not in res.stdout
+    assert "Herald Setup Complete! /logs for details" not in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -698,7 +698,7 @@ def test_reinstall_backup_cleaned_up_on_success_and_failure(tmp_path):
         },
     )
     assert res.returncode == 0
-    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert "Herald Setup Complete! /logs for details" in res.stdout
     assert env_file.exists()
     assert "very_secret_12345" in env_file.read_text()
     assert list(isolated_tmp.iterdir()) == []
@@ -872,7 +872,7 @@ def test_install_docker_group_continuation_via_sg(tmp_path):
 
     assert res.returncode == 0
     assert "Activating docker group session..." in res.stdout
-    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert "Herald Setup Complete! /logs for details" in res.stdout
     assert (target_dir / "setup_ran.log").exists()
     assert (target_dir / "acceptance_ran.log").exists()
 
@@ -982,7 +982,7 @@ def test_clean_reinstall_after_cold_reset_order(tmp_path):
     )
 
     assert res.returncode == 0, f"Install failed with: {res.stderr}\nStdout: {res.stdout}"
-    assert "Herald installation and acceptance checks passed!" in res.stdout
+    assert "Herald Setup Complete! /logs for details" in res.stdout
 
     order_lines = [line.strip() for line in order_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert order_lines == [
@@ -1008,6 +1008,7 @@ def test_ref_visibility_across_ref_types(tmp_path):
     subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
 
+    (seed_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
     (seed_dir / "compose.yaml").write_text("services: {}\n")
     (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     (seed_dir / "scripts").mkdir()

@@ -10,8 +10,10 @@ import logging
 import os
 import re
 import shutil
+import time
+import uuid
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +21,12 @@ from sqlalchemy.orm import Session
 
 from herald.audio.artifact_generator import ensure_details_artifact
 from herald.config import settings
+from herald.db.connection import SessionLocal
 from herald.db.models import (
     AIInteraction,
     JobDiagnosticEvent,
     JobProcessingMetric,
+    JobState,
     JobStateTransition,
     PodcastJob,
     PodcastTTSChunk,
@@ -179,22 +183,42 @@ def build_manifest_dict(
     }
 
 
-def generate_job_diagnostics_zip(db: Session, job: PodcastJob) -> Path:
+def get_diagnostics_base_dir() -> Path:
+    """Return the canonical directory for diagnostics archives: logs/diagnostics."""
+    base = Path(getattr(settings, "HERALD_LOG_DIR", "logs")) / "diagnostics"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def get_terminal_diagnostics_path(job_id: str, terminal_status: str) -> Path:
+    """Return canonical path for a terminal job's support bundle: logs/diagnostics/<job_id>_<status>.zip"""
+    clean_status = (terminal_status or "COMPLETE").upper()
+    return get_diagnostics_base_dir() / f"{job_id}_{clean_status}.zip"
+
+
+def generate_job_diagnostics_zip(
+    db: Session,
+    job: PodcastJob,
+    target_zip_path: Path | None = None,
+) -> Path:
     """
     Generate a complete support diagnostics ZIP file for the specified job.
     Creates a dedicated work folder, writes all canonical artifacts, enforces size limits,
     performs a pre-send fail-closed secret scan, cleans temporary staging, and returns ZIP path.
+    Uses unique PID+UUID temporary staging for safe concurrent generation.
     """
-    work_base = Path(settings.HERALD_WORK_DIR) / "diagnostics"
-    work_base.mkdir(parents=True, exist_ok=True)
+    work_base = get_diagnostics_base_dir()
 
     ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     slug = _sanitize_slug(job.custom_title or job.id[:8])
-    staging_dir = work_base / f"staging_{job.id[:8]}_{ts_str}"
+    staging_dir = work_base / f"staging_{job.id[:8]}_{ts_str}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_filename = f"herald-diagnostics-{slug}-{job.id[:8]}-{ts_str}.zip"
-    zip_path = work_base / zip_filename
+    if target_zip_path is None:
+        target_zip_path = work_base / f"herald-diagnostics-{slug}-{job.id[:8]}-{ts_str}.zip"
+
+    # Unique PID+UUID temp file for safe concurrent generation
+    tmp_zip_path = work_base / f"{target_zip_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
 
     included_files: list[str] = []
     truncated_files: list[str] = []
@@ -545,7 +569,7 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     raise RuntimeError("Security violation: Diagnostics bundle contained unredacted secret.")
 
         # Create ZIP Archive
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for root, _, files in os.walk(staging_dir):
                 for f in files:
                     full_p = Path(root) / f
@@ -553,28 +577,201 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     zip_file.write(full_p, arcname=str(rel_p).replace("\\", "/"))
 
         # Pre-send size ceiling enforcement
-        zip_size = zip_path.stat().st_size
+        zip_size = tmp_zip_path.stat().st_size
         if zip_size > MAX_DIAGNOSTIC_BYTES:
-            if zip_path.exists():
-                zip_path.unlink()
+            if tmp_zip_path.exists():
+                tmp_zip_path.unlink()
             raise ValueError(f"Diagnostics bundle size ({zip_size} bytes) exceeds maximum allowable limit ({MAX_DIAGNOSTIC_BYTES} bytes).")
 
         # Pre-send fail-closed secret scan on raw zip bytes
-        with open(zip_path, "rb") as zf:
+        with open(tmp_zip_path, "rb") as zf:
             zip_bytes = zf.read()
 
         detected_leaks = scan_for_secrets(zip_bytes)
         if detected_leaks:
-            if zip_path.exists():
-                zip_path.unlink()
+            if tmp_zip_path.exists():
+                tmp_zip_path.unlink()
             logger.error("Security violation: Diagnostics bundle failed pre-send secret scan on ZIP archive. Detected: %s", ", ".join(detected_leaks))
             raise RuntimeError("Security violation: Diagnostics bundle contained unredacted secret.")
 
-        return zip_path
+        # Atomic replace to final target path
+        target_zip_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(tmp_zip_path, target_zip_path)
+        logger.info(
+            "Successfully generated diagnostics archive for job %s at %s (%d bytes)",
+            job.id,
+            target_zip_path,
+            zip_size,
+        )
+        return target_zip_path
 
     finally:
+        try:
+            if tmp_zip_path.exists():
+                tmp_zip_path.unlink()
+        except Exception:
+            pass
         try:
             if staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Failed to remove staging directory {staging_dir}: {e}")
+
+
+def ensure_terminal_diagnostics_archive(
+    job_id: str,
+    terminal_status: str | None = None,
+) -> Path | None:
+    """
+    Ensure canonical diagnostics archive exists for a terminal job.
+    Uses an isolated DB session so export failures never poison caller sessions.
+    Safe against concurrent calls (idempotent, atomic file replacement).
+    Returns canonical Path on success, None on error or if job is not terminal.
+    """
+    TERMINAL_STATES = {
+        JobState.COMPLETE.value,
+        JobState.FAILED_FINAL.value,
+        JobState.CANCELLED.value,
+    }
+
+    session = SessionLocal()
+    try:
+        job = session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+        if not job:
+            logger.warning("ensure_terminal_diagnostics_archive: job %s not found", job_id)
+            return None
+
+        status = terminal_status or job.status
+        if status not in TERMINAL_STATES:
+            logger.debug(
+                "ensure_terminal_diagnostics_archive: job %s status '%s' is not terminal, skipping",
+                job_id,
+                status,
+            )
+            return None
+
+        canonical_path = get_terminal_diagnostics_path(job_id, status)
+        if canonical_path.exists() and canonical_path.stat().st_size > 0:
+            logger.debug(
+                "ensure_terminal_diagnostics_archive: archive already exists for %s at %s",
+                job_id,
+                canonical_path,
+            )
+            return canonical_path
+
+        generated_path = generate_job_diagnostics_zip(
+            db=session,
+            job=job,
+            target_zip_path=canonical_path,
+        )
+        return generated_path
+    except Exception as e:
+        logger.error(
+            "Failed to generate terminal diagnostics archive for job %s: %s",
+            job_id,
+            e,
+            exc_info=True,
+        )
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        session.close()
+
+
+def cleanup_expired_diagnostics_archives(retention_days: int | None = None) -> int:
+    """
+    Remove diagnostics archive files older than retention_days (default DIAGNOSTICS_RETENTION_DAYS).
+    Also purges stale temporary .tmp.* files older than 1 hour.
+    Returns the count of removed archive files.
+    """
+    if retention_days is None:
+        retention_days = getattr(settings, "DIAGNOSTICS_RETENTION_DAYS", 30)
+
+    base_dir = get_diagnostics_base_dir()
+    if not base_dir.exists():
+        return 0
+
+    now = time.time()
+    cutoff_time = now - (retention_days * 86400)
+    tmp_cutoff_time = now - 3600  # 1 hour for abandoned temp files
+    deleted_count = 0
+
+    try:
+        for entry in base_dir.iterdir():
+            if not entry.is_file():
+                continue
+
+            # Clean stale temporary files
+            if ".tmp." in entry.name:
+                try:
+                    if entry.stat().st_mtime < tmp_cutoff_time:
+                        entry.unlink(missing_ok=True)
+                        logger.debug("Cleaned stale diagnostics temp file: %s", entry.name)
+                except Exception as ex:
+                    logger.warning("Failed to remove stale temp file %s: %s", entry, ex)
+                continue
+
+            # Clean expired ZIP archives
+            if entry.name.endswith(".zip"):
+                try:
+                    if entry.stat().st_mtime < cutoff_time:
+                        entry.unlink(missing_ok=True)
+                        deleted_count += 1
+                        logger.info(
+                            "Removed expired diagnostics archive: %s (age > %d days)",
+                            entry.name,
+                            retention_days,
+                        )
+                except Exception as ex:
+                    logger.warning("Failed to remove expired archive %s: %s", entry, ex)
+    except Exception as e:
+        logger.error("Error during diagnostics cleanup sweep: %s", e)
+
+    return deleted_count
+
+
+def sweep_unarchived_terminal_jobs(
+    db: Session,
+    max_age_days: int | None = None,
+    limit: int = 50,
+) -> int:
+    """
+    Scan for recent terminal jobs that lack a persisted diagnostics archive and generate them.
+    Bounded by limit to avoid overloading during startup or scheduled maintenance.
+    """
+    if max_age_days is None:
+        max_age_days = getattr(settings, "DIAGNOSTICS_RETENTION_DAYS", 30)
+
+    TERMINAL_STATES = [
+        JobState.COMPLETE.value,
+        JobState.FAILED_FINAL.value,
+        JobState.CANCELLED.value,
+    ]
+    cutoff_dt = datetime.now(UTC) - timedelta(days=max_age_days)
+
+    unarchived_jobs = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.status.in_(TERMINAL_STATES),
+            PodcastJob.created_at >= cutoff_dt,
+        )
+        .order_by(PodcastJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    generated_count = 0
+    for job in unarchived_jobs:
+        archive_path = get_terminal_diagnostics_path(job.id, job.status)
+        if not archive_path.exists():
+            res = ensure_terminal_diagnostics_archive(job.id, job.status)
+            if res:
+                generated_count += 1
+
+    if generated_count > 0:
+        logger.info("Swept and generated %d missing terminal diagnostics archives", generated_count)
+
+    return generated_count

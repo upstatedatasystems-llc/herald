@@ -1291,6 +1291,12 @@ def handle_telegram_callback_query(
                 metadata={"telegram_user_id": user_id},
                 db=db,
             )
+            db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job_id, JobState.CANCELLED.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive on cancellation: %s", arc_err)
 
             client.answer_callback_query(cb_id, text="Generation cancelled.")
             try:

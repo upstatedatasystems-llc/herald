@@ -133,6 +133,32 @@ Herald includes dedicated operational scripts in `scripts/`:
 
 ---
 
+## Observability, Logging & Diagnostics
+
+Herald maintains bounded, persistent host logging under `./logs/`:
+
+```
+logs/
+├── install-YYYYMMDD-HHMMSS.log      # Complete bootstrap/update/reinstall installation transcripts
+├── telegram-bot.log                 # Active Telegram bot application log (max 5 MB)
+├── telegram-bot.log.1               # Rotated backup log
+├── herald-worker.log                # Active worker application log (max 5 MB)
+├── herald-worker.log.1              # Rotated backup log
+└── diagnostics/
+    └── <job_id>_<STATUS>.zip        # Sanitized terminal job diagnostic bundles
+```
+
+### Key Observability Features:
+- **Application Log Rotation**: `telegram-bot` and `herald-worker` each log to rotating files with a 5 MB ceiling and 1 backup file (~20 MB maximum disk usage total across both services).
+- **Docker Daemon Logging Bounding**: Container stdout/stderr is capped using Docker's `json-file` driver (`max-size: 10m`, `max-file: 3`).
+- **Secret Redaction**: Configured API keys, tokens, Authorization headers, and credentials are automatically scrubbed from application logs and diagnostic bundles.
+- **Automatic Diagnostics Bundles**: On reaching any terminal state (`COMPLETE`, `FAILED_FINAL`, `CANCELLED`), a sanitized ZIP archive containing full execution telemetry, state transitions, timings, AI evidence, and configuration is generated under `logs/diagnostics/`.
+- **Diagnostics Retention**: Retained for 30 days by default (`DIAGNOSTICS_RETENTION_DAYS=30`), automatically cleaned up daily by `herald-worker`.
+- **Reset & Reinstall Resilience**: Host logs in `./logs/` survive both warm and cold resets (`scripts/reset-herald.sh`), as well as reinstallations (`install.sh --reinstall`).
+
+---
+
 ## License
 
 [MIT License](LICENSE) — Copyright (c) 2026 Upstate Data Systems LLC.
+

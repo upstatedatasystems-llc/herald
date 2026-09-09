@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     HERALD_API_KEY: str = ""
     HERALD_MAX_SOURCE_CHARS: int = 100000
     HERALD_WORK_DIR: str = "/data/herald"
+    HERALD_LOG_DIR: str = "logs"
+    DIAGNOSTICS_RETENTION_DAYS: int = 30
     HERALD_MIN_DISK_MB: int = 500
     HERALD_METRICS_ENABLED: bool = True
     HERALD_DNS_PRIMARY: str = "1.1.1.1"

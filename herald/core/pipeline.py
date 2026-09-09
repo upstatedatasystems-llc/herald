@@ -341,6 +341,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.error_code = "SSRF_PROTECTION"
             job.error_detail = str(e)
             db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
             return HeraldResponse(
                 job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
@@ -361,6 +366,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.error_code = "EXTRACTION_FAILURE"
             job.error_detail = str(e)
             db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
             return HeraldResponse(
                 job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
@@ -381,6 +391,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.error_code = "EXTRACTION_FAILURE"
             job.error_detail = str(e)
             db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
             return HeraldResponse(
                 job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
@@ -401,6 +416,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.error_code = "EXTRACTION_FAILURE"
             job.error_detail = str(e)
             db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
             return HeraldResponse(
                 job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
@@ -420,6 +440,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             job.error_code = "EMPTY_SOURCE"
             job.error_detail = "No usable source text or valid URL was provided."
             db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
             return HeraldResponse(
                 job_id=job.id,
                 status=JobState.FAILED_FINAL.value,
@@ -996,6 +1021,11 @@ def execute_script_generation(
             message=safe_msg,
             error_category=eff_cat,
         )
+        try:
+            from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
         return HeraldResponse(
             job_id=job.id,
             status=job.status,

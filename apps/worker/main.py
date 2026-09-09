@@ -18,6 +18,7 @@ from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob, RequestMode
 from herald.db.state_machine import transition_job_state
+from herald.logging import setup_service_logging
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.performance_metrics import record_stage_metric
 from herald.services.resource_monitor import TTSResourceMonitor
@@ -29,10 +30,7 @@ from herald.tts.kokoro_client import (
     KokoroTTSTimeoutError,
 )
 
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-)
+setup_service_logging("herald-worker")
 logger = logging.getLogger("herald.worker")
 
 
@@ -207,6 +205,12 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 commit=False,
             )
             db.commit()
+            if target_state == JobState.FAILED_FINAL.value:
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive on stale claim recovery: %s", arc_err)
 
             record_stage_metric(
                 job_id=job.id,
@@ -284,6 +288,11 @@ def claim_next_job(db: Session, worker_id: str = "herald-worker", lease_seconds:
             message="Exceeded max synthesis attempts",
             error_category="KOKORO_MAX_ATTEMPTS_EXCEEDED",
         )
+        try:
+            from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
         return None
 
     job.claimed_at = now
@@ -636,7 +645,47 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                 error_category=err_code,
             )
             db.commit()
+            if target_failed_state == JobState.FAILED_FINAL.value:
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive on worker synthesis failure: %s", arc_err)
             return False
+
+
+_last_maintenance_time: float = 0.0
+_maintenance_lock = threading.Lock()
+
+
+def check_periodic_diagnostics_maintenance(db: Session, interval_seconds: int = 86400):
+    """
+    Run periodic diagnostics retention cleanup and sweep for missing archives.
+    Only executed by herald-worker once per interval (~24h).
+    """
+    global _last_maintenance_time
+    now = time.time()
+    if now - _last_maintenance_time < interval_seconds:
+        return
+    with _maintenance_lock:
+        if now - _last_maintenance_time < interval_seconds:
+            return
+        _last_maintenance_time = now
+        try:
+            from herald.services.diagnostics_export import (
+                cleanup_expired_diagnostics_archives,
+                sweep_unarchived_terminal_jobs,
+            )
+            logger.info("Running periodic diagnostics maintenance (retention cleanup & sweep)...")
+            cleaned = cleanup_expired_diagnostics_archives()
+            swept = sweep_unarchived_terminal_jobs(db)
+            logger.info(
+                "Periodic diagnostics maintenance complete: %d expired deleted, %d unarchived swept",
+                cleaned,
+                swept,
+            )
+        except Exception as e:
+            logger.error("Periodic diagnostics maintenance failed: %s", e)
 
 
 def run_single_worker_loop(worker_id: str = "herald-worker"):
@@ -649,6 +698,7 @@ def run_single_worker_loop(worker_id: str = "herald-worker"):
         try:
             db = SessionLocal()
             try:
+                check_periodic_diagnostics_maintenance(db)
                 recover_stale_claims(db)
                 job_processed = process_next_job(db, kokoro_client, worker_id=worker_id)
             finally:
@@ -673,6 +723,26 @@ def run_worker_loop():
     kokoro_client = KokoroClient()
     h_status = kokoro_client.health_check()
     logger.info(f"Startup Kokoro/FFmpeg Health Status: {h_status}")
+
+    # Startup diagnostics retention cleanup and sweep
+    try:
+        from herald.services.diagnostics_export import (
+            cleanup_expired_diagnostics_archives,
+            sweep_unarchived_terminal_jobs,
+        )
+        logger.info("Running startup diagnostics maintenance...")
+        cleaned = cleanup_expired_diagnostics_archives()
+        with SessionLocal() as maint_db:
+            swept = sweep_unarchived_terminal_jobs(maint_db)
+        logger.info(
+            "Startup diagnostics maintenance complete: %d expired deleted, %d unarchived swept",
+            cleaned,
+            swept,
+        )
+        global _last_maintenance_time
+        _last_maintenance_time = time.time()
+    except Exception as e:
+        logger.warning("Startup diagnostics maintenance encountered error: %s", e)
 
     w_count = concurrency_config.worker_concurrency
 

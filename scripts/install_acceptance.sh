@@ -41,7 +41,7 @@ echo "========================================================"
 echo ""
 
 # 1. Verify .env Existence and Permissions (0600)
-echo "[1/8] Checking configuration file and permissions..."
+echo "[1/9] Checking configuration file and permissions..."
 if [ ! -f "$ENV_FILE" ]; then
     report_fail "Configuration file '${ENV_FILE}' not found."
 else
@@ -74,7 +74,7 @@ get_env_key() {
 }
 
 # 2. Check for Placeholder Secrets and Provider Configuration
-echo "[2/8] Auditing credentials and AI provider consistency..."
+echo "[2/9] Auditing credentials and AI provider consistency..."
 KNOWN_PLACEHOLDERS=(
     "your-telegram-bot-token-from-botfather"
     "herald_secure_password"
@@ -200,7 +200,7 @@ case "$RES_PROV" in
 esac
 
 # 3. Check Default Service States
-echo "[3/8] Verifying default container service states..."
+echo "[3/9] Verifying default container service states..."
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
     report_fail "Docker Engine or Docker Compose v2 is not available."
 else
@@ -246,7 +246,7 @@ else
 fi
 
 # 4. Check Migration Container Status
-echo "[4/8] Verifying schema migration container completion..."
+echo "[4/9] Verifying schema migration container completion..."
 MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
 if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
     report_pass "Migration container (herald-migration) exited successfully with code 0."
@@ -255,7 +255,7 @@ else
 fi
 
 # 5. Authoritative Live Alembic Revision Parity Check (Dynamic Head)
-echo "[5/8] Verifying database schema matches dynamic Alembic head..."
+echo "[5/9] Verifying database schema matches dynamic Alembic head..."
 if command -v docker >/dev/null 2>&1; then
     HEADS_OUT=$(docker compose run --rm --no-deps --entrypoint alembic herald-migration heads 2>/dev/null || true)
     # Extract revision IDs (leading token on revision line)
@@ -282,7 +282,7 @@ else
 fi
 
 # 6. Verify Default Profile Isolation (n8n and herald-api NOT running)
-echo "[6/8] Verifying default profile isolation (optional services disabled)..."
+echo "[6/9] Verifying default profile isolation (optional services disabled)..."
 ALLOW_LEGACY="${HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES:-0}"
 RUNNING_SERVICES=$(docker compose ps --services --filter "status=running" 2>/dev/null || true)
 
@@ -303,7 +303,7 @@ else
 fi
 
 # 7. Check Runtime Disk Space Headroom (HERALD_MIN_DISK_MB runtime minimum)
-echo "[7/8] Verifying runtime disk headroom..."
+echo "[7/9] Verifying runtime disk headroom..."
 MIN_DISK_MB="${HERALD_MIN_DISK_MB:-500}"
 AVAIL_KB=$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
 AVAIL_MB=$((AVAIL_KB / 1024))
@@ -314,7 +314,7 @@ else
 fi
 
 # 8. Verify Voice Preview Cache and Manifest Parity
-echo "[8/8] Verifying voice preview cache and manifest completeness..."
+echo "[8/9] Verifying voice preview cache and manifest completeness..."
 if [ "${HERALD_TEST_ALLOW_VOICES:-0}" = "1" ]; then
     report_pass "Voice preview cache check bypassed for test harness."
 elif docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
@@ -328,10 +328,46 @@ else
     report_fail "Cannot verify voice preview cache because herald-worker is not running."
 fi
 
+# 9. Verify Persistent Logging Directory Layout and Container Log Health
+echo "[9/9] Verifying persistent logging layout and container log accessibility..."
+if [ "${HERALD_TEST_ALLOW_LOGS:-0}" = "1" ] || [ "${HERALD_TEST_ALLOW_PERMS:-0}" = "1" ]; then
+    report_pass "Logging layout check bypassed for test harness."
+else
+    LOGS_DIR="${SCRIPT_DIR}/logs"
+    DIAG_DIR="${LOGS_DIR}/diagnostics"
+    if [ ! -d "$LOGS_DIR" ]; then
+        report_fail "Host logs directory '${LOGS_DIR}' does not exist."
+    elif [ ! -d "$DIAG_DIR" ]; then
+        report_fail "Host diagnostics directory '${DIAG_DIR}' does not exist."
+    else
+        if [ ! -r "$LOGS_DIR" ]; then
+            report_fail "Logs directory '${LOGS_DIR}' is not readable by operator."
+        else
+            LOG_FAIL=false
+            RUNNING_SERVICES=$(docker compose ps --services --filter "status=running" 2>/dev/null || true)
+            if echo "$RUNNING_SERVICES" | grep -q "^herald-worker$"; then
+                if ! docker compose exec -T herald-worker sh -c 'touch /app/logs/.probe && rm -f /app/logs/.probe' 2>/dev/null; then
+                    report_fail "Logs directory is not writable by herald-worker container."
+                    LOG_FAIL=true
+                fi
+            fi
+            if echo "$RUNNING_SERVICES" | grep -q "^telegram-bot$"; then
+                if ! docker compose exec -T telegram-bot sh -c 'touch /app/logs/.probe && rm -f /app/logs/.probe' 2>/dev/null; then
+                    report_fail "Logs directory is not writable by telegram-bot container."
+                    LOG_FAIL=true
+                fi
+            fi
+            if [ "$LOG_FAIL" = false ]; then
+                report_pass "Host logs directory layout verified and writable by service containers."
+            fi
+        fi
+    fi
+fi
+
 echo ""
 echo "========================================================"
 if [ "$FAILURES" -eq 0 ]; then
-    echo "🎉 Acceptance Validation Passed: All 8 checks succeeded."
+    echo "🎉 Acceptance Validation Passed: All 9 checks succeeded."
     echo "========================================================"
     exit 0
 else

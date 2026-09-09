@@ -283,6 +283,12 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                 )
                 job.failed_stage = "TELEGRAM_DELIVERY"
             db.commit()
+            if job.delivery_attempt_count >= 3:
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive on permanent delivery failure for %s: %s", job.id, arc_err)
             return False
 
     job.delivered_at = datetime.now(UTC)
@@ -312,6 +318,13 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         metadata={"file_size_bytes": file_size_bytes, "duration_seconds": dur_secs},
         db=db,
     )
+    db.commit()
+
+    try:
+        from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+        ensure_terminal_diagnostics_archive(job.id, JobState.COMPLETE.value)
+    except Exception as arc_err:
+        logger.warning("Failed ensuring terminal diagnostics archive on delivery completion for %s: %s", job.id, arc_err)
 
     logger.info(f"Delivered completed MP3 for job '{job.id}' to Telegram chat '{chat_id}'")
     return True
@@ -439,8 +452,15 @@ def deliver_job_diagnostics(
         parse_mode="HTML",
     )
     zip_path = None
+    is_terminal = job.status in {JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value}
     try:
-        zip_path = generate_job_diagnostics_zip(db, job)
+        from herald.services.diagnostics_export import get_terminal_diagnostics_path
+        canonical_path = get_terminal_diagnostics_path(job.id, job.status) if is_terminal else None
+        if is_terminal and canonical_path and canonical_path.exists() and canonical_path.stat().st_size > 0:
+            zip_path = canonical_path
+        else:
+            zip_path = generate_job_diagnostics_zip(db, job, target_zip_path=canonical_path)
+
         if zip_path and zip_path.exists():
             zip_size = zip_path.stat().st_size
             caption = format_diagnostics_caption(job, zip_size)
@@ -463,7 +483,8 @@ def deliver_job_diagnostics(
         )
         return False
     finally:
-        if zip_path and zip_path.exists():
+        # Only delete temporary on-demand archives for active (non-terminal) jobs
+        if zip_path and zip_path.exists() and not is_terminal:
             try:
                 zip_path.unlink(missing_ok=True)
             except Exception:

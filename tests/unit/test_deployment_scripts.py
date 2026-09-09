@@ -515,7 +515,7 @@ def test_acceptance_location_independent_from_outside_repo(tmp_path):
         cwd=outside_dir,
     )
     assert res.returncode == 0
-    assert "Acceptance Validation Passed: All 8 checks succeeded." in res.stdout
+    assert "Acceptance Validation Passed: All 9 checks succeeded." in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
