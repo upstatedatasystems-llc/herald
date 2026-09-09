@@ -75,6 +75,51 @@ def test_rotating_file_handler_properties(tmp_path: Path):
     assert "Test message for worker-test" in content
 
 
+def test_setup_service_logging_default_policy(tmp_path: Path):
+    """Verify setup_service_logging defaults to 5 MB max_bytes and backup_count=1."""
+    log_dir = tmp_path / "logs"
+    service_name = "default-policy-service"
+
+    setup_service_logging(service_name=service_name, log_dir=str(log_dir))
+
+    root = logging.getLogger()
+    file_handler = next(
+        h for h in root.handlers if getattr(h, "_herald_handler_id", None) == f"herald_file_{service_name}"
+    )
+
+    assert file_handler.maxBytes == 5 * 1024 * 1024
+    assert file_handler.backupCount == 1
+
+
+def test_service_logging_rotation_strictly_one_backup(tmp_path: Path):
+    """Verify multiple rotations retain strictly service.log and service.log.1, never service.log.2."""
+    log_dir = tmp_path / "logs"
+    service_name = "rotation-service"
+
+    setup_service_logging(
+        service_name=service_name,
+        log_dir=str(log_dir),
+        max_bytes=150,
+        backup_count=1,
+    )
+
+    test_logger = logging.getLogger("herald.rotation.test")
+    for i in range(25):
+        test_logger.info(f"Line number {i:03d} with extra padding text to exceed byte limits rapidly.")
+
+    root = logging.getLogger()
+    for h in root.handlers:
+        h.flush()
+
+    main_log = log_dir / f"{service_name}.log"
+    backup_1 = log_dir / f"{service_name}.log.1"
+    backup_2 = log_dir / f"{service_name}.log.2"
+
+    assert main_log.exists()
+    assert backup_1.exists()
+    assert not backup_2.exists()
+
+
 def test_service_logging_redacts_registered_secrets(tmp_path: Path):
     log_dir = tmp_path / "logs"
     service_name = "bot-test"

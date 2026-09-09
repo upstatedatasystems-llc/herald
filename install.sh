@@ -18,11 +18,22 @@ NON_INTERACTIVE=false
 FORCE=false
 IS_INTERNAL_DOCKER_STAGE=false
 INSTALL_ENV_BACKUP=""
+ORIGINAL_STDOUT=3
+ORIGINAL_STDERR=4
+exec 3>&1 4>&2
 
 cleanup_install_backup() {
+    local exit_code=$?
     if [ -n "$INSTALL_ENV_BACKUP" ] && [ -f "$INSTALL_ENV_BACKUP" ]; then
         rm -f "$INSTALL_ENV_BACKUP"
         INSTALL_ENV_BACKUP=""
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+        if [ -n "${HERALD_BOOTSTRAP_LOG:-}" ] && [ -f "${HERALD_BOOTSTRAP_LOG:-}" ]; then
+            echo "❌ Installation failed early. Bootstrap transcript preserved at: ${HERALD_BOOTSTRAP_LOG}" >&2
+        elif [ -n "${HERALD_INSTALL_LOG:-}" ] && [ -f "${HERALD_INSTALL_LOG:-}" ]; then
+            echo "❌ Installation failed. Transcript recorded at: ${HERALD_INSTALL_LOG}" >&2
+        fi
     fi
 }
 trap cleanup_install_backup EXIT INT TERM
@@ -96,6 +107,23 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Initialize persistent installation transcript immediately
+if [ -z "${HERALD_INSTALL_LOG:-}" ]; then
+    BOOTSTRAP_LOG=$(mktemp "${TMPDIR:-/tmp}/herald-install-bootstrap-XXXXXX.log" 2>/dev/null || mktemp -t herald-install-bootstrap-XXXXXX.log 2>/dev/null || mktemp /tmp/herald-install-bootstrap-XXXXXX.log)
+    chmod 600 "$BOOTSTRAP_LOG" 2>/dev/null || true
+    export HERALD_INSTALL_LOG="$BOOTSTRAP_LOG"
+    export HERALD_BOOTSTRAP_LOG="$BOOTSTRAP_LOG"
+    exec > >(tee -a "$HERALD_INSTALL_LOG") 2> >(tee -a "$HERALD_INSTALL_LOG" >&2)
+else
+    exec > >(tee -a "$HERALD_INSTALL_LOG") 2> >(tee -a "$HERALD_INSTALL_LOG" >&2)
+fi
+
+echo "=== Herald Deployment Installer Invocation ==="
+echo "Command arguments: ${ORIGINAL_ARGS[*]:-(none)}"
+echo "Mode: ${MODE} | Requested Ref: ${HERALD_REF} | Target Directory: ${HERALD_INSTALL_DIR}"
+echo "Repository: ${HERALD_REPO_URL}"
+echo ""
 
 if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
     echo "========================================================"
@@ -426,14 +454,27 @@ else
     cd "$HERALD_INSTALL_DIR"
 fi
 
-# Establish persistent installation transcript under logs/
-if [ -z "${HERALD_INSTALL_LOG:-}" ]; then
-    mkdir -p "${HERALD_INSTALL_DIR}/logs"
+# Finalize persistent installation transcript under logs/
+mkdir -p "${HERALD_INSTALL_DIR}/logs"
+if [ -n "${HERALD_BOOTSTRAP_LOG:-}" ] && [ -f "${HERALD_BOOTSTRAP_LOG:-}" ]; then
     TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-    export HERALD_INSTALL_LOG="${HERALD_INSTALL_DIR}/logs/install-${TIMESTAMP}.log"
-    touch "$HERALD_INSTALL_LOG"
-    chmod 644 "$HERALD_INSTALL_LOG" 2>/dev/null || true
+    FINAL_INSTALL_LOG="${HERALD_INSTALL_DIR}/logs/install-${TIMESTAMP}.log"
+    cp -p "$HERALD_BOOTSTRAP_LOG" "$FINAL_INSTALL_LOG" 2>/dev/null || cat "$HERALD_BOOTSTRAP_LOG" > "$FINAL_INSTALL_LOG"
+    rm -f "$HERALD_BOOTSTRAP_LOG"
+    unset HERALD_BOOTSTRAP_LOG
+    chmod 644 "$FINAL_INSTALL_LOG" 2>/dev/null || true
+    export HERALD_INSTALL_LOG="$FINAL_INSTALL_LOG"
+    echo "📝 Installation transcript finalized at ${HERALD_INSTALL_LOG}"
+    exec 1>&3 2>&4
+    exec > >(tee -a "$HERALD_INSTALL_LOG") 2> >(tee -a "$HERALD_INSTALL_LOG" >&2)
+elif [ -z "${HERALD_INSTALL_LOG:-}" ]; then
+    TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+    FINAL_INSTALL_LOG="${HERALD_INSTALL_DIR}/logs/install-${TIMESTAMP}.log"
+    touch "$FINAL_INSTALL_LOG"
+    chmod 644 "$FINAL_INSTALL_LOG" 2>/dev/null || true
+    export HERALD_INSTALL_LOG="$FINAL_INSTALL_LOG"
     echo "📝 Recording installation transcript to ${HERALD_INSTALL_LOG}"
+    exec 1>&3 2>&4
     exec > >(tee -a "$HERALD_INSTALL_LOG") 2> >(tee -a "$HERALD_INSTALL_LOG" >&2)
 fi
 

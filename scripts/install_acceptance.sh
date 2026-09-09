@@ -358,7 +358,27 @@ else
                 fi
             fi
             if [ "$LOG_FAIL" = false ]; then
-                report_pass "Host logs directory layout verified and writable by service containers."
+                # Verify service log files exist, are regular files, non-empty, and readable
+                for s_log in "telegram-bot.log" "herald-worker.log"; do
+                    s_file="${LOGS_DIR}/${s_log}"
+                    if [ ! -e "$s_file" ]; then
+                        report_fail "Service log '${s_file}' does not exist."
+                        LOG_FAIL=true
+                    elif [ ! -f "$s_file" ]; then
+                        report_fail "Service log '${s_file}' is not a regular file."
+                        LOG_FAIL=true
+                    elif [ ! -s "$s_file" ]; then
+                        report_fail "Service log '${s_file}' is empty (expected startup lines upon boot)."
+                        LOG_FAIL=true
+                    elif [ ! -r "$s_file" ]; then
+                        report_fail "Service log '${s_file}' is not readable by host operator."
+                        LOG_FAIL=true
+                    fi
+                done
+            fi
+
+            if [ "$LOG_FAIL" = false ]; then
+                report_pass "Host logs directory layout verified, writable by containers, and service logs are populated and readable."
             fi
         fi
     fi

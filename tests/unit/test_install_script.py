@@ -6,6 +6,7 @@ Executes the actual install.sh script as a subprocess with mock environments.
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,17 @@ def to_posix_path(p: str | Path) -> str:
     if len(s) >= 2 and s[1] == ":":
         return f"/{s[0].lower()}{s[2:]}"
     return s
+
+
+def to_host_path(p: str | Path) -> Path:
+    """Convert a POSIX or Git Bash path back to a valid host filesystem Path."""
+    s = str(p)
+    if os.name == "nt":
+        if s.startswith("/tmp/"):
+            return Path(tempfile.gettempdir()) / s[5:]
+        if len(s) >= 3 and s[0] == "/" and s[2] == "/":
+            return Path(f"{s[1]}:{s[2:]}")
+    return Path(s)
 
 
 def run_install_script(args: list = None, env: dict = None) -> subprocess.CompletedProcess:
@@ -767,8 +779,9 @@ def test_reinstall_backup_cleaned_up_on_git_reset_or_clean_failure(tmp_path):
         },
     )
     assert res.returncode != 0
-    # Trap must have removed the temporary backup file
-    assert list(isolated_tmp.iterdir()) == []
+    # Trap must have removed the temporary .env backup file (bootstrap install log is preserved on failure)
+    env_backups = [f for f in isolated_tmp.iterdir() if not f.name.startswith("herald-install-")]
+    assert env_backups == []
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
@@ -1208,4 +1221,293 @@ def test_configuration_failure_aborts_before_build(tmp_path):
     assert "Configuration validation failed!" in res.stderr
     docker_calls = docker_log.read_text(encoding="utf-8") if docker_log.exists() else ""
     assert "compose build" not in docker_calls
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_transcript_captures_complete_lifecycle_including_early_output_and_final_banner(tmp_path):
+    """Verify install transcript captures early output (banner, OS check, arch, disk, git ref/clone)
+    AND the final completion banner in the SAME file."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_lifecycle_target"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote), "--ref", "main"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode == 0
+    logs_dir = target_dir / "logs"
+    assert logs_dir.exists()
+    log_files = list(logs_dir.glob("install-*.log"))
+    assert len(log_files) == 1, f"Expected 1 install log, found {log_files}"
+
+    log_content = log_files[0].read_text(encoding="utf-8", errors="replace")
+
+    # Verify early output is present
+    assert "=== Herald Deployment Installer Invocation ===" in log_content
+    assert "Command arguments:" in log_content
+    assert "Operating System verified: Ubuntu 24.04 LTS" in log_content
+    assert "CPU Architecture verified: x86_64" in log_content
+    assert "Requested ref: main" in log_content
+    assert "Cloning Herald repository" in log_content
+
+    # Verify middle execution is present
+    assert "Running Herald configuration setup" in log_content
+    assert "Running mandatory installation acceptance validation" in log_content
+
+    # Verify final completion banner is in the exact same file
+    assert "Herald Setup Complete! /logs for details" in log_content
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_transcript_captures_stderr_alongside_stdout(tmp_path):
+    """Verify that stderr output from commands is captured into the install log."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    # Emit diagnostic message to stderr
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\necho 'STDERR_DIAGNOSTIC_PROBE_7749' >&2\nexit 0\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text("#!/usr/bin/env bash\nexit 0\n")
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_stderr_target"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote), "--ref", "main"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode == 0
+    log_files = list((target_dir / "logs").glob("install-*.log"))
+    assert len(log_files) == 1
+    log_content = log_files[0].read_text(encoding="utf-8", errors="replace")
+    assert "STDERR_DIAGNOSTIC_PROBE_7749" in log_content
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_install_early_failure_preserves_bootstrap_log(tmp_path):
+    """Verify that if install fails early before repository exists (e.g. disk space check),
+    the bootstrap transcript is preserved and its exact path reported."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    target_dir = tmp_path / "never_created_dir"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "2000",  # Triggers hard fail at disk check (<4000MB)
+        },
+    )
+
+    assert res.returncode != 0
+    assert "Bootstrap transcript preserved at:" in res.stderr
+
+    # Extract log path from stderr line
+    match_line = [line for line in res.stderr.splitlines() if "Bootstrap transcript preserved at:" in line]
+    assert match_line
+    log_path_str = match_line[0].split("Bootstrap transcript preserved at:")[-1].strip()
+
+    log_path = to_host_path(log_path_str)
+    assert log_path.exists(), f"Bootstrap log file not found at {log_path}"
+    content = log_path.read_text(encoding="utf-8", errors="replace")
+    assert "=== Herald Deployment Installer Invocation ===" in content
+    assert "Error: Insufficient free disk space" in content
+
+    # Clean up preserved temp file
+    log_path.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_existing_logs_survive_update_and_reinstall(tmp_path):
+    """Verify that existing logs in logs/ directory survive both an update and a reinstall."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(bare_remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text("#!/usr/bin/env bash\nexit 0\n")
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_survive_logs_target"
+    subprocess.run(["git", "clone", str(bare_remote), str(target_dir)], check=True, capture_output=True)
+
+    logs_dir = target_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    sentinel_1 = logs_dir / "existing-service.log"
+    sentinel_1.write_text("historical service log data\n")
+    sentinel_2 = logs_dir / "install-20260101-000000.log"
+    sentinel_2.write_text("prior installation transcript\n")
+
+    # 1. Verify survival across update
+    res_upd = run_install_script(
+        args=["--update", "--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res_upd.returncode == 0
+    assert sentinel_1.exists()
+    assert sentinel_2.exists()
+    assert "historical service log data" in sentinel_1.read_text()
+
+    # 2. Verify survival across forced reinstall (git clean -fd -e logs -e logs/*)
+    res_re = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res_re.returncode == 0
+    assert sentinel_1.exists()
+    assert sentinel_2.exists()
+    assert "historical service log data" in sentinel_1.read_text()
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_single_voice_prewarm_execution(tmp_path):
+    """Verify that during installation and setup, voice prewarm is invoked exactly once."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+    (seed_dir / ".gitignore").write_text(".env\nlogs/\n/logs/\n")
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+
+    docker_log = tmp_path / "docker_calls.log"
+
+    # Setup script that mimics real setup.sh running prewarm in start phase only
+    (seed_dir / "setup.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "for arg in \"$@\"; do\n"
+        "  if [ \"$arg\" = \"--start-only\" ]; then\n"
+        "    docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n"
+    )
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo \"$*\" >> \"{docker_log.as_posix()}\"\n"
+        f"exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_prewarm_target"
+    res = run_install_script(
+        args=["--install-dir", str(target_dir), "--repo", str(bare_remote), "--ref", "main"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode == 0
+    docker_calls = docker_log.read_text(encoding="utf-8").splitlines() if docker_log.exists() else []
+    prewarm_calls = [c for c in docker_calls if "voice_manager --prewarm" in c]
+    assert len(prewarm_calls) == 1, f"Expected exactly 1 voice prewarm call, got {len(prewarm_calls)}: {prewarm_calls}"
 

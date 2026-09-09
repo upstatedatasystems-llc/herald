@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from herald.audio.artifact_generator import ensure_details_artifact
@@ -620,11 +621,12 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
 
 def ensure_terminal_diagnostics_archive(
     job_id: str,
-    terminal_status: str | None = None,
+    expected_status: str | None = None,
 ) -> Path | None:
     """
     Ensure canonical diagnostics archive exists for a terminal job.
     Uses an isolated DB session so export failures never poison caller sessions.
+    Terminal status is determined strictly from the database row.
     Safe against concurrent calls (idempotent, atomic file replacement).
     Returns canonical Path on success, None on error or if job is not terminal.
     """
@@ -641,7 +643,15 @@ def ensure_terminal_diagnostics_archive(
             logger.warning("ensure_terminal_diagnostics_archive: job %s not found", job_id)
             return None
 
-        status = terminal_status or job.status
+        status = job.status
+        if expected_status is not None and status != expected_status:
+            logger.warning(
+                "ensure_terminal_diagnostics_archive: job %s status is '%s', expected '%s'",
+                job_id,
+                status,
+                expected_status,
+            )
+
         if status not in TERMINAL_STATES:
             logger.debug(
                 "ensure_terminal_diagnostics_archive: job %s status '%s' is not terminal, skipping",
@@ -720,7 +730,7 @@ def cleanup_expired_diagnostics_archives(retention_days: int | None = None) -> i
                     if entry.stat().st_mtime < cutoff_time:
                         entry.unlink(missing_ok=True)
                         deleted_count += 1
-                        logger.info(
+                        logger.debug(
                             "Removed expired diagnostics archive: %s (age > %d days)",
                             entry.name,
                             retention_days,
@@ -729,6 +739,13 @@ def cleanup_expired_diagnostics_archives(retention_days: int | None = None) -> i
                     logger.warning("Failed to remove expired archive %s: %s", entry, ex)
     except Exception as e:
         logger.error("Error during diagnostics cleanup sweep: %s", e)
+
+    if deleted_count > 0:
+        logger.info(
+            "Cleaned up %d expired diagnostics archives (>%d days old)",
+            deleted_count,
+            retention_days,
+        )
 
     return deleted_count
 
@@ -752,13 +769,19 @@ def sweep_unarchived_terminal_jobs(
     ]
     cutoff_dt = datetime.now(UTC) - timedelta(days=max_age_days)
 
+    terminal_ts = func.coalesce(
+        PodcastJob.completed_at,
+        PodcastJob.updated_at,
+        PodcastJob.created_at,
+    )
+
     unarchived_jobs = (
         db.query(PodcastJob)
         .filter(
             PodcastJob.status.in_(TERMINAL_STATES),
-            PodcastJob.created_at >= cutoff_dt,
+            terminal_ts >= cutoff_dt,
         )
-        .order_by(PodcastJob.created_at.desc())
+        .order_by(terminal_ts.desc())
         .limit(limit)
         .all()
     )

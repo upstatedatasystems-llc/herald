@@ -166,14 +166,4 @@ def transition_job_state(
     if commit:
         db.commit()
         db.refresh(job)
-        if to_state in (
-            JobState.COMPLETE.value,
-            JobState.FAILED_FINAL.value,
-            JobState.CANCELLED.value,
-        ):
-            try:
-                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                ensure_terminal_diagnostics_archive(job.id, to_state)
-            except Exception:
-                pass
     return job

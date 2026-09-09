@@ -204,14 +204,6 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 force=True,
                 commit=False,
             )
-            db.commit()
-            if target_state == JobState.FAILED_FINAL.value:
-                try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
-                except Exception as arc_err:
-                    logger.warning("Failed ensuring terminal diagnostics archive on stale claim recovery: %s", arc_err)
-
             record_stage_metric(
                 job_id=job.id,
                 stage="LEASE_RECOVERY",
@@ -221,6 +213,13 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 metadata_json={"recovered_from": pre_recovery_status, "attempts": job.synthesis_attempt_count},
                 is_attempt_metric=True,
             )
+            db.commit()
+            if target_state == JobState.FAILED_FINAL.value:
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive on stale claim recovery: %s", arc_err)
 
 
 def requeue_due_tts_retries(db: Session):
