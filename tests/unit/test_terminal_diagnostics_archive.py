@@ -396,3 +396,474 @@ def test_delivery_permanent_failure_persisted_in_failed_final_archive(clean_diag
         event_lines = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
         assert any(e["event_type"] == "TELEGRAM_DELIVERY_FAILED" for e in event_lines)
 
+
+def test_ensure_terminal_diagnostics_archive_authoritative_db_status_rejects_stale_caller(
+    clean_diagnostics_dir, db_session: Session
+):
+    """Regression test: persisted row is FAILED_FINAL, but stale caller passes expected_status='COMPLETE'.
+    Must return None, log a warning, and NOT create either COMPLETE or FAILED_FINAL archive.
+    A subsequent call with expected_status=None or matching status creates the archive."""
+    job = _create_dummy_job(db_session, status=JobState.FAILED_FINAL.value)
+
+    res_stale = ensure_terminal_diagnostics_archive(job.id, expected_status=JobState.COMPLETE.value)
+    assert res_stale is None
+
+    assert not get_terminal_diagnostics_path(job.id, JobState.COMPLETE.value).exists()
+    assert not get_terminal_diagnostics_path(job.id, JobState.FAILED_FINAL.value).exists()
+
+    # Recovery sweep or caller with matching status succeeds
+    res_correct = ensure_terminal_diagnostics_archive(job.id, expected_status=None)
+    assert res_correct is not None
+    assert get_terminal_diagnostics_path(job.id, JobState.FAILED_FINAL.value).exists()
+
+
+def test_telegram_delivery_missing_audio_creates_failed_final_archive(
+    clean_diagnostics_dir, db_session: Session
+):
+    """Point 1A: missing local audio transitions to FAILED_FINAL, records failure telemetry,
+    and automatically persists canonical <job>_FAILED_FINAL.zip containing failure evidence."""
+    from unittest.mock import MagicMock
+    from herald.telegram.delivery import deliver_single_job
+
+    job = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job.telegram_chat_id = 999888
+    job.local_audio_path = str(clean_diagnostics_dir.parent / "nonexistent_audio.mp3")
+    db_session.commit()
+
+    mock_client = MagicMock()
+    success = deliver_single_job(db=db_session, job=job, client=mock_client)
+    assert success is False
+
+    db_session.refresh(job)
+    assert job.status == JobState.FAILED_FINAL.value
+    assert job.error_code == "AUDIO_FILE_MISSING"
+    assert "not found" in (job.error_detail or "")
+    mock_client.send_message.assert_called_once()
+
+    canonical_path = get_terminal_diagnostics_path(job.id, JobState.FAILED_FINAL.value)
+    assert canonical_path.exists()
+    assert canonical_path.stat().st_size > 0
+
+    with zipfile.ZipFile(canonical_path, "r") as zf:
+        namelist = zf.namelist()
+        assert "manifest.json" in namelist
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        assert manifest["job_id"] == job.id
+        assert manifest["status"] == JobState.FAILED_FINAL.value
+
+        assert "processing-metrics.json" in namelist
+        metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
+        delivery_metric = next((m for m in metrics if m["stage"] == "TELEGRAM_DELIVERY"), None)
+        assert delivery_metric is not None
+        assert delivery_metric["status"] == "failure"
+        assert delivery_metric.get("metadata", {}).get("error_code") == "AUDIO_FILE_MISSING"
+
+        assert "diagnostic-events.jsonl" in namelist
+        events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
+        delivery_event = next((e for e in events if e["event_type"] == "TELEGRAM_DELIVERY_FAILED"), None)
+        assert delivery_event is not None
+        assert delivery_event["metadata"]["error_code"] == "AUDIO_FILE_MISSING"
+
+
+def test_telegram_delivery_oversized_audio_creates_failed_final_archive(
+    clean_diagnostics_dir, db_session: Session, monkeypatch
+):
+    """Point 1B: oversized audio transitions to FAILED_FINAL, records failure telemetry,
+    and automatically persists canonical <job>_FAILED_FINAL.zip containing failure evidence."""
+    from unittest.mock import MagicMock
+    from herald.telegram.delivery import deliver_single_job
+
+    monkeypatch.setattr("herald.config.settings.TELEGRAM_MAX_AUDIO_BYTES", 500)
+
+    audio_path = clean_diagnostics_dir.parent / "huge_audio.mp3"
+    audio_path.write_bytes(b"X" * 2000)
+
+    job = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job.telegram_chat_id = 999888
+    job.local_audio_path = str(audio_path)
+    job.audio_duration_seconds = 180.0
+    db_session.commit()
+
+    mock_client = MagicMock()
+    success = deliver_single_job(db=db_session, job=job, client=mock_client)
+    assert success is False
+
+    db_session.refresh(job)
+    assert job.status == JobState.FAILED_FINAL.value
+    assert job.error_code == "TELEGRAM_AUDIO_OVERSIZED"
+    assert "exceeded" in (job.error_detail or "").lower()
+    mock_client.send_message.assert_called_once()
+
+    canonical_path = get_terminal_diagnostics_path(job.id, JobState.FAILED_FINAL.value)
+    assert canonical_path.exists()
+    assert canonical_path.stat().st_size > 0
+
+    with zipfile.ZipFile(canonical_path, "r") as zf:
+        namelist = zf.namelist()
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        assert manifest["job_id"] == job.id
+        assert manifest["status"] == JobState.FAILED_FINAL.value
+
+        metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
+        delivery_metric = next((m for m in metrics if m["stage"] == "TELEGRAM_DELIVERY"), None)
+        assert delivery_metric is not None
+        assert delivery_metric["status"] == "failure"
+        assert delivery_metric.get("metadata", {}).get("error_code") == "TELEGRAM_AUDIO_OVERSIZED"
+
+        events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
+        delivery_event = next((e for e in events if e["event_type"] == "TELEGRAM_DELIVERY_FAILED"), None)
+        assert delivery_event is not None
+        assert delivery_event["metadata"]["error_code"] == "TELEGRAM_AUDIO_OVERSIZED"
+
+
+def test_telegram_failed_final_characterization_table(
+    clean_diagnostics_dir, db_session: Session, monkeypatch
+):
+    """Point 2: Characterization table proving every Telegram FAILED_FINAL path produces
+    a canonical <job>_FAILED_FINAL.zip archive with failure telemetry."""
+    from unittest.mock import MagicMock
+    from herald.core.pipeline import process_herald_request, HeraldRequest
+    from herald.extraction.url_extractor import ArticleExtractionError, SSRFVulnerabilityError
+    from herald.gemini.client import GeminiError
+    from herald.telegram.client import TelegramAPIError
+    from herald.telegram.delivery import deliver_single_job
+
+    paths_tested = []
+
+    # 1. Missing audio
+    job_miss = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_miss.telegram_chat_id = 111
+    job_miss.local_audio_path = "/nonexistent/path/audio.mp3"
+    db_session.commit()
+    deliver_single_job(db=db_session, job=job_miss, client=MagicMock())
+    arc_miss = get_terminal_diagnostics_path(job_miss.id, JobState.FAILED_FINAL.value)
+    assert arc_miss.exists()
+    paths_tested.append("MISSING_AUDIO")
+
+    # 2. Oversized audio
+    monkeypatch.setattr("herald.config.settings.TELEGRAM_MAX_AUDIO_BYTES", 100)
+    audio_path = clean_diagnostics_dir.parent / "over_audio.mp3"
+    audio_path.write_bytes(b"A" * 500)
+    job_over = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_over.telegram_chat_id = 222
+    job_over.local_audio_path = str(audio_path)
+    db_session.commit()
+    deliver_single_job(db=db_session, job=job_over, client=MagicMock())
+    arc_over = get_terminal_diagnostics_path(job_over.id, JobState.FAILED_FINAL.value)
+    assert arc_over.exists()
+    paths_tested.append("OVERSIZED_AUDIO")
+
+    # 3. 3-attempt delivery failure
+    job_retry = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_retry.delivery_attempt_count = 2
+    audio_retry = clean_diagnostics_dir.parent / "retry_audio.mp3"
+    audio_retry.write_bytes(b"B" * 50)
+    job_retry.telegram_chat_id = 333
+    job_retry.local_audio_path = str(audio_retry)
+    db_session.commit()
+    mock_err_client = MagicMock()
+    mock_err_client.send_audio.side_effect = TelegramAPIError("Network Down")
+    mock_err_client.send_document.side_effect = TelegramAPIError("Network Down")
+    deliver_single_job(db=db_session, job=job_retry, client=mock_err_client)
+    arc_retry = get_terminal_diagnostics_path(job_retry.id, JobState.FAILED_FINAL.value)
+    assert arc_retry.exists()
+    paths_tested.append("DELIVERY_RETRY_EXHAUSTION")
+
+    # 4. Extraction SSRF failure
+    with patch("herald.core.pipeline.extract_article_from_url", side_effect=SSRFVulnerabilityError("Private IP 127.0.0.1")):
+        req_ssrf = HeraldRequest(
+            source_type="url",
+            source_url="http://127.0.0.1/admin",
+            telegram_chat_id=444,
+            telegram_user_id=444,
+            transport="telegram",
+        )
+        resp_ssrf = process_herald_request(db_session, req_ssrf)
+        assert resp_ssrf.status == JobState.FAILED_FINAL.value
+        arc_ssrf = get_terminal_diagnostics_path(resp_ssrf.job_id, JobState.FAILED_FINAL.value)
+        assert arc_ssrf.exists()
+        paths_tested.append("EXTRACTION_SSRF")
+
+    # 5. Extraction general failure
+    with patch("herald.core.pipeline.extract_article_from_url", side_effect=ArticleExtractionError("HTML Parse Failed")):
+        req_ext = HeraldRequest(
+            source_type="url",
+            source_url="https://example.com/bad",
+            telegram_chat_id=555,
+            telegram_user_id=555,
+            transport="telegram",
+        )
+        resp_ext = process_herald_request(db_session, req_ext)
+        assert resp_ext.status == JobState.FAILED_FINAL.value
+        arc_ext = get_terminal_diagnostics_path(resp_ext.job_id, JobState.FAILED_FINAL.value)
+        assert arc_ext.exists()
+        paths_tested.append("EXTRACTION_FAILURE")
+
+    # 6. Scripting failure
+    mock_provider = MagicMock()
+    mock_provider.is_configured.return_value = True
+    mock_provider.generate_script.side_effect = GeminiError("Script generation error")
+    with patch("herald.core.pipeline.get_ai_provider", return_value=mock_provider):
+        req_scr = HeraldRequest(
+            source_type="text",
+            source_text="Valid source text for scripting test",
+            request_mode="standard",
+            telegram_chat_id=666,
+            telegram_user_id=666,
+            transport="telegram",
+        )
+        resp_scr = process_herald_request(db_session, req_scr)
+        assert resp_scr.status == JobState.FAILED_FINAL.value
+        arc_scr = get_terminal_diagnostics_path(resp_scr.job_id, JobState.FAILED_FINAL.value)
+        assert arc_scr.exists()
+        paths_tested.append("SCRIPTING_FAILURE")
+
+    # 7. Worker synthesis max attempts
+    from apps.worker.main import claim_next_job
+    job_worker = _create_dummy_job(db_session, status=JobState.QUEUED_TTS.value)
+    job_worker.synthesis_attempt_count = 4  # > 3
+    db_session.commit()
+    claimed = claim_next_job(db=db_session, worker_id="test-worker")
+    assert claimed is None
+    db_session.refresh(job_worker)
+    assert job_worker.status == JobState.FAILED_FINAL.value
+    arc_worker = get_terminal_diagnostics_path(job_worker.id, JobState.FAILED_FINAL.value)
+    assert arc_worker.exists()
+    paths_tested.append("WORKER_TTS_MAX_ATTEMPTS")
+
+    assert len(paths_tested) == 7
+
+
+def test_api_extraction_failed_final_creates_canonical_archive(
+    clean_diagnostics_dir, db_session: Session, monkeypatch
+):
+    """Point 3A: apps/api/main.py URL extraction failure transitions to FAILED_FINAL,
+    records stage metrics and diagnostic events, and persists canonical FAILED_FINAL ZIP."""
+    from apps.api.main import process_intake, IntakeRequest
+    from herald.extraction.url_extractor import SourceAccessBlockedError
+
+    monkeypatch.setattr("herald.config.Settings.get_allowed_senders_list", lambda self: ["operator@herald.local"])
+
+    req = IntakeRequest(
+        gmail_message_id="msg_intake_fail_001",
+        sender_email="operator@herald.local",
+        subject="Podcast: Standard",
+        body_text="https://paywalled-news.com/article",
+    )
+    with patch("apps.api.main.extract_article_from_url", side_effect=SourceAccessBlockedError("Cloudflare 403 Forbidden")):
+        resp = process_intake(req=req, db=db_session)
+        assert resp.status == JobState.FAILED_FINAL.value
+        assert resp.error_category == "SOURCE_ACCESS_BLOCKED"
+
+        canonical_path = get_terminal_diagnostics_path(resp.job_id, JobState.FAILED_FINAL.value)
+        assert canonical_path.exists()
+        assert canonical_path.stat().st_size > 0
+
+        with zipfile.ZipFile(canonical_path, "r") as zf:
+            namelist = zf.namelist()
+            assert "manifest.json" in namelist
+            assert "processing-metrics.json" in namelist
+            assert "diagnostic-events.jsonl" in namelist
+
+            metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
+            ext_metric = next((m for m in metrics if m["stage"] == "URL_EXTRACTION"), None)
+            assert ext_metric is not None
+            assert ext_metric["status"] == "failed"
+
+            events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
+            ext_event = next((e for e in events if e["event_type"] == "EXTRACTION_FAILED"), None)
+            assert ext_event is not None
+            assert ext_event["metadata"]["category"] == "SOURCE_ACCESS_BLOCKED"
+
+
+def test_api_n8n_delivery_complete_creates_canonical_archive_with_metrics(
+    clean_diagnostics_dir, db_session: Session
+):
+    """Point 3B & 3C: n8n delivery complete transitions to COMPLETE, records EMAIL_DELIVERY,
+    DELIVERY_TOTAL, and END_TO_END metrics, and generates canonical COMPLETE archive."""
+    from apps.api.main import update_delivery_complete, DeliveryCompleteRequest
+
+    now = datetime.now(UTC)
+    job = _create_dummy_job(db_session, status=JobState.DELIVERING.value)
+    job.drive_file_id = "drive_audio_123"
+    job.details_drive_file_id = "drive_details_123"
+    job.audio_ready_at = now - timedelta(seconds=60)
+    job.created_at = now - timedelta(seconds=120)
+    db_session.commit()
+
+    req = DeliveryCompleteRequest(
+        gmail_result_message_id="msg_gmail_987",
+        started_at=(now - timedelta(seconds=10)).isoformat(),
+        finished_at=now.isoformat(),
+        duration_ms=10000,
+    )
+    resp = update_delivery_complete(job_id=job.id, req=req, db=db_session)
+    assert resp["status"] == JobState.COMPLETE.value
+
+    canonical_path = get_terminal_diagnostics_path(job.id, JobState.COMPLETE.value)
+    assert canonical_path.exists()
+    assert canonical_path.stat().st_size > 0
+
+    with zipfile.ZipFile(canonical_path, "r") as zf:
+        namelist = zf.namelist()
+        assert "manifest.json" in namelist
+        assert "processing-metrics.json" in namelist
+        assert "diagnostic-events.jsonl" in namelist
+
+        metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
+        metric_stages = {m["stage"] for m in metrics}
+        assert "EMAIL_DELIVERY" in metric_stages
+        assert "DELIVERY_TOTAL" in metric_stages
+        assert "END_TO_END" in metric_stages
+
+        events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
+        complete_event = next((e for e in events if e["event_type"] == "EMAIL_DELIVERY_COMPLETE"), None)
+        assert complete_event is not None
+
+
+def test_terminal_coverage_guard_suite(clean_diagnostics_dir, db_session: Session, monkeypatch):
+    """Point 6: Focused regression guard suite ensuring every production terminal finalization path
+    produces its required canonical diagnostics archive."""
+    from unittest.mock import MagicMock
+    from apps.api.main import process_intake, update_delivery_complete, DeliveryCompleteRequest, IntakeRequest
+    from apps.worker.main import claim_next_job
+    from herald.core.pipeline import process_herald_request, HeraldRequest
+    from herald.extraction.url_extractor import ArticleExtractionError
+    from herald.telegram.bot import handle_telegram_callback_query
+    from herald.telegram.client import TelegramAPIError
+    from herald.telegram.delivery import deliver_single_job
+
+    monkeypatch.setattr("herald.config.Settings.get_allowed_senders_list", lambda self: ["operator@herald.local"])
+
+    guard_results = {}
+
+    # 1. Telegram COMPLETE
+    audio_path1 = clean_diagnostics_dir.parent / "tg_comp.mp3"
+    audio_path1.write_bytes(b"AudioData1")
+    job_tg_comp = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_tg_comp.telegram_chat_id = 701
+    job_tg_comp.local_audio_path = str(audio_path1)
+    job_tg_comp.audio_duration_seconds = 60.0
+    db_session.commit()
+    mock_client = MagicMock()
+    mock_client.send_audio.return_value = {"message_id": 11}
+    deliver_single_job(db=db_session, job=job_tg_comp, client=mock_client)
+    arc = get_terminal_diagnostics_path(job_tg_comp.id, JobState.COMPLETE.value)
+    guard_results["telegram_complete"] = arc.exists() and arc.stat().st_size > 0
+
+    # 2. Telegram three-attempt delivery FAILED_FINAL
+    audio_path2 = clean_diagnostics_dir.parent / "tg_fail3.mp3"
+    audio_path2.write_bytes(b"AudioData2")
+    job_tg_fail3 = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_tg_fail3.delivery_attempt_count = 2
+    job_tg_fail3.telegram_chat_id = 702
+    job_tg_fail3.local_audio_path = str(audio_path2)
+    db_session.commit()
+    err_client = MagicMock()
+    err_client.send_audio.side_effect = TelegramAPIError("Conn Error")
+    err_client.send_document.side_effect = TelegramAPIError("Conn Error")
+    deliver_single_job(db=db_session, job=job_tg_fail3, client=err_client)
+    arc = get_terminal_diagnostics_path(job_tg_fail3.id, JobState.FAILED_FINAL.value)
+    guard_results["telegram_delivery_three_attempts_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    # 3. Telegram missing-audio FAILED_FINAL
+    job_tg_miss = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_tg_miss.telegram_chat_id = 703
+    job_tg_miss.local_audio_path = "/nonexistent/path.mp3"
+    db_session.commit()
+    deliver_single_job(db=db_session, job=job_tg_miss, client=MagicMock())
+    arc = get_terminal_diagnostics_path(job_tg_miss.id, JobState.FAILED_FINAL.value)
+    guard_results["telegram_missing_audio_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    # 4. Telegram oversized-audio FAILED_FINAL
+    monkeypatch.setattr("herald.config.settings.TELEGRAM_MAX_AUDIO_BYTES", 50)
+    audio_path4 = clean_diagnostics_dir.parent / "tg_over.mp3"
+    audio_path4.write_bytes(b"Z" * 100)
+    job_tg_over = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
+    job_tg_over.telegram_chat_id = 704
+    job_tg_over.local_audio_path = str(audio_path4)
+    db_session.commit()
+    deliver_single_job(db=db_session, job=job_tg_over, client=MagicMock())
+    arc = get_terminal_diagnostics_path(job_tg_over.id, JobState.FAILED_FINAL.value)
+    guard_results["telegram_oversized_audio_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    # 5. Telegram extraction FAILED_FINAL
+    with patch("herald.core.pipeline.extract_article_from_url", side_effect=ArticleExtractionError("Extraction fail")):
+        req_ext = HeraldRequest(
+            source_type="url",
+            source_url="https://domain.com/broken",
+            telegram_chat_id=705,
+            telegram_user_id=705,
+            transport="telegram",
+        )
+        resp_ext = process_herald_request(db_session, req_ext)
+        arc = get_terminal_diagnostics_path(resp_ext.job_id, JobState.FAILED_FINAL.value)
+        guard_results["telegram_extraction_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    # 6. Telegram worker synthesis FAILED_FINAL
+    job_work_ff = _create_dummy_job(db_session, status=JobState.QUEUED_TTS.value)
+    job_work_ff.synthesis_attempt_count = 4
+    db_session.commit()
+    claim_next_job(db=db_session, worker_id="guard-worker")
+    arc = get_terminal_diagnostics_path(job_work_ff.id, JobState.FAILED_FINAL.value)
+    guard_results["telegram_worker_synthesis_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    # 7. Telegram pre-script CANCELLED
+    job_prescript = _create_dummy_job(db_session, status=JobState.AWAITING_RERUN_CONFIRMATION.value)
+    job_prescript.telegram_user_id = 707
+    job_prescript.telegram_chat_id = 707
+    job_prescript.transport = "telegram"
+    db_session.commit()
+    cb_prescript = {
+        "id": "cb_pre",
+        "data": f"h2:deny:{job_prescript.id}",
+        "from": {"id": 707},
+        "message": {"message_id": 91, "chat": {"id": 707, "type": "private"}},
+    }
+    with patch("herald.telegram.bot.is_user_authorized", return_value=True):
+        handle_telegram_callback_query(db=db_session, client=MagicMock(), cb_query=cb_prescript)
+    arc = get_terminal_diagnostics_path(job_prescript.id, JobState.CANCELLED.value)
+    guard_results["telegram_prescript_cancelled"] = arc.exists() and arc.stat().st_size > 0
+
+    # 8. Telegram post-script CANCELLED
+    job_postscript = _create_dummy_job(db_session, status=JobState.AWAITING_APPROVAL.value)
+    job_postscript.telegram_user_id = 708
+    job_postscript.telegram_chat_id = 708
+    job_postscript.transport = "telegram"
+    db_session.commit()
+    cb_postscript = {
+        "id": "cb_post",
+        "data": f"h2:deny:{job_postscript.id}",
+        "from": {"id": 708},
+        "message": {"message_id": 92, "chat": {"id": 708, "type": "private"}},
+    }
+    with patch("herald.telegram.bot.is_user_authorized", return_value=True):
+        handle_telegram_callback_query(db=db_session, client=MagicMock(), cb_query=cb_postscript)
+    arc = get_terminal_diagnostics_path(job_postscript.id, JobState.CANCELLED.value)
+    guard_results["telegram_postscript_cancelled"] = arc.exists() and arc.stat().st_size > 0
+
+    # 9. Supported API COMPLETE
+    job_api_comp = _create_dummy_job(db_session, status=JobState.DELIVERING.value)
+    job_api_comp.drive_file_id = "drive_audio_709"
+    job_api_comp.details_drive_file_id = "drive_details_709"
+    db_session.commit()
+    update_delivery_complete(job_id=job_api_comp.id, req=DeliveryCompleteRequest(gmail_result_message_id="m709"), db=db_session)
+    arc = get_terminal_diagnostics_path(job_api_comp.id, JobState.COMPLETE.value)
+    guard_results["supported_api_complete"] = arc.exists() and arc.stat().st_size > 0
+
+    # 10. Supported API representative FAILED_FINAL
+    with patch("apps.api.main.extract_article_from_url", side_effect=ArticleExtractionError("API Extract Fail")):
+        req_api = IntakeRequest(
+            gmail_message_id="msg_guard_710",
+            sender_email="operator@herald.local",
+            subject="Podcast: Standard",
+            body_text="https://site.org/bad",
+        )
+        resp_api = process_intake(req=req_api, db=db_session)
+        arc = get_terminal_diagnostics_path(resp_api.job_id, JobState.FAILED_FINAL.value)
+        guard_results["supported_api_failed_final"] = arc.exists() and arc.stat().st_size > 0
+
+    assert all(guard_results.values()), f"Some terminal paths failed archive guard: {guard_results}"
+    assert len(guard_results) == 10
+
+

@@ -47,6 +47,8 @@ from herald.gemini.client import (
     repair_script_fidelity,
 )
 from herald.literal.script_generator import generate_literal_script
+from herald.services.diagnostic_recorder import record_job_diagnostic_event
+from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
 from herald.services.drive_service import build_user_facing_drive_filename
 from herald.services.email_formatter import (
     format_acknowledgment_email,
@@ -633,6 +635,20 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             transition_job_state(
                 db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(sbe), error_category="SOURCE_ACCESS_BLOCKED"
             )
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "herald-api",
+                "EXTRACTION_FAILED",
+                f"URL extraction failed: {sbe}",
+                metadata={"category": "SOURCE_ACCESS_BLOCKED", "error": str(sbe)},
+                db=db,
+            )
+            db.commit()
+            try:
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive for %s: %s", job.id, arc_err)
             fail_email = format_failure_email(job.id, source_url, "SOURCE_ACCESS_BLOCKED", str(sbe))
             return IntakeResponse(
                 job_id=job.id,
@@ -657,6 +673,20 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             transition_job_state(
                 db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(de), error_category="DNS_RESOLUTION_FAILURE"
             )
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "herald-api",
+                "EXTRACTION_FAILED",
+                f"URL extraction failed: {de}",
+                metadata={"category": "DNS_RESOLUTION_FAILURE", "error": str(de)},
+                db=db,
+            )
+            db.commit()
+            try:
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive for %s: %s", job.id, arc_err)
             fail_email = format_failure_email(job.id, source_url, "DNS_RESOLUTION_FAILURE", str(de))
             return IntakeResponse(
                 job_id=job.id,
@@ -681,6 +711,20 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             transition_job_state(
                 db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(se), error_category="SSRF_PROTECTION"
             )
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "herald-api",
+                "EXTRACTION_FAILED",
+                f"Security violation during extraction: {se}",
+                metadata={"category": "SSRF_PROTECTION", "error": str(se)},
+                db=db,
+            )
+            db.commit()
+            try:
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive for %s: %s", job.id, arc_err)
             fail_email = format_failure_email(job.id, source_url, "SSRF_PROTECTION", str(se))
             return IntakeResponse(
                 job_id=job.id,
@@ -705,6 +749,20 @@ def process_intake(req: IntakeRequest, db: Session = Depends(get_db)):
             transition_job_state(
                 db, job, JobState.FAILED_FINAL.value, component="herald-api", message=str(e), error_category="ARTICLE_EXTRACTION_FAILURE"
             )
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "herald-api",
+                "EXTRACTION_FAILED",
+                f"URL extraction failed: {e}",
+                metadata={"category": "ARTICLE_EXTRACTION_FAILURE", "error": str(e)},
+                db=db,
+            )
+            db.commit()
+            try:
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive for %s: %s", job.id, arc_err)
             fail_email = format_failure_email(job.id, source_url, "ARTICLE_EXTRACTION_FAILURE", str(e))
             return IntakeResponse(
                 job_id=job.id,
@@ -1202,6 +1260,12 @@ def claim_delivery_job(db: Session = Depends(get_db)):
             status="success",
         )
 
+    if target_state == JobState.COMPLETE.value:
+        try:
+            ensure_terminal_diagnostics_archive(job.id, JobState.COMPLETE.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive on complete_without_resend for %s: %s", job.id, arc_err)
+
     return {
         "claimed": True,
         "action": action,
@@ -1482,6 +1546,10 @@ def update_delivery_complete(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Conflicting Gmail result message ID on COMPLETE job: existing '{job.gmail_result_message_id}' vs new '{new_msg_id}'",
             )
+        try:
+            ensure_terminal_diagnostics_archive(job.id, JobState.COMPLETE.value)
+        except Exception:
+            pass
         return {
             "job_id": job.id,
             "status": job.status,
@@ -1564,12 +1632,28 @@ def update_delivery_complete(
             metadata_json={"baseline": baseline_str},
         )
 
+    record_job_diagnostic_event(
+        job.id,
+        "INFO",
+        "n8n-delivery",
+        "EMAIL_DELIVERY_COMPLETE",
+        f"Delivered podcast via email for job {job.id}",
+        metadata={"gmail_result_message_id": job.gmail_result_message_id},
+        db=db,
+    )
+    db.commit()
+
     # Regenerate local details Markdown report from final COMPLETE database state
     output_dir = Path(settings.HERALD_WORK_DIR) / "output"
     try:
         ensure_details_artifact(job, output_dir)
     except Exception:
         pass
+
+    try:
+        ensure_terminal_diagnostics_archive(job.id, JobState.COMPLETE.value)
+    except Exception as arc_err:
+        logger.warning("Failed ensuring terminal diagnostics archive on email delivery completion for %s: %s", job.id, arc_err)
 
     return {
         "job_id": job.id,
@@ -1714,6 +1798,31 @@ def update_delivery_failed(
         message=req.error_detail[:500],
         error_category=req.error_code,
     )
+
+    if target_failed_state == JobState.FAILED_FINAL.value:
+        record_stage_metric(
+            job_id=job.id,
+            stage="EMAIL_DELIVERY",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            status="failure",
+            attempt=job.delivery_attempt_count,
+            metadata_json={"error_code": req.error_code, "error": req.error_detail[:500]},
+        )
+        record_job_diagnostic_event(
+            job.id,
+            "ERROR",
+            "n8n-delivery",
+            "EMAIL_DELIVERY_FAILED",
+            f"Email delivery failed permanently after {job.delivery_attempt_count} attempts: {req.error_detail[:200]}",
+            metadata={"error_code": req.error_code, "error": req.error_detail[:500]},
+            db=db,
+        )
+        db.commit()
+        try:
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive on n8n delivery failure for %s: %s", job.id, arc_err)
 
     return {
         "job_id": job.id,
@@ -2013,6 +2122,19 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
             message="Maximum retry attempt limit reached",
             commit=True,
         )
+        record_job_diagnostic_event(
+            job.id,
+            "ERROR",
+            "herald-retry",
+            "MAX_ATTEMPTS_EXCEEDED",
+            f"Job {job.id} reached maximum retry attempts ({job.attempt_count})",
+            db=db,
+        )
+        db.commit()
+        try:
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive on retry limit for %s: %s", job.id, arc_err)
         raise HTTPException(status_code=400, detail="Job has reached maximum retry attempt limit (FAILED_FINAL).")
 
     failed_stage = job.failed_stage or "QUEUED_TTS"
@@ -2121,6 +2243,7 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
     """
     now = datetime.now(UTC)
     recovered_count = 0
+    failed_final_job_ids = []
 
     stale_specs = [
         (JobState.EXTRACTING.value, timedelta(minutes=15), JobState.EXTRACTING.value),
@@ -2160,9 +2283,17 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
                         force=True,
                         commit=False,
                     )
+                    if target_state == JobState.FAILED_FINAL.value:
+                        failed_final_job_ids.append(job.id)
                     recovered_count += 1
 
     db.commit()
+    for ff_id in failed_final_job_ids:
+        try:
+            ensure_terminal_diagnostics_archive(ff_id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive for stale recovery on %s: %s", ff_id, arc_err)
+
     return {"status": "success", "recovered_jobs": recovered_count}
 
 

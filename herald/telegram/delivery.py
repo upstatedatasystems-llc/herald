@@ -97,11 +97,35 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
     if not audio_path_str or not Path(audio_path_str).exists():
         err_msg = f"Audio file not found at '{audio_path_str}'"
         logger.error(f"Delivery failed for job '{job.id}': {err_msg}")
+        job.failed_stage = "TELEGRAM_DELIVERY"
         job.error_code = "AUDIO_FILE_MISSING"
         job.error_detail = err_msg
         transition_job_state(
             db, job, JobState.FAILED_FINAL.value, component="telegram-delivery", message=err_msg
         )
+        record_stage_metric(
+            job_id=job.id,
+            stage="TELEGRAM_DELIVERY",
+            started_at=t0,
+            finished_at=datetime.now(UTC),
+            status="failure",
+            metadata_json={"error_code": "AUDIO_FILE_MISSING", "error": err_msg},
+        )
+        record_job_diagnostic_event(
+            job.id,
+            "ERROR",
+            "telegram-delivery",
+            "TELEGRAM_DELIVERY_FAILED",
+            f"Telegram delivery failed: {err_msg}",
+            metadata={"error_code": "AUDIO_FILE_MISSING", "error": err_msg},
+            db=db,
+        )
+        db.commit()
+        try:
+            from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive on missing audio failure for %s: %s", job.id, arc_err)
         client.send_message(
             chat_id=chat_id,
             text=f"⚠️ Failed to deliver podcast: audio file is missing on server.\nJob ID: {job.id[:8]}",
@@ -157,15 +181,10 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         size_mb = file_size_bytes / (1024 * 1024)
         max_mb = max_bytes / (1024 * 1024)
         esc_title = html.escape(ep_title)
-        warn_msg = (
-            f"⚠️ <b>Podcast Rendered</b>: {esc_title}\n\n"
-            f"Your episode was generated successfully ({size_mb:.1f} MB), but exceeds this Herald "
-            f"instance's Telegram delivery limit ({max_mb:.0f} MB).\n\n"
-            f"The file has been retained locally for administrator recovery.\nJob ID: <code>{job.id[:8]}</code>"
-        )
-        client.send_message(chat_id=chat_id, text=warn_msg, parse_mode="HTML")
+        err_msg = f"Audio size {size_mb:.1f} MB exceeds limit {max_mb:.0f} MB"
+        job.failed_stage = "TELEGRAM_DELIVERY"
         job.error_code = "TELEGRAM_AUDIO_OVERSIZED"
-        job.error_detail = f"Audio size {size_mb:.1f} MB exceeds limit {max_mb:.0f} MB"
+        job.error_detail = err_msg
         transition_job_state(
             db,
             job,
@@ -173,6 +192,37 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
             component="telegram-delivery",
             message=f"Audio file ({size_mb:.1f} MB) exceeded Telegram limit ({max_mb:.0f} MB)",
         )
+        record_stage_metric(
+            job_id=job.id,
+            stage="TELEGRAM_DELIVERY",
+            started_at=t0,
+            finished_at=datetime.now(UTC),
+            status="failure",
+            output_bytes=file_size_bytes,
+            metadata_json={"error_code": "TELEGRAM_AUDIO_OVERSIZED", "error": err_msg, "file_size_bytes": file_size_bytes, "max_bytes": max_bytes},
+        )
+        record_job_diagnostic_event(
+            job.id,
+            "ERROR",
+            "telegram-delivery",
+            "TELEGRAM_DELIVERY_FAILED",
+            f"Telegram delivery failed: {err_msg}",
+            metadata={"error_code": "TELEGRAM_AUDIO_OVERSIZED", "error": err_msg, "file_size_bytes": file_size_bytes, "max_bytes": max_bytes},
+            db=db,
+        )
+        db.commit()
+        try:
+            from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+            ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        except Exception as arc_err:
+            logger.warning("Failed ensuring terminal diagnostics archive on oversized audio failure for %s: %s", job.id, arc_err)
+        warn_msg = (
+            f"⚠️ <b>Podcast Rendered</b>: {esc_title}\n\n"
+            f"Your episode was generated successfully ({size_mb:.1f} MB), but exceeds this Herald "
+            f"instance's Telegram delivery limit ({max_mb:.0f} MB).\n\n"
+            f"The file has been retained locally for administrator recovery.\nJob ID: <code>{job.id[:8]}</code>"
+        )
+        client.send_message(chat_id=chat_id, text=warn_msg, parse_mode="HTML")
         return False
 
     reply_id = int(job.telegram_message_id) if job.telegram_message_id else None
@@ -265,6 +315,21 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                     component="telegram-delivery",
                     message=f"Telegram delivery failed after {job.delivery_attempt_count} attempts: {de}",
                 )
+                record_stage_metric(
+                    job_id=job.id,
+                    stage="TELEGRAM_DELIVERY",
+                    started_at=t0,
+                    finished_at=now,
+                    status="failure",
+                    attempt=job.delivery_attempt_count,
+                    metadata_json={"error_code": "TELEGRAM_DELIVERY_FAILED", "error": str(de)[:500]},
+                )
+                db.commit()
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive on permanent delivery failure for %s: %s", job.id, arc_err)
                 diag_line = f"\n{format_concise_failure_summary(diag_rec)}" if diag_rec else ""
                 client.send_message(
                     chat_id=chat_id,
@@ -282,13 +347,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                     message=f"Telegram delivery failed (attempt {job.delivery_attempt_count}, retrying in {backoff_secs}s): {de}",
                 )
                 job.failed_stage = "TELEGRAM_DELIVERY"
-            db.commit()
-            if job.delivery_attempt_count >= 3:
-                try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
-                except Exception as arc_err:
-                    logger.warning("Failed ensuring terminal diagnostics archive on permanent delivery failure for %s: %s", job.id, arc_err)
+                db.commit()
             return False
 
     job.delivered_at = datetime.now(UTC)

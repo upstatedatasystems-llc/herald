@@ -651,6 +651,7 @@ def ensure_terminal_diagnostics_archive(
                 status,
                 expected_status,
             )
+            return None
 
         if status not in TERMINAL_STATES:
             logger.debug(
