@@ -80,6 +80,7 @@ KNOWN_PLACEHOLDERS=(
     "herald_secure_password"
     "change-this-to-a-secure-random-db-password"
     "change-this-to-a-secure-random-api-key"
+    "default_n8n_encryption_key_32c"
 )
 
 TG_TOKEN=$(get_env_key "TELEGRAM_BOT_TOKEN")
@@ -126,6 +127,22 @@ else
         report_pass "HERALD_API_KEY is present and configured."
     fi
 fi
+
+N8N_KEY=$(get_env_key "N8N_ENCRYPTION_KEY")
+if [ -n "$N8N_KEY" ]; then
+    is_placeholder=false
+    for p in "${KNOWN_PLACEHOLDERS[@]}"; do
+        if [ "$N8N_KEY" = "$p" ]; then is_placeholder=true; break; fi
+    done
+    if [ "$is_placeholder" = true ]; then
+        report_fail "N8N_ENCRYPTION_KEY matches a known default placeholder."
+    else
+        report_pass "N8N_ENCRYPTION_KEY is present and configured."
+    fi
+fi
+
+
+
 
 AI_PROV=$(get_env_key "AI_PROVIDER")
 AI_PROV=${AI_PROV:-"none"}

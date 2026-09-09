@@ -261,6 +261,31 @@ normalize_git_url() {
     echo "$u"
 }
 
+detect_ref_type() {
+    local ref="$1"
+    if git show-ref --tags --quiet --verify "refs/tags/${ref}" 2>/dev/null || git rev-parse --verify "refs/tags/${ref}^{commit}" >/dev/null 2>&1; then
+        echo "tag"
+        return
+    fi
+    if git show-ref --heads --quiet --verify "refs/heads/${ref}" 2>/dev/null || \
+       git rev-parse --verify "refs/remotes/origin/${ref}^{commit}" >/dev/null 2>&1 || \
+       git rev-parse --verify "refs/heads/${ref}^{commit}" >/dev/null 2>&1; then
+        echo "branch"
+        return
+    fi
+    if git rev-parse --verify "${ref}^{commit}" >/dev/null 2>&1; then
+        local sha
+        sha=$(git rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)
+        if [[ "$sha" == "$ref"* ]]; then
+            echo "commit"
+        else
+            echo "branch"
+        fi
+        return
+    fi
+    echo "ref"
+}
+
 # Run environment & prerequisite validation
 check_operator_safety
 check_os
@@ -290,7 +315,9 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
 
         echo "🔄 Checking out ref '${HERALD_REF}'..."
         git checkout "$HERALD_REF"
+        REF_TYPE=$(detect_ref_type "$HERALD_REF")
         INSTALLED_SHA=$(git rev-parse HEAD)
+        echo "📌 Requested ref: ${HERALD_REF} (type: ${REF_TYPE}, resolved commit: ${INSTALLED_SHA})"
         echo "✅ Checked out commit ${INSTALLED_SHA}"
 
     elif [ "$MODE" = "update" ]; then
@@ -321,7 +348,9 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
         git fetch origin "$HERALD_REF"
         git checkout "$HERALD_REF"
         git pull --ff-only origin "$HERALD_REF"
+        REF_TYPE=$(detect_ref_type "$HERALD_REF")
         INSTALLED_SHA=$(git rev-parse HEAD)
+        echo "📌 Requested ref: ${HERALD_REF} (type: ${REF_TYPE}, resolved commit: ${INSTALLED_SHA})"
         echo "✅ Updated to commit ${INSTALLED_SHA}"
 
     elif [ "$MODE" = "reinstall" ]; then
@@ -355,6 +384,9 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
             echo "❌ Error: Cannot resolve ref '${HERALD_REF}' to a valid commit SHA." >&2
             exit 1
         fi
+        REF_TYPE=$(detect_ref_type "$HERALD_REF")
+        echo "📌 Requested ref: ${HERALD_REF} (type: ${REF_TYPE}, resolved commit: ${RESOLVED_SHA})"
+
 
         # Backup .env safely before any destructive git clean/reset
         INSTALL_ENV_BACKUP=""
@@ -471,13 +503,7 @@ if [ "$IS_INTERNAL_DOCKER_STAGE" = false ]; then
     echo "✅ Docker Engine & Compose v2 are ready and accessible."
 fi
 
-# 10. Rebuild Containers (for update/reinstall)
-if [ "$MODE" = "update" ] || [ "$MODE" = "reinstall" ]; then
-    echo "🔨 Building Docker service images..."
-    docker compose build
-fi
-
-# 11. Execute setup.sh
+# 10. Configuration Setup Phase
 chmod +x setup.sh scripts/*.sh 2>/dev/null || true
 
 SETUP_ARGS=()
@@ -486,7 +512,17 @@ if [ "$NON_INTERACTIVE" = true ]; then
 fi
 
 echo "⚙️  Running Herald configuration setup..."
-./setup.sh "${SETUP_ARGS[@]}"
+./setup.sh --configure-only "${SETUP_ARGS[@]}"
+
+# 11. Rebuild Containers (for update/reinstall - strictly after .env is configured)
+if [ "$MODE" = "update" ] || [ "$MODE" = "reinstall" ]; then
+    echo "🔨 Building Docker service images..."
+    docker compose build
+fi
+
+# 12. Start Herald Services & Verify Health
+echo "🚀 Starting Herald services..."
+./setup.sh --start-only "${SETUP_ARGS[@]}"
 
 # Ensure voice sample cache is prewarmed in herald-worker
 if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
@@ -494,7 +530,7 @@ if docker compose ps --services --filter "status=running" 2>/dev/null | grep -q 
     docker compose exec -T herald-worker python -m herald.services.voice_manager --prewarm
 fi
 
-# 12. Mandatory Acceptance Gate
+# 13. Mandatory Acceptance Gate
 echo ""
 echo "🔍 Running mandatory installation acceptance validation..."
 if [ -f "scripts/install_acceptance.sh" ]; then
@@ -503,6 +539,7 @@ else
     echo "❌ Error: scripts/install_acceptance.sh not found." >&2
     exit 1
 fi
+
 
 echo ""
 echo "========================================================"

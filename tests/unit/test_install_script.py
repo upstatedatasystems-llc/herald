@@ -877,7 +877,334 @@ def test_install_docker_group_continuation_via_sg(tmp_path):
     assert (target_dir / "acceptance_ran.log").exists()
 
     sg_calls = sg_log.read_text()
-    assert "docker -c" in sg_calls
+    assert sg_calls.count("docker -c") >= 1
     assert "--internal-docker-stage" in sg_calls
     assert "my\\ install\\ target" in sg_calls or "my install target" in sg_calls
     assert "--non-interactive" in sg_calls
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_clean_reinstall_after_cold_reset_order(tmp_path):
+    """Verify exact reproduction fix: after reset-herald.sh --cold --remove-env,
+    install.sh --reinstall runs setup.sh --configure-only BEFORE docker compose build,
+    so docker compose build sees a valid .env, followed by setup.sh --start-only.
+    """
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    order_log = tmp_path / "execution_order.log"
+
+    # setup.sh simulates configure-only and start-only
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"--configure-only\" ]; then\n"
+        f"    echo 'step:setup-configure' >> \"{order_log.as_posix()}\"\n"
+        f"    cat > .env << 'EOF'\n"
+        f"POSTGRES_DB=\"herald\"\n"
+        f"POSTGRES_USER=\"herald\"\n"
+        f"POSTGRES_PASSWORD=\"test_secure_pw_123\"\n"
+        f"HERALD_API_KEY=\"test_herald_api_key_123\"\n"
+        f"N8N_ENCRYPTION_KEY=\"test_n8n_key_123456789012345678\"\n"
+        f"TELEGRAM_BOT_TOKEN=\"123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11\"\n"
+        f"AI_PROVIDER=\"none\"\n"
+        f"EOF\n"
+        f"    chmod 600 .env\n"
+        f"    exit 0\n"
+        f"elif [ \"$1\" = \"--start-only\" ]; then\n"
+        f"    if [ ! -f .env ]; then echo 'start-only missing .env' >&2; exit 1; fi\n"
+        f"    echo 'step:setup-start' >> \"{order_log.as_posix()}\"\n"
+        f"    exit 0\n"
+        f"fi\n"
+        f"echo 'unexpected setup args: $*' >&2\n"
+        f"exit 1\n",
+        encoding="utf-8",
+    )
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo 'step:acceptance' >> \"{order_log.as_posix()}\"\n"
+        f"exit 0\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+
+    # Fake docker that mimics Docker Compose failing on 'build' if .env does NOT exist
+    (fake_bin / "docker").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        f"if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then exit 0; fi\n"
+        f"if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"build\" ]; then\n"
+        f"    if [ ! -f .env ]; then\n"
+        f"        echo 'ERROR: compose build failed: .env: no such file or directory' >&2\n"
+        f"        exit 1\n"
+        f"    fi\n"
+        f"    echo 'step:docker-build' >> \"{order_log.as_posix()}\"\n"
+        f"    exit 0\n"
+        f"fi\n"
+        f"if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"ps\" ]; then exit 0; fi\n"
+        f"exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_reinstall_target"
+    # Clone seed repo first to simulate existing installation before reset
+    subprocess.run(["git", "clone", str(bare_remote), str(target_dir)], check=True, capture_output=True)
+
+    # Simulating reset: .env does NOT exist in target_dir
+    assert not (target_dir / ".env").exists()
+
+    res = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode == 0, f"Install failed with: {res.stderr}\nStdout: {res.stdout}"
+    assert "Herald installation and acceptance checks passed!" in res.stdout
+
+    order_lines = [line.strip() for line in order_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert order_lines == [
+        "step:setup-configure",
+        "step:docker-build",
+        "step:setup-start",
+        "step:acceptance",
+    ]
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_ref_visibility_across_ref_types(tmp_path):
+    """Verify install.sh prints requested ref, ref type (branch/tag/commit), and resolved commit."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    # Create tag
+    subprocess.run(["git", "-C", str(seed_dir), "tag", "v1.5.0"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "v1.5.0"], check=True, capture_output=True)
+
+    # Create branch
+    subprocess.run(["git", "-C", str(seed_dir), "checkout", "-b", "feature/my-test"], check=True, capture_output=True)
+    (seed_dir / "dummy.txt").write_text("dummy")
+    subprocess.run(["git", "-C", str(seed_dir), "add", "dummy.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "feature commit", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:feature/my-test"], check=True, capture_output=True)
+    commit_sha = subprocess.run(["git", "-C", str(seed_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    # 1. Test Tag
+    target_tag = tmp_path / "target_tag"
+    res_tag = run_install_script(
+        args=["--install-dir", str(target_tag), "--repo", str(bare_remote), "--ref", "v1.5.0"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res_tag.returncode == 0
+    assert "📌 Requested ref: v1.5.0 (type: tag, resolved commit:" in res_tag.stdout
+
+    # 2. Test Branch
+    target_branch = tmp_path / "target_branch"
+    res_branch = run_install_script(
+        args=["--install-dir", str(target_branch), "--repo", str(bare_remote), "--ref", "feature/my-test"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res_branch.returncode == 0
+    assert "📌 Requested ref: feature/my-test (type: branch, resolved commit:" in res_branch.stdout
+
+    # 3. Test Reinstall with explicit ref
+    res_reinstall = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(target_branch), "--repo", str(bare_remote), "--ref", "v1.5.0"],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+    assert res_reinstall.returncode == 0
+    assert "📌 Requested ref: v1.5.0 (type: tag, resolved commit:" in res_reinstall.stdout
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_setup_flag_validation_and_guards(tmp_path):
+    """Verify setup.sh flag parsing: mutually exclusive flags, start-only missing env."""
+    setup_script = Path(__file__).parent.parent.parent / "setup.sh"
+
+    # 1. Specifying both --configure-only and --start-only must error
+    res_both = subprocess.run(
+        [BASH_EXE, str(setup_script), "--configure-only", "--start-only"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert res_both.returncode != 0
+    assert "Cannot specify both --configure-only and --start-only" in res_both.stderr
+
+    # 2. --start-only when .env is missing must error
+    res_no_env = subprocess.run(
+        [BASH_EXE, str(setup_script), "--start-only"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert res_no_env.returncode != 0
+    assert "Configuration file '.env' not found. Run './setup.sh --configure-only' first." in res_no_env.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_unsafe_db_volume_guard(tmp_path):
+    """Verify setup.sh refuses to run when .env is missing but postgres volume exists in Docker."""
+    setup_script = Path(__file__).parent.parent.parent / "setup.sh"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    # Fake docker: volume ls returns herald_postgres_data
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
+        "if [ \"$1\" = \"volume\" ] && [ \"$2\" = \"ls\" ]; then\n"
+        "    echo 'herald_postgres_data'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    test_env = os.environ.copy()
+    test_env["PATH"] = path_env
+    test_env["HERALD_TEST_ALLOW_UNSAFE_DB_VOLUME"] = "0"
+
+    res = subprocess.run(
+        [BASH_EXE, str(setup_script), "--configure-only", "--non-interactive"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+    )
+    assert res.returncode != 0
+    assert "Found existing PostgreSQL volume from a previous installation, but .env is missing" in res.stderr
+    assert "./scripts/reset-herald.sh --cold --remove-env" in res.stderr
+
+
+@pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
+def test_configuration_failure_aborts_before_build(tmp_path):
+    """Verify that if setup.sh --configure-only fails, install.sh aborts without calling docker compose build."""
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    bare_remote = tmp_path / "remote.git"
+    bare_remote.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "remote", "add", "origin", str(bare_remote)], check=True, capture_output=True)
+
+    # setup.sh fails on --configure-only
+    (seed_dir / "compose.yaml").write_text("services: {}\n")
+    (seed_dir / "setup.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Configuration validation failed!' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    (seed_dir / "scripts").mkdir()
+    (seed_dir / "scripts" / "install_acceptance.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+
+    subprocess.run(["git", "-C", str(seed_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "initial", "--no-gpg-sign"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    docker_log = tmp_path / "docker_invocations.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "docker").write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo \"$*\" >> \"{docker_log.as_posix()}\"\n"
+        f"exit 0\n",
+        encoding="utf-8",
+    )
+    path_env = f"{fake_bin.as_posix()}:{os.environ.get('PATH', '')}"
+
+    target_dir = tmp_path / "herald_fail_build_target"
+    subprocess.run(["git", "clone", str(bare_remote), str(target_dir)], check=True, capture_output=True)
+
+    res = run_install_script(
+        args=["--reinstall", "--force", "--install-dir", str(target_dir), "--repo", str(bare_remote)],
+        env={
+            "HERALD_TEST_OS_RELEASE": str(os_release),
+            "HERALD_TEST_ARCH": "x86_64",
+            "HERALD_TEST_AVAIL_MB": "10000",
+            "HERALD_TEST_ALLOW_FILE_REPO": "1",
+            "PATH": path_env,
+        },
+    )
+
+    assert res.returncode != 0
+    assert "Configuration validation failed!" in res.stderr
+    docker_calls = docker_log.read_text(encoding="utf-8") if docker_log.exists() else ""
+    assert "compose build" not in docker_calls
+

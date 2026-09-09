@@ -16,6 +16,9 @@ if [ -f "$ENV_FILE" ]; then
     ENV_EXISTED_AT_START=true
 fi
 
+CONFIGURE_ONLY=false
+START_ONLY=false
+
 # Parse flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -23,11 +26,25 @@ while [[ $# -gt 0 ]]; do
             NON_INTERACTIVE=true
             shift
             ;;
+        --configure-only)
+            CONFIGURE_ONLY=true
+            shift
+            ;;
+        --start-only)
+            START_ONLY=true
+            shift
+            ;;
         *)
             shift
             ;;
     esac
 done
+
+if [ "$CONFIGURE_ONLY" = true ] && [ "$START_ONLY" = true ]; then
+    echo "❌ Error: Cannot specify both --configure-only and --start-only." >&2
+    exit 1
+fi
+
 
 # Initialize dedicated interactive input FD safely
 INPUT_FD=0
@@ -175,14 +192,61 @@ os.chmod(filepath, 0o600)
 " "$key" "$ENV_FILE" <<< "$val"
 }
 
-if [ -f "$ENV_FILE" ]; then
-    echo "ℹ️  Existing configuration found in ${ENV_FILE}."
-    EXISTING_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
-    if [ "$EXISTING_RES_M" = "gemini-2.5-flash" ]; then
-        echo "🔄 Migrating GEMINI_RESEARCH_MODEL from former default gemini-2.5-flash to gemini-3.6-flash..."
-        set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
+check_unsafe_db_volume() {
+    if [ "$ENV_EXISTED_AT_START" = false ]; then
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            local proj_name="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" 2>/dev/null || echo "herald")}"
+            local proj_clean
+            proj_clean=$(echo "$proj_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')
+            local existing_vols
+            existing_vols=$(docker volume ls -q 2>/dev/null || true)
+            if echo "$existing_vols" | grep -qE "^(${proj_clean}_postgres_data|${proj_name}_postgres_data|herald_postgres_data)$"; then
+                if [ "${HERALD_TEST_ALLOW_UNSAFE_DB_VOLUME:-0}" != "1" ]; then
+                    echo "❌ Error: Found existing PostgreSQL volume from a previous installation, but ${ENV_FILE} is missing." >&2
+                    echo "Generating a new random POSTGRES_PASSWORD will cause PostgreSQL to reject connections because the database volume already contains data initialized with the previous password." >&2
+                    echo "To recover:" >&2
+                    echo "  1. Restore your previous ${ENV_FILE} file containing the original POSTGRES_PASSWORD, OR" >&2
+                    echo "  2. If you want a completely clean installation, reset Herald and remove volumes first:" >&2
+                    echo "     ./scripts/reset-herald.sh --cold --remove-env" >&2
+                    exit 1
+                fi
+            fi
+        fi
     fi
-fi
+}
+
+validate_env_keys() {
+    local required_keys=(
+        "POSTGRES_DB"
+        "POSTGRES_USER"
+        "POSTGRES_PASSWORD"
+        "HERALD_API_KEY"
+        "N8N_ENCRYPTION_KEY"
+        "TELEGRAM_BOT_TOKEN"
+        "AI_PROVIDER"
+    )
+    for k in "${required_keys[@]}"; do
+        local val
+        val=$(get_env_val "$k")
+        if [ -z "$val" ]; then
+            echo "❌ Error: Required configuration key '${k}' is missing or empty in ${ENV_FILE}." >&2
+            exit 1
+        fi
+    done
+}
+
+if [ "$START_ONLY" = false ]; then
+    check_unsafe_db_volume
+
+    if [ -f "$ENV_FILE" ]; then
+        echo "ℹ️  Existing configuration found in ${ENV_FILE}."
+        EXISTING_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
+        if [ "$EXISTING_RES_M" = "gemini-2.5-flash" ]; then
+            echo "🔄 Migrating GEMINI_RESEARCH_MODEL from former default gemini-2.5-flash to gemini-3.6-flash..."
+            set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
+        fi
+    fi
+
 
 # 1. Telegram Bot Token
 TG_TOKEN=$(get_env_val "TELEGRAM_BOT_TOKEN")
@@ -511,53 +575,90 @@ if [ -z "$POSTGRES_PW" ]; then
     fi
 fi
 
-HERALD_API_KEY=$(get_env_val "HERALD_API_KEY")
-if [ -z "$HERALD_API_KEY" ]; then
-    if [ "$ENV_EXISTED_AT_START" = true ]; then
-        if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
-            echo "❌ Error: Existing configuration in ${ENV_FILE} is missing HERALD_API_KEY." >&2
-            echo "Please restore HERALD_API_KEY in ${ENV_FILE}." >&2
-            exit 1
-        fi
-        echo "⚠️  Existing configuration found, but HERALD_API_KEY is missing or empty."
-        prompt_secret HERALD_API_KEY "Enter HERALD_API_KEY (leave empty to generate a new key): "
-        HERALD_API_KEY=$(trim_str "$HERALD_API_KEY")
-    fi
+    HERALD_API_KEY=$(get_env_val "HERALD_API_KEY")
     if [ -z "$HERALD_API_KEY" ]; then
-        HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+        if [ "$ENV_EXISTED_AT_START" = true ]; then
+            if [ "$NON_INTERACTIVE" = true ] || [ -z "$INPUT_FD" ]; then
+                echo "❌ Error: Existing configuration in ${ENV_FILE} is missing HERALD_API_KEY." >&2
+                echo "Please restore HERALD_API_KEY in ${ENV_FILE}." >&2
+                exit 1
+            fi
+            echo "⚠️  Existing configuration found, but HERALD_API_KEY is missing or empty."
+            prompt_secret HERALD_API_KEY "Enter HERALD_API_KEY (leave empty to generate a new key): "
+            HERALD_API_KEY=$(trim_str "$HERALD_API_KEY")
+        fi
         if [ -z "$HERALD_API_KEY" ]; then
+            HERALD_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+            if [ -z "$HERALD_API_KEY" ]; then
+                echo "❌ Error: Cryptographically secure random generator unavailable." >&2
+                exit 1
+            fi
+        fi
+        set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
+    fi
+
+    N8N_KEY=$(get_env_val "N8N_ENCRYPTION_KEY")
+    if [ -z "$N8N_KEY" ]; then
+        N8N_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
+        if [ -z "$N8N_KEY" ]; then
             echo "❌ Error: Cryptographically secure random generator unavailable." >&2
             exit 1
         fi
+        set_env_val "N8N_ENCRYPTION_KEY" "$N8N_KEY"
     fi
-    set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
+
+    KOKORO_URL=$(get_env_val "KOKORO_BASE_URL")
+    if [ -z "$KOKORO_URL" ] || [ "$KOKORO_URL" = "http://kokoro:8880" ]; then
+        set_env_val "KOKORO_BASE_URL" "http://kokoro:8880/v1"
+    fi
+
+    if [ -z "$(get_env_val "POSTGRES_DB")" ]; then set_env_val "POSTGRES_DB" "herald"; fi
+    if [ -z "$(get_env_val "POSTGRES_USER")" ]; then set_env_val "POSTGRES_USER" "herald"; fi
+    if [ -z "$(get_env_val "POSTGRES_HOST")" ]; then set_env_val "POSTGRES_HOST" "postgres"; fi
+    if [ -z "$(get_env_val "POSTGRES_PORT")" ]; then set_env_val "POSTGRES_PORT" "5432"; fi
+    if [ -z "$(get_env_val "HERALD_ENV")" ]; then set_env_val "HERALD_ENV" "production"; fi
+    if [ -z "$(get_env_val "HERALD_WORK_DIR")" ]; then set_env_val "HERALD_WORK_DIR" "/data/herald"; fi
+    if [ -z "$(get_env_val "HERALD_MIN_DISK_MB")" ]; then set_env_val "HERALD_MIN_DISK_MB" "500"; fi
+    if [ -z "$(get_env_val "HERALD_CONCURRENCY_PROFILE")" ]; then set_env_val "HERALD_CONCURRENCY_PROFILE" "auto"; fi
+    if [ -z "$(get_env_val "TELEGRAM_MAX_AUDIO_BYTES")" ]; then set_env_val "TELEGRAM_MAX_AUDIO_BYTES" "52428800"; fi
+    if [ -z "$(get_env_val "ALLOWED_VOICES")" ]; then set_env_val "ALLOWED_VOICES" "af_heart,af_bella,af_sarah,am_adam,am_michael"; fi
+    if [ -z "$(get_env_val "KOKORO_VOICE")" ]; then set_env_val "KOKORO_VOICE" "af_heart"; fi
+    if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"; fi
+    if [ -z "$(get_env_val "HERALD_DNS_PRIMARY")" ]; then set_env_val "HERALD_DNS_PRIMARY" "1.1.1.1"; fi
+    if [ -z "$(get_env_val "HERALD_DNS_SECONDARY")" ]; then set_env_val "HERALD_DNS_SECONDARY" "8.8.8.8"; fi
+
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
+
+    validate_env_keys
+
+    if [ "$CONFIGURE_ONLY" = true ]; then
+        echo "✅ Herald configuration complete (--configure-only)."
+        exit 0
+    fi
 fi
-
-KOKORO_URL=$(get_env_val "KOKORO_BASE_URL")
-if [ -z "$KOKORO_URL" ] || [ "$KOKORO_URL" = "http://kokoro:8880" ]; then
-    set_env_val "KOKORO_BASE_URL" "http://kokoro:8880/v1"
-fi
-
-if [ -z "$(get_env_val "POSTGRES_DB")" ]; then set_env_val "POSTGRES_DB" "herald"; fi
-if [ -z "$(get_env_val "POSTGRES_USER")" ]; then set_env_val "POSTGRES_USER" "herald"; fi
-if [ -z "$(get_env_val "POSTGRES_HOST")" ]; then set_env_val "POSTGRES_HOST" "postgres"; fi
-if [ -z "$(get_env_val "POSTGRES_PORT")" ]; then set_env_val "POSTGRES_PORT" "5432"; fi
-if [ -z "$(get_env_val "HERALD_ENV")" ]; then set_env_val "HERALD_ENV" "production"; fi
-if [ -z "$(get_env_val "HERALD_WORK_DIR")" ]; then set_env_val "HERALD_WORK_DIR" "/data/herald"; fi
-if [ -z "$(get_env_val "HERALD_MIN_DISK_MB")" ]; then set_env_val "HERALD_MIN_DISK_MB" "500"; fi
-if [ -z "$(get_env_val "HERALD_CONCURRENCY_PROFILE")" ]; then set_env_val "HERALD_CONCURRENCY_PROFILE" "auto"; fi
-if [ -z "$(get_env_val "TELEGRAM_MAX_AUDIO_BYTES")" ]; then set_env_val "TELEGRAM_MAX_AUDIO_BYTES" "52428800"; fi
-if [ -z "$(get_env_val "ALLOWED_VOICES")" ]; then set_env_val "ALLOWED_VOICES" "af_heart,af_bella,af_sarah,am_adam,am_michael"; fi
-if [ -z "$(get_env_val "KOKORO_VOICE")" ]; then set_env_val "KOKORO_VOICE" "af_heart"; fi
-if [ -z "$(get_env_val "KOKORO_SPEED")" ]; then set_env_val "KOKORO_SPEED" "1.0"; fi
-if [ -z "$(get_env_val "HERALD_DNS_PRIMARY")" ]; then set_env_val "HERALD_DNS_PRIMARY" "1.1.1.1"; fi
-if [ -z "$(get_env_val "HERALD_DNS_SECONDARY")" ]; then set_env_val "HERALD_DNS_SECONDARY" "8.8.8.8"; fi
-
-echo "✅ Configuration file (${ENV_FILE}) is up to date (permissions: 0600)."
 
 # 5. Start Herald core services and strictly verify startup (NO false success on failure)
-echo ""
-echo "🚀 Starting Herald core services via Docker Compose..."
+if [ "$CONFIGURE_ONLY" = false ]; then
+    if [ "$START_ONLY" = true ]; then
+        if [ ! -f "$ENV_FILE" ]; then
+            echo "❌ Error: Configuration file '${ENV_FILE}' not found. Run './setup.sh --configure-only' first." >&2
+            exit 1
+        fi
+        validate_env_keys
+        if [ -z "${BOT_NAME:-}" ]; then
+            TG_TOKEN=$(get_env_val "TELEGRAM_BOT_TOKEN")
+            if [ -n "$TG_TOKEN" ]; then
+                TG_ME_RESP=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TG_TOKEN" | call_curl_config)
+                BOT_NAME=$(echo "$TG_ME_RESP" | grep -o '"username":"[^"]*' | cut -d'"' -f4 || echo "HeraldBot")
+            fi
+            BOT_NAME="${BOT_NAME:-HeraldBot}"
+        fi
+    fi
+
+    echo ""
+    echo "🚀 Starting Herald core services via Docker Compose..."
+
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     docker compose up -d postgres kokoro herald-migration herald-worker telegram-bot
 
@@ -735,3 +836,5 @@ echo "Status:    docker compose ps"
 echo "Stop:      docker compose down"
 echo "Start:     docker compose up -d"
 echo "========================================================"
+fi
+
