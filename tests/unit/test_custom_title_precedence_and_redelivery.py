@@ -119,7 +119,7 @@ def test_duplicate_telegram_redelivery_uses_html_parse_mode_and_display_title(db
 
     mock_client = MagicMock(spec=TelegramClient)
 
-    # User re-sends identical message
+    # User re-sends identical message -> strict transport idempotency (no audio redelivery)
     msg = {
         "chat": {"id": 12345, "type": "private"},
         "from": {"id": 12345},
@@ -128,6 +128,14 @@ def test_duplicate_telegram_redelivery_uses_html_parse_mode_and_display_title(db
     }
 
     handle_telegram_content_message(db_session, mock_client, msg)
+    mock_client.send_audio.assert_not_called()
+
+    # 2. Audio delivery for job in DELIVERING state uses HTML parse_mode and escaped title
+    job.status = JobState.DELIVERING.value
+    db_session.commit()
+
+    from herald.telegram.delivery import deliver_single_job
+    deliver_single_job(db=db_session, job=job, client=mock_client)
 
     # Verify send_audio was called with HTML parse_mode and escaped title
     mock_client.send_audio.assert_called_once()

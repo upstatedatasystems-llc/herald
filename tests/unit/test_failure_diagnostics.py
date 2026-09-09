@@ -152,7 +152,7 @@ def test_diagnostics_ai_model_404_no_network_probe():
 
     assert "network_probe" not in res
     assert res.get("error_category") == "AI_MODEL_UNAVAILABLE"
-    assert "AI: Model Unavailable" in res.get("summary", "")
+    assert "Model Unavailable" in res.get("summary", "")
 
 
 def test_diagnostics_timeout_bound():

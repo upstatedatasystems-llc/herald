@@ -33,7 +33,10 @@ def notify_tts_chunk_progress(
     Strictly fires only once for chunk_index == 1 using an atomic CAS DB claim with retry lease.
     Returns True if first-chunk milestone notification was sent, False otherwise.
     """
-    if chunk_index != 1:
+    if chunk_index < 1:
+        return False
+
+    if job.telegram_progress_message_id is not None:
         return False
 
     if job.transport != "telegram" or not job.telegram_chat_id:
@@ -61,29 +64,30 @@ def notify_tts_chunk_progress(
 
     if updated_rows != 1:
         logger.debug(
-            f"First-chunk progress milestone already claimed for job '{job.id}'. Skipping notification."
+            f"Progress milestone already claimed or delivered for job '{job.id}'. Skipping notification."
         )
         return False
 
-    # Compute empirical first-chunk RTF
-    c1_rtf = None
+    # Compute empirical chunk RTF
+    chunk_rtf = None
     if chunk_audio_duration_s > 0 and chunk_synthesis_duration_s > 0:
-        c1_rtf = chunk_synthesis_duration_s / float(chunk_audio_duration_s)
+        chunk_rtf = chunk_synthesis_duration_s / float(chunk_audio_duration_s)
 
-    # Recalculate ETA v2 using first-chunk measured RTF
-    eta_info = calculate_job_eta(db, job, measured_first_chunk_rtf=c1_rtf)
+    # Recalculate ETA v2 using measured RTF
+    eta_info = calculate_job_eta(db, job, measured_first_chunk_rtf=chunk_rtf)
     eta_range = eta_info.get("estimated_completion_range") or "approximately 2–4 minutes"
 
-    # Format card with truthful AI & TTS attribution
+    # Format card with truthful AI & TTS attribution and current chunk progress
     msg_text = format_first_chunk_progress(
         job=job,
         total_chunks=total_chunks,
         eta_range=eta_range,
+        completed_chunks=chunk_index,
     )
 
     client = telegram_client or TelegramClient()
     if not client.is_configured:
-        logger.debug("Telegram client not configured; cannot deliver first-chunk milestone.")
+        logger.debug("Telegram client not configured; cannot deliver progress milestone.")
         try:
             db.query(PodcastJob).filter(
                 PodcastJob.id == job.id,
@@ -118,11 +122,13 @@ def notify_tts_chunk_progress(
                 "INFO",
                 "tts",
                 "FIRST_CHUNK_PROGRESS_SENT",
-                f"Sent first-chunk progress milestone notification to Telegram chat {job.telegram_chat_id}",
+                f"Sent progress milestone notification to Telegram chat {job.telegram_chat_id}",
                 metadata={
                     "message_id": progress_msg_id,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total_chunks,
                     "eta_range": eta_range,
-                    "c1_rtf": c1_rtf,
+                    "chunk_rtf": chunk_rtf,
                 },
                 db=db,
             )

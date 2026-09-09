@@ -50,6 +50,7 @@ from herald.telegram.delivery import (
 )
 from herald.telegram.formatters import (
     format_approval,
+    format_generation_failure_card,
     format_help,
     format_queued,
     format_quickstart,
@@ -719,22 +720,11 @@ def handle_telegram_content_message(
                 parse_mode="HTML",
             )
         else:
-            short_id = response.job_id[:8]
-            diag_line = ""
-            try:
-                from herald.services.failure_diagnostics import format_concise_failure_summary
-                job_rec = db.query(PodcastJob).filter(PodcastJob.id == response.job_id).first()
-                if job_rec and job_rec.auto_diagnostics_json:
-                    diag_line = f"\n{format_concise_failure_summary(job_rec.auto_diagnostics_json[-1])}"
-            except Exception as diag_err:
-                logger.debug("Could not format failure diagnostic line: %s", diag_err)
-
-            fail_text = (
-                f"❌ <b>Podcast Generation Failed</b>\n\n"
-                f"• <b>ID:</b> <code>{short_id}</code>\n"
-                f"• <b>Status:</b> <code>{html.escape(response.status)}</code>\n"
-                f"• <b>Reason:</b> {safe_msg}{diag_line}\n\n"
-                f"Use <code>/diagnostics {short_id}</code> for support details."
+            fail_text = format_generation_failure_card(
+                job_id=response.job_id,
+                status=response.status,
+                error_message=response.message,
+                db=db,
             )
             client.send_message(
                 chat_id=chat_id,
@@ -807,27 +797,10 @@ def handle_telegram_content_message(
                         )
                 return
 
-            if (
-                existing_job.status == JobState.COMPLETE.value
-                and existing_job.local_audio_path
-                and os.path.exists(existing_job.local_audio_path)
-            ):
-                auth_title = get_job_display_title(existing_job)
-                auth_title_escaped = html.escape(auth_title)
-                client.send_message(
-                    chat_id=chat_id,
-                    text=f"🎧 <b>Already Processed:</b> Re-delivering '{auth_title_escaped}'...",
-                    reply_to_message_id=msg_id,
-                    parse_mode="HTML",
-                )
-                client.send_audio(
-                    chat_id=chat_id,
-                    audio_path=existing_job.local_audio_path,
-                    title=auth_title,
-                    performer="Herald",
-                    caption=f"🎙️ <b>{auth_title_escaped}</b>\nFormat: {mode_escaped}\n(Re-delivered)",
-                    reply_to_message_id=msg_id,
-                    parse_mode="HTML",
+            if existing_job.status == JobState.COMPLETE.value:
+                logger.info(
+                    "Duplicate/replayed message received for completed job '%s'; ignoring replay without re-delivery",
+                    existing_job.id,
                 )
                 return
 
@@ -1112,17 +1085,31 @@ def handle_telegram_callback_query(
             except Exception as e:
                 logger.debug(f"Failed to edit message to queued card: {e}")
         else:
-            safe_err = html.escape(gen_resp.message or "Script generation failed.")
+            fail_card = format_generation_failure_card(
+                job=job,
+                job_id=job.id,
+                status=gen_resp.status or JobState.FAILED_FINAL.value,
+                error_message=gen_resp.message or job.error_message,
+                db=db,
+            )
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=f"❌ <b>Rerun Failed:</b> {safe_err}",
+                    text=fail_card,
                     parse_mode="HTML",
                     reply_markup=None,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to edit message to failure card, falling back to send_message: {e}")
+                try:
+                    client.send_message(
+                        chat_id=chat_id,
+                        text=fail_card,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
         return
 
     elif raw_data.startswith("h2:approve:"):

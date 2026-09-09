@@ -121,22 +121,27 @@ def convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
 def ensure_voice_sample(
     voice: str,
     kokoro_client: KokoroClient | None = None,
+    force: bool = False,
     db: Session | None = None,
 ) -> Path:
     """
-    Ensure standard voice sample MP3 exists on disk.
-    If not already generated or corrupt, synthesizes in a global TTS concurrency slot, converts to MP3 atomically, and caches.
+    Ensure standard voice sample MP3 exists on disk and is recorded in the manifest.
+    If force=False and get_cached_voice_sample(voice) is valid, returns it immediately.
+    Otherwise, removes stale/orphan preview, synthesizes in a global TTS concurrency slot,
+    converts to MP3 atomically, validates audio, and updates manifest.
     """
     v_clean = voice.lower().strip()
     allowed = settings.get_allowed_voices_list()
     if v_clean not in allowed:
         raise ValueError(f"Voice '{voice}' is not in allowed voices: {allowed}")
 
-    sample_mp3 = get_voice_sample_path(v_clean)
-    if is_valid_sample_audio(sample_mp3):
-        return sample_mp3
+    if not force:
+        cached = get_cached_voice_sample(v_clean)
+        if cached is not None:
+            return cached
 
-    # Clean corrupt cache file if present
+    sample_mp3 = get_voice_sample_path(v_clean)
+    # Clean corrupt or stale cache file if present
     if sample_mp3.exists():
         sample_mp3.unlink(missing_ok=True)
 
@@ -147,8 +152,10 @@ def ensure_voice_sample(
 
     synth_timeout = float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0))
     with tts_slot_lock(db=db, timeout_seconds=get_tts_slot_wait_timeout_seconds()):
-        if is_valid_sample_audio(sample_mp3):
-            return sample_mp3
+        if not force:
+            cached = get_cached_voice_sample(v_clean)
+            if cached is not None:
+                return cached
 
         try:
             client.synthesize_chunk(
@@ -243,6 +250,8 @@ def get_cached_voice_sample(voice: str) -> Path | None:
         # Reject orphan files without valid manifest entry
         return None
 
+    if entry.get("voice_id") != v_clean:
+        return None
     curr_hash = compute_sample_text_hash()
     text_hash = entry.get("sample_text_hash") or entry.get("text_hash")
     if text_hash != curr_hash:
@@ -279,8 +288,8 @@ def prewarm_all_voice_samples(
                 results[v] = True
                 continue
 
-            logger.info(f"Prewarming voice sample for '{v}'...")
-            ensure_voice_sample(voice=v, kokoro_client=client, db=db)
+            logger.info(f"Prewarming voice sample for '{v}' (force={force})...")
+            ensure_voice_sample(voice=v, kokoro_client=client, force=force, db=db)
             results[v] = True
         except Exception as e:
             logger.error(f"Failed to prewarm voice sample for '{v}': {e}")

@@ -4,11 +4,14 @@ All dynamic text values MUST be escaped with html.escape when used in HTML parse
 """
 
 import html
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from herald.config import settings
-from herald.db.models import PodcastJob, RequestMode
+from herald.db.models import JobState, PodcastJob, RequestMode
+
+logger = logging.getLogger(__name__)
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.settings_fingerprint import (
     are_generation_settings_identical,
@@ -669,9 +672,10 @@ def format_first_chunk_progress(
     job: PodcastJob,
     total_chunks: int,
     eta_range: str,
+    completed_chunks: int = 1,
 ) -> str:
     """
-    Format milestone notification card sent when chunk 1 finishes synthesis.
+    Format milestone notification card sent when TTS synthesis progress is reported.
     Includes truthful AI provider/model attribution, Kokoro voice/speed, chunk progress, and updated ETA.
     """
     title_raw = get_job_display_title(job)
@@ -691,13 +695,72 @@ def format_first_chunk_progress(
     speed = float(job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
     tts_line = f"• <b>Voice Synthesis:</b> Kokoro TTS (<code>{voice}</code> @ {speed:.1f}x)"
 
+    if completed_chunks > 1:
+        prog_str = f"{completed_chunks}/{total_chunks} segments completed"
+    else:
+        prog_str = f"First segment synthesized (1/{total_chunks})"
+
     return (
         f"⏳ <b>Audio Synthesis in Progress</b>\n\n"
         f"<b>{title}</b>\n"
-        f"• <b>Progress:</b> First segment synthesized (1/{total_chunks})\n"
+        f"• <b>Progress:</b> {prog_str}\n"
         f"• <b>Remaining ETA:</b> {html.escape(eta_range)}\n"
         f"{ai_line}\n"
         f"{tts_line}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>\n\n"
         f"<i>Encoding and delivering audio file as soon as all segments complete.</i>"
     )
+
+
+def format_generation_failure_card(
+    job: PodcastJob | None = None,
+    job_id: str | None = None,
+    status: str = JobState.FAILED_FINAL.value,
+    error_message: str | None = None,
+    db: Any = None,
+) -> str:
+    """
+    Format full failed-job card for failed generation / scripting jobs.
+    Includes status (e.g. FAILED_FINAL), job ID, concise diagnostic summary,
+    and copyable /diagnostics command.
+    """
+    effective_id = job.id if job else (job_id or "")
+    short_id = html.escape(effective_id[:8]) if effective_id else "unknown"
+    effective_status = status or (job.status if job else JobState.FAILED_FINAL.value)
+    status_escaped = html.escape(effective_status)
+
+    safe_msg = html.escape(
+        error_message
+        or (getattr(job, "error_detail", None) or getattr(job, "error_message", None) if job else "")
+        or "An error occurred while processing the request."
+    )
+
+    diag_line = ""
+    try:
+        from herald.services.failure_diagnostics import format_concise_failure_summary
+
+        diag_record = None
+        if job and job.auto_diagnostics_json:
+            diag_record = job.auto_diagnostics_json[-1]
+        elif job and job.diagnostic_context:
+            diag_record = job.diagnostic_context
+        elif db and effective_id:
+            job_rec = db.query(PodcastJob).filter(PodcastJob.id == effective_id).first()
+            if job_rec and job_rec.auto_diagnostics_json:
+                diag_record = job_rec.auto_diagnostics_json[-1]
+            elif job_rec and job_rec.diagnostic_context:
+                diag_record = job_rec.diagnostic_context
+
+        if diag_record and isinstance(diag_record, dict):
+            diag_line = f"\n{format_concise_failure_summary(diag_record)}"
+    except Exception as diag_err:
+        logger.debug("Could not format failure diagnostic line: %s", diag_err)
+
+    return (
+        f"❌ <b>Podcast Generation Failed</b>\n\n"
+        f"• <b>ID:</b> <code>{short_id}</code>\n"
+        f"• <b>Status:</b> <code>{status_escaped}</code>\n"
+        f"• <b>Reason:</b> {safe_msg}{diag_line}\n\n"
+        f"Use <code>/diagnostics {short_id}</code> for support details."
+    )
+

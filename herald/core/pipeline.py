@@ -623,8 +623,13 @@ def execute_script_generation(
         db=db,
     )
 
+    active_ai_provider: str | None = None
+    active_ai_model: str | None = None
+    active_operation: str | None = None
+
     try:
         if mode_val == RequestMode.LITERAL.value:
+            active_operation = "literal_script"
             logger.info(f"Generating Literal script for job '{job.id}' (zero AI requests)")
             t_script0 = datetime.now(UTC)
             script_resp = generate_literal_script(
@@ -643,8 +648,11 @@ def execute_script_generation(
                 input_chars=len(job.source_text or ""),
             )
         elif mode_val == RequestMode.RESEARCH.value:
+            active_ai_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+            active_ai_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
             # Multi-stage grounded research workflow
             if not job.research_grounding_json:
+                active_operation = "grounded_research"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -676,6 +684,7 @@ def execute_script_generation(
                 )
 
             if not job.research_json:
+                active_operation = "research_normalization"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -702,6 +711,7 @@ def execute_script_generation(
                 )
 
             if not job.script_json:
+                active_operation = "research_script"
                 script = generate_podcast_script(
                     source_text=job.source_text,
                     request_mode="research",
@@ -713,6 +723,7 @@ def execute_script_generation(
                 db.commit()
 
             if not job.research_audit_json:
+                active_operation = "research_audit"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -745,6 +756,7 @@ def execute_script_generation(
 
             audit_data = job.research_audit_json or {}
             if audit_data.get("has_material_issues") and job.research_repair_count == 0:
+                active_operation = "research_repair"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -773,10 +785,20 @@ def execute_script_generation(
                 )
         else:
             # Brief or Standard AI mode
+            active_operation = "standard_script"
             t_script0 = datetime.now(UTC)
             provider = get_ai_provider()
             if not provider:
                 raise GeminiError("AI provider is not configured.")
+            active_ai_provider = getattr(provider, "name", settings.AI_PROVIDER)
+            m_val = (
+                getattr(provider, "configured_model", None)
+                or getattr(provider, "model_name", None)
+            )
+            active_ai_model = (
+                m_val if isinstance(m_val, str) and m_val
+                else (settings.GEMINI_MODEL if active_ai_provider == "gemini" else "")
+            )
             script_resp = provider.generate_script(
                 source_text=job.source_text,
                 request_mode=mode_val,
@@ -784,12 +806,7 @@ def execute_script_generation(
                 job_id=job.id,
             )
             job.script_json = script_resp.model_dump()
-            m_val = (
-                getattr(provider, "configured_model", None)
-                or getattr(provider, "model_name", None)
-                or settings.GEMINI_MODEL
-            )
-            job.gemini_model = m_val if isinstance(m_val, str) else settings.GEMINI_MODEL
+            job.gemini_model = active_ai_model or settings.GEMINI_MODEL
             db.commit()
             record_stage_metric(
                 job_id=job.id,
@@ -803,6 +820,7 @@ def execute_script_generation(
         # Fidelity verification for non-research modes when verify_final_script=True
         if mode_val != RequestMode.RESEARCH.value and job.verify_final_script:
             if not job.verify_audit_json:
+                active_operation = "verification"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -841,6 +859,7 @@ def execute_script_generation(
 
             v_data = job.verify_audit_json or {}
             if v_data.get("has_material_issues") and (job.verify_repair_count or 0) == 0:
+                active_operation = "verification_repair"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -949,11 +968,14 @@ def execute_script_generation(
         try:
             from herald.services.failure_diagnostics import collect_failure_diagnostics
             collect_failure_diagnostics(
-                stage="scripting",
+                stage="research" if mode_val == RequestMode.RESEARCH.value else "scripting",
                 error=e,
                 job_id=job.id,
                 attempt=job.attempt_count or 1,
                 db=db,
+                provider=active_ai_provider,
+                model=active_ai_model,
+                operation=active_operation,
             )
         except Exception as diag_err:
             logger.warning(f"Failure diagnostics capture error: {diag_err}")

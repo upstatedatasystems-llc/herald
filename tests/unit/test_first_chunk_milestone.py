@@ -118,6 +118,7 @@ def test_non_first_chunk_ignored(db_session):
         id="job-milestone-3",
         transport="telegram",
         telegram_chat_id=12345,
+        telegram_progress_message_id=999,
         source_hash="hash-ms-3",
         source_text="Sample",
         status=JobState.SYNTHESIZING.value,

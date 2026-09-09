@@ -8,12 +8,14 @@ formats concise summaries for Telegram error notifications.
 """
 
 from datetime import UTC, datetime
+import html
 import ipaddress
 import logging
 import os
 from pathlib import Path
 import socket
 import ssl
+import threading
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -60,6 +62,38 @@ def _get_resolver_context() -> dict[str, Any]:
     return context
 
 
+def _resolve_dns_bounded(
+    hostname: str,
+    port: int,
+    timeout: float = 3.0,
+) -> tuple[list[tuple] | None, Exception | None]:
+    """
+    Resolve DNS with an actual wall-clock bound.
+    Runs in a daemon thread so that if resolution hangs, cleanup never blocks.
+    """
+    result: list[list[tuple]] = []
+    error: list[Exception] = []
+    done_event = threading.Event()
+
+    def _worker():
+        try:
+            res = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            result.append(res)
+        except Exception as e:
+            error.append(e)
+        finally:
+            done_event.set()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    eff_timeout = max(0.05, float(timeout))
+    if not done_event.wait(timeout=eff_timeout):
+        return None, TimeoutError(f"DNS resolution timed out after {eff_timeout:.1f}s")
+    if error:
+        return None, error[0]
+    return (result[0] if result else []), None
+
+
 def _probe_network_target(
     target_url: str,
     timeout_seconds: float = 3.0,
@@ -93,26 +127,18 @@ def _probe_network_target(
 
     port = parsed.port or (443 if scheme == "https" else 80)
 
-    # 1. DNS Resolution
-    try:
-        addr_info = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
-    except socket.gaierror as e:
+    # 1. DNS Resolution with wall-clock bound
+    dns_rem_time = max(0.1, deadline - time.monotonic())
+    addr_info, dns_err = _resolve_dns_bounded(hostname, port, timeout=dns_rem_time)
+    if dns_err:
+        is_timeout = isinstance(dns_err, TimeoutError)
         return {
-            "status": "DNS_FAILURE",
+            "status": "TIMEOUT" if is_timeout else "DNS_FAILURE",
             "hostname": hostname,
             "port": port,
-            "dns_status": "FAILED",
-            "dns_error": str(e),
-            "summary": f"DNS: Failed for {hostname} ({e})",
-        }
-    except Exception as e:
-        return {
-            "status": "DNS_FAILURE",
-            "hostname": hostname,
-            "port": port,
-            "dns_status": "FAILED",
-            "dns_error": str(e),
-            "summary": f"DNS: Error for {hostname} ({e})",
+            "dns_status": "TIMEOUT" if is_timeout else "FAILED",
+            "dns_error": str(dns_err),
+            "summary": f"DNS: Timed out for {hostname}" if is_timeout else f"DNS: Failed for {hostname} ({dns_err})",
         }
 
     resolved_ips: list[str] = []
@@ -144,6 +170,16 @@ def _probe_network_target(
             }
 
     # 3. Direct TCP & TLS Probing across candidate IPs (up to 3) bounded by deadline
+    if deadline - time.monotonic() <= 0.05:
+        return {
+            "status": "TIMEOUT",
+            "hostname": hostname,
+            "port": port,
+            "dns_status": "SUCCESS",
+            "resolved_ips": resolved_ips,
+            "summary": "DNS: OK • Timed out before TCP probe",
+        }
+
     candidate_ips = resolved_ips[:3]
     per_ip_results: dict[str, Any] = {}
     last_tcp_error: str | None = None
@@ -252,6 +288,123 @@ def _probe_network_target(
     }
 
 
+def _probe_trusted_kokoro(timeout_seconds: float = 2.0) -> dict[str, Any]:
+    """
+    Perform safe, bounded network & health diagnostics against trusted internal Kokoro service.
+    Restricted strictly to configured settings.KOKORO_API_URL (never user input).
+    Allows expected private Docker network addresses.
+    """
+    api_url = getattr(settings, "KOKORO_API_URL", "http://kokoro:8880")
+    try:
+        parsed = urlparse(api_url)
+    except Exception as e:
+        return {
+            "status": "CONFIG_ERROR",
+            "error": f"Invalid KOKORO_API_URL '{api_url}': {e}",
+            "summary": "Kokoro: Invalid API URL",
+        }
+
+    hostname = parsed.hostname or "kokoro"
+    port = parsed.port or (443 if parsed.scheme == "https" else 8880)
+
+    start_time = time.monotonic()
+    total_deadline_sec = min(max(0.5, float(timeout_seconds)), 2.0)
+    deadline = start_time + total_deadline_sec
+
+    # 1. Bounded DNS resolution
+    dns_deadline = max(0.1, deadline - time.monotonic())
+    addr_info, dns_err = _resolve_dns_bounded(hostname, port, timeout=dns_deadline)
+    if dns_err:
+        is_timeout = isinstance(dns_err, TimeoutError)
+        return {
+            "status": "TIMEOUT" if is_timeout else "DNS_FAILURE",
+            "hostname": hostname,
+            "port": port,
+            "dns_status": "TIMEOUT" if is_timeout else "FAILED",
+            "dns_error": str(dns_err),
+            "summary": f"Kokoro: DNS timed out ({hostname})" if is_timeout else f"Kokoro: DNS failed ({dns_err})",
+        }
+
+    resolved_ips: list[str] = []
+    for family, socktype, proto, canonname, sockaddr in (addr_info or []):
+        ip_str = sockaddr[0]
+        if ip_str not in resolved_ips:
+            resolved_ips.append(ip_str)
+
+    if not resolved_ips:
+        return {
+            "status": "DNS_FAILURE",
+            "hostname": hostname,
+            "port": port,
+            "dns_status": "FAILED",
+            "dns_error": "No IP addresses resolved",
+            "summary": f"Kokoro: No IP resolved for {hostname}",
+        }
+
+    # 2. Direct TCP connection probe to trusted internal IP
+    rem_time = deadline - time.monotonic()
+    if rem_time <= 0.05:
+        return {
+            "status": "TIMEOUT",
+            "hostname": hostname,
+            "port": port,
+            "dns_status": "SUCCESS",
+            "resolved_ips": resolved_ips,
+            "summary": "Kokoro: DNS OK • Timed out before TCP probe",
+        }
+
+    target_ip = resolved_ips[0]
+    sock_family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
+    sock = socket.socket(sock_family, socket.SOCK_STREAM)
+    sock.settimeout(min(1.5, rem_time))
+    try:
+        sock.connect((target_ip, port))
+        sock.close()
+        return {
+            "status": "HEALTHY",
+            "hostname": hostname,
+            "target_ip": target_ip,
+            "port": port,
+            "tcp_status": "SUCCESS",
+            "summary": f"Kokoro: Reachable ({target_ip}:{port})",
+        }
+    except TimeoutError as te:
+        sock.close()
+        return {
+            "status": "TIMEOUT",
+            "hostname": hostname,
+            "target_ip": target_ip,
+            "port": port,
+            "tcp_status": "TIMEOUT",
+            "tcp_error": str(te),
+            "summary": f"Kokoro: Connection timed out ({target_ip}:{port})",
+        }
+    except ConnectionRefusedError as cre:
+        sock.close()
+        return {
+            "status": "CONNECTION_REFUSED",
+            "hostname": hostname,
+            "target_ip": target_ip,
+            "port": port,
+            "tcp_status": "REFUSED",
+            "tcp_error": str(cre),
+            "summary": f"Kokoro: Connection refused ({target_ip}:{port})",
+        }
+    except Exception as ce:
+        sock.close()
+        err_msg = str(ce)
+        st = "TIMEOUT" if "timed out" in err_msg.lower() else "CONNECTION_FAILED"
+        return {
+            "status": st,
+            "hostname": hostname,
+            "target_ip": target_ip,
+            "port": port,
+            "tcp_status": "FAILED",
+            "tcp_error": err_msg,
+            "summary": f"Kokoro: {err_msg} ({target_ip}:{port})",
+        }
+
+
 def collect_failure_diagnostics(
     stage: str,
     error: Exception | str,
@@ -260,6 +413,9 @@ def collect_failure_diagnostics(
     attempt: int = 1,
     db: Session | None = None,
     timeout_seconds: float = 3.0,
+    provider: str | None = None,
+    model: str | None = None,
+    operation: str | None = None,
 ) -> dict[str, Any]:
     """
     Collect stage-aware failure diagnostics at failure boundary.
@@ -283,24 +439,47 @@ def collect_failure_diagnostics(
         if is_http_403:
             summary = f"HTTP 403: Publisher blocked automated retrieval ({probe_result.get('summary', '')})"
     elif stage in ("scripting", "ai_script", "gemini", "research", "ai"):
-        prov = getattr(settings, "RESEARCH_PROVIDER" if stage == "research" else "AI_PROVIDER", "none")
-        cfg_model = getattr(settings, "GEMINI_RESEARCH_MODEL" if stage == "research" else "GEMINI_MODEL", "")
-        status_code = getattr(error, "status_code", None) or getattr(error, "http_status", None)
-        is_retryable = error_cat in ("AI_RATE_LIMITED", "AI_TIMEOUT", "AI_SERVER_ERROR", "TEMPORARY_UNAVAILABLE")
-        ai_diag = {
-            "provider": prov,
-            "configured_model": cfg_model,
-            "http_status": status_code,
-            "error_category": error_cat,
-            "retryable": is_retryable,
-        }
-        if error_cat == "AI_MODEL_UNAVAILABLE":
-            summary = f"AI: Model Unavailable (404) - {safe_msg}"
+        if operation == "literal_script" or getattr(error, "mode", None) == "literal":
+            ai_diag = None
+            summary = f"Scripting: {error_cat} - {safe_msg}"
         else:
-            summary = f"AI: {error_cat} - {safe_msg}"
+            if provider is not None:
+                eff_prov = provider
+            elif stage == "research":
+                eff_prov = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+            else:
+                eff_prov = getattr(settings, "AI_PROVIDER", "none")
+
+            if model is not None:
+                eff_model = model
+            elif stage == "research" or (eff_prov == "gemini" and operation and "research" in str(operation)):
+                eff_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
+            elif eff_prov == "gemini":
+                eff_model = getattr(settings, "GEMINI_MODEL", "")
+            else:
+                eff_model = ""
+
+            status_code = getattr(error, "status_code", None) or getattr(error, "http_status", None)
+            is_retryable = error_cat in ("AI_RATE_LIMITED", "AI_TIMEOUT", "AI_SERVER_ERROR", "TEMPORARY_UNAVAILABLE")
+            ai_diag = {
+                "provider": eff_prov,
+                "configured_model": eff_model,
+                "http_status": status_code,
+                "error_category": error_cat,
+                "retryable": is_retryable,
+            }
+            if operation:
+                ai_diag["operation"] = operation
+
+            prov_disp = eff_prov.capitalize() if eff_prov else "AI"
+            op_disp = f" ({operation})" if operation else ""
+            model_disp = f" [{eff_model}]" if eff_model else ""
+            if error_cat == "AI_MODEL_UNAVAILABLE":
+                summary = f"{prov_disp}{op_disp}{model_disp}: Model Unavailable (404) - {safe_msg}"
+            else:
+                summary = f"{prov_disp}{op_disp}{model_disp}: {error_cat} - {safe_msg}"
     elif stage in ("tts", "kokoro"):
-        probe_url = target_url or getattr(settings, "KOKORO_API_URL", "http://kokoro:8880")
-        probe_result = _probe_network_target(probe_url, timeout_seconds=min(timeout_seconds, 2.0))
+        probe_result = _probe_trusted_kokoro(timeout_seconds=min(timeout_seconds, 2.0))
         summary = f"TTS: {error_cat} ({probe_result.get('summary', '')})"
     elif stage in ("delivery", "telegram"):
         probe_url = target_url or "https://api.telegram.org"
@@ -350,9 +529,9 @@ def collect_failure_diagnostics(
 
 def format_concise_failure_summary(diag_record: dict[str, Any]) -> str:
     """Format a concise, user-friendly failure diagnostics line for Telegram notifications."""
-    summary = diag_record.get("summary") or diag_record.get("error_message") or ""
-    if summary:
-        return f"• <b>Diagnostic:</b> {summary}"
-    stage = (diag_record.get("stage") or "pipeline").upper()
-    cat = diag_record.get("error_category") or "ERROR"
+    raw_summary = diag_record.get("summary") or diag_record.get("error_message") or ""
+    if raw_summary:
+        return f"• <b>Diagnostic:</b> {html.escape(str(raw_summary).strip())}"
+    stage = html.escape(str(diag_record.get("stage") or "pipeline").upper())
+    cat = html.escape(str(diag_record.get("error_category") or "ERROR"))
     return f"• <b>Diagnostic:</b> {stage} ({cat})"
