@@ -2256,12 +2256,12 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
 
     for status_val, timeout, target_val in stale_specs:
         cutoff = now - timeout
-        jobs = (
-            db.query(PodcastJob)
-            .filter(PodcastJob.status == status_val)
-            .with_for_update(skip_locked=True)
-            .all()
-        )
+        query = db.query(PodcastJob).filter(PodcastJob.status == status_val)
+        # Narrow EXTRACTING recovery to Telegram intake jobs only — these are the
+        # only provisional records that can become orphaned without a heartbeat owner.
+        if status_val == JobState.EXTRACTING.value:
+            query = query.filter(PodcastJob.transport == "telegram")
+        jobs = query.with_for_update(skip_locked=True).all()
         for job in jobs:
             last_active = job.last_heartbeat_at or job.claimed_at
             if last_active:

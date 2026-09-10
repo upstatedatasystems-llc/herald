@@ -79,7 +79,7 @@ class PodcastJob(Base):
     # Optional top-of-body or subject directives
     custom_voice = Column(String(50), nullable=True)
     custom_speed = Column(Float, nullable=True)
-    custom_title = Column(String(255), nullable=True)
+    custom_title = Column(Text, nullable=True)
     tts_chunk_chars = Column(Integer, nullable=True, default=500)
     verify_final_script = Column(Boolean, nullable=True, default=False)
     rerun_of_job_id = Column(String(36), ForeignKey("podcast_jobs.id", ondelete="SET NULL"), nullable=True, index=True)

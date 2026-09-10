@@ -694,6 +694,67 @@ def handle_telegram_content_message(
             response: HeraldResponse = process_herald_request(db=db, req=req)
     except Exception as e:
         logger.exception("Error processing Telegram request: %s", redact_text(str(e)))
+        # Immediately rollback the polluted session
+        try:
+            db.rollback()
+        except Exception as rb_err:
+            logger.warning("Session rollback failed: %s", rb_err)
+
+        # Recover provisional EXTRACTING job using a fresh session
+        if chat_id and msg_id:
+            try:
+                recovery_db = SessionLocal()
+                try:
+                    provisional = (
+                        recovery_db.query(PodcastJob)
+                        .filter(
+                            PodcastJob.transport == "telegram",
+                            PodcastJob.telegram_chat_id == chat_id,
+                            PodcastJob.telegram_message_id == msg_id,
+                        )
+                        .with_for_update(skip_locked=True)
+                        .first()
+                    )
+                    if provisional and provisional.status in (
+                        JobState.EXTRACTING.value,
+                        JobState.RECEIVED.value,
+                        JobState.VALIDATING.value,
+                    ):
+                        from herald.db.state_machine import transition_job_state
+                        from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                        from herald.services.failure_diagnostics import collect_failure_diagnostics
+
+                        try:
+                            collect_failure_diagnostics(
+                                stage="extraction", error=e,
+                                job_id=provisional.id, db=recovery_db,
+                            )
+                        except Exception:
+                            pass
+                        transition_job_state(
+                            recovery_db, provisional, JobState.FAILED_FINAL.value,
+                            component="telegram-intake",
+                            message=f"Unhandled intake error: {redact_text(str(e))}",
+                            error_category="INTAKE_CRASH",
+                            commit=False,
+                        )
+                        provisional.failed_stage = "EXTRACTION"
+                        provisional.error_code = "INTAKE_CRASH"
+                        provisional.error_detail = str(e)
+                        recovery_db.commit()
+                        try:
+                            ensure_terminal_diagnostics_archive(provisional.id, JobState.FAILED_FINAL.value)
+                        except Exception:
+                            pass
+                        logger.info(
+                            "Recovered provisional job '%s' to FAILED_FINAL after intake crash",
+                            provisional.id,
+                        )
+                finally:
+                    recovery_db.close()
+            except Exception as rec_err:
+                logger.warning("Provisional job recovery failed: %s", rec_err)
+
         client.send_message(
             chat_id=chat_id,
             text="❌ <b>Herald could not process this request.</b>\nPlease retry or use <code>/diagnostics latest</code> if a job was created.",

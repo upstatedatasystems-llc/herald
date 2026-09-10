@@ -199,6 +199,24 @@ def redact_dict(d: dict[str, Any] | None) -> dict[str, Any]:
     return cleaned
 
 
+def redact_value(val: Any) -> Any:
+    """
+    Recursively redact any JSON-serializable value.
+    Delegates to redact_dict for dicts, applies recursively for lists,
+    uses redact_text for strings, and returns primitives as-is.
+    """
+    if isinstance(val, dict):
+        return redact_dict(val)
+    elif isinstance(val, list):
+        return [redact_value(item) for item in val]
+    elif isinstance(val, str):
+        return redact_text(val)
+    elif isinstance(val, (int, float, bool, type(None))):
+        return val
+    else:
+        return redact_text(str(val))
+
+
 def sanitize_content_dict(d: dict[str, Any] | None) -> dict[str, Any]:
     """
     Sanitize content artifacts (such as script JSON or research dossier),

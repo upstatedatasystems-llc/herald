@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import socket
 import time
 from urllib.parse import urljoin, urlparse
@@ -143,6 +144,28 @@ class SSRFSafeTransport(httpx.HTTPTransport):
         return super().handle_request(request)
 
 
+def _is_boilerplate(text: str) -> bool:
+    """Check if a text paragraph is likely boilerplate."""
+    text_lower = text.lower()
+    patterns = [
+        "cookie", "consent", "privacy policy", "we use cookies",
+        "subscribe", "sign up for", "newsletter", "get our",
+        "read more", "related articles", "you may also like", "recommended for you",
+        "about the author", "contributor", "follow us on",
+        "share this", "follow on twitter", "like us on facebook"
+    ]
+    
+    if len(text) < 150:
+        if any(p in text_lower for p in patterns):
+            return True
+            
+    for p in patterns:
+        if text_lower.startswith(p):
+            return True
+            
+    return False
+
+
 def extract_article_from_url(
     url: str,
     timeout_seconds: float = 10.0,
@@ -242,8 +265,39 @@ def extract_article_from_url(
     html_text = content_bytes.decode("utf-8", errors="replace")
     soup = BeautifulSoup(html_text, "html.parser")
 
-    title_tag = soup.find("title")
-    title = title_tag.get_text().strip() if title_tag else "Extracted Article"
+    title = None
+    full_text = None
+
+    # Step 1: JSON-LD Structured Data
+    for script_tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            content = script_tag.string or script_tag.get_text() or ""
+            data = json.loads(content)
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("@type", "")
+                if isinstance(item_type, list):
+                    item_type = item_type[0] if item_type else ""
+                
+                valid_types = {"Article", "NewsArticle", "BlogPosting", "WebPage", "Report", "TechArticle"}
+                if item_type in valid_types:
+                    article_body = item.get("articleBody", "")
+                    if isinstance(article_body, str) and len(article_body) > 200:
+                        full_text = article_body
+                        if "headline" in item and isinstance(item["headline"], str):
+                            title = item["headline"].strip()
+                        break
+            if full_text:
+                break
+        except (json.JSONDecodeError, TypeError, Exception):
+            continue
+
+    if not title:
+        title_tag = soup.find("title")
+        title = title_tag.get_text().strip() if title_tag else "Extracted Article"
 
     # Check for bot / paywall / interstitial markers
     html_lower = html_text.lower()
@@ -252,18 +306,27 @@ def extract_article_from_url(
         if marker in title_lower or (marker in html_lower and len(html_text) < 5000):
             raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (bot/paywall/interstitial marker detected): {current_url}")
 
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]):
-        tag.extract()
-
-    main_container = soup.find("article") or soup.find("main") or soup.find("body") or soup
-    paragraphs = main_container.find_all(["p", "h1", "h2", "h3", "h4", "li"])
-
     extracted_lines = []
-    for p in paragraphs:
-        p_text = p.get_text().strip()
-        if len(p_text) > 15:
-            extracted_lines.append(p_text)
+    
+    if full_text:
+        # Step 3: Boilerplate Cleanup for JSON-LD
+        for p in full_text.split('\n'):
+            p_text = p.strip()
+            if len(p_text) > 15 and not _is_boilerplate(p_text):
+                extracted_lines.append(p_text)
+    else:
+        # Step 2: Semantic Container Cascade
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]):
+            tag.extract()
 
+        main_container = soup.find("article") or soup.find("main") or soup.find("body") or soup
+        paragraphs = main_container.find_all(["p", "h1", "h2", "h3", "h4"])
+    
+        for p in paragraphs:
+            p_text = p.get_text().strip()
+            if len(p_text) > 15 and not _is_boilerplate(p_text):
+                extracted_lines.append(p_text)
+                
     full_text = "\n\n".join(extracted_lines)
 
     if len(full_text.strip()) < 100:

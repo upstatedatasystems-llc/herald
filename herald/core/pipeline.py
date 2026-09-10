@@ -331,14 +331,28 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             source_url = canon_url
             extracted_text = f"Title: {art_title}\n\n{art_text}" if art_title else art_text
         except SSRFVulnerabilityError as e:
+            error_cat = getattr(e, "error_category", "SSRF_PROTECTION")
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
                 collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
-            job.status = JobState.FAILED_FINAL.value
+            record_stage_metric(
+                job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url},
+            )
+            record_job_diagnostic_event(
+                job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
+                f"SSRF security violation for URL: {sanitize_error(str(e))}",
+                metadata={"error_category": error_cat, "url": source_url}, db=db,
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value,
+                component="herald-core", message=f"Security violation: {e}",
+                error_category=error_cat, commit=False,
+            )
             job.failed_stage = "EXTRACTION"
-            job.error_code = "SSRF_PROTECTION"
+            job.error_code = error_cat
             job.error_detail = str(e)
             db.commit()
             try:
@@ -353,17 +367,31 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_type=SourceType.URL.value,
                 is_duplicate=False,
                 message=f"Security violation: {e}",
-                error_category="SSRF_PROTECTION",
+                error_category=error_cat,
             )
         except DNSResolutionError as e:
+            error_cat = getattr(e, "error_category", "DNS_RESOLUTION_ERROR")
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
                 collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
-            job.status = JobState.FAILED_FINAL.value
+            record_stage_metric(
+                job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url},
+            )
+            record_job_diagnostic_event(
+                job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
+                f"DNS resolution failed for URL: {sanitize_error(str(e))}",
+                metadata={"error_category": error_cat, "url": source_url}, db=db,
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value,
+                component="herald-core", message=f"DNS resolution failed: {e}",
+                error_category=error_cat, commit=False,
+            )
             job.failed_stage = "EXTRACTION"
-            job.error_code = "EXTRACTION_FAILURE"
+            job.error_code = error_cat
             job.error_detail = str(e)
             db.commit()
             try:
@@ -378,17 +406,113 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_type=SourceType.URL.value,
                 is_duplicate=False,
                 message=f"URL retrieval failed: {e}",
-                error_category="EXTRACTION_FAILURE",
+                error_category=error_cat,
             )
-        except (ArticleExtractionError, SourceAccessBlockedError) as e:
+        except SourceAccessBlockedError as e:
+            error_cat = getattr(e, "error_category", "SOURCE_ACCESS_BLOCKED")
+            # URL Context fallback: only for SourceAccessBlockedError on URLs that already
+            # passed SSRF validation, non-Literal mode, and Gemini is configured.
+            url_context_attempted = False
+            if (
+                mode_val != "literal"
+                and settings.is_ai_configured()
+                and (settings.AI_PROVIDER or "").lower().strip() == "gemini"
+                and source_url
+            ):
+                try:
+                    from herald.gemini.client import extract_article_via_url_context
+                    logger.info(f"Attempting Gemini URL Context fallback for blocked URL: {source_url}")
+                    record_job_diagnostic_event(
+                        job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_ATTEMPT",
+                        f"Source access blocked; attempting Gemini URL Context fallback.",
+                        metadata={"url": source_url, "original_error": error_cat}, db=db,
+                    )
+                    url_ctx_result = extract_article_via_url_context(
+                        url=source_url, api_key=None, model_name=None, job_id=job.id,
+                    )
+                    if url_ctx_result and url_ctx_result.get("body", "").strip():
+                        # URL Context succeeded — use extracted content
+                        ctx_title = url_ctx_result.get("title", "").strip()
+                        ctx_body = url_ctx_result["body"].strip()
+                        canonical_title = ctx_title or canonical_title
+                        extracted_text = f"Title: {ctx_title}\n\n{ctx_body}" if ctx_title else ctx_body
+                        url_context_attempted = True
+                        record_job_diagnostic_event(
+                            job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_SUCCESS",
+                            f"Gemini URL Context fallback succeeded ({len(ctx_body)} chars).",
+                            metadata={"url": source_url, "title": ctx_title, "body_chars": len(ctx_body)}, db=db,
+                        )
+                        logger.info(f"URL Context fallback succeeded for {source_url}: {len(ctx_body)} chars")
+                except Exception as ctx_err:
+                    logger.warning(f"URL Context fallback failed for {source_url}: {ctx_err}")
+                    record_job_diagnostic_event(
+                        job.id, "WARNING", "extraction", "URL_CONTEXT_FALLBACK_FAILED",
+                        f"Gemini URL Context fallback failed: {sanitize_error(str(ctx_err))}",
+                        metadata={"url": source_url}, db=db,
+                    )
+
+            if not url_context_attempted:
+                # Fallback not attempted or not successful — fail the job
+                try:
+                    from herald.services.failure_diagnostics import collect_failure_diagnostics
+                    collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
+                except Exception as diag_err:
+                    logger.warning(f"Failure diagnostics capture error: {diag_err}")
+                record_stage_metric(
+                    job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                    started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url},
+                )
+                record_job_diagnostic_event(
+                    job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
+                    f"Source access blocked: {sanitize_error(str(e))}",
+                    metadata={"error_category": error_cat, "url": source_url}, db=db,
+                )
+                transition_job_state(
+                    db, job, JobState.FAILED_FINAL.value,
+                    component="herald-core", message=f"Source access blocked: {e}",
+                    error_category=error_cat, commit=False,
+                )
+                job.failed_stage = "EXTRACTION"
+                job.error_code = error_cat
+                job.error_detail = str(e)
+                db.commit()
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
+                return HeraldResponse(
+                    job_id=job.id,
+                    status=JobState.FAILED_FINAL.value,
+                    request_mode=mode_val,
+                    source_type=SourceType.URL.value,
+                    is_duplicate=False,
+                    message=f"URL extraction failed: {e}",
+                    error_category=error_cat,
+                )
+        except ArticleExtractionError as e:
+            error_cat = getattr(e, "error_category", "EXTRACTION_FAILURE")
             try:
                 from herald.services.failure_diagnostics import collect_failure_diagnostics
                 collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
-            job.status = JobState.FAILED_FINAL.value
+            record_stage_metric(
+                job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url},
+            )
+            record_job_diagnostic_event(
+                job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
+                f"Article extraction failed: {sanitize_error(str(e))}",
+                metadata={"error_category": error_cat, "url": source_url}, db=db,
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value,
+                component="herald-core", message=f"Article extraction failed: {e}",
+                error_category=error_cat, commit=False,
+            )
             job.failed_stage = "EXTRACTION"
-            job.error_code = "EXTRACTION_FAILURE"
+            job.error_code = error_cat
             job.error_detail = str(e)
             db.commit()
             try:
@@ -403,7 +527,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_type=SourceType.URL.value,
                 is_duplicate=False,
                 message=f"URL extraction failed: {e}",
-                error_category="EXTRACTION_FAILURE",
+                error_category=error_cat,
             )
         except Exception as e:
             try:
@@ -411,7 +535,20 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
             except Exception as diag_err:
                 logger.warning(f"Failure diagnostics capture error: {diag_err}")
-            job.status = JobState.FAILED_FINAL.value
+            record_stage_metric(
+                job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                started_at=datetime.now(UTC), metadata_json={"error_category": "EXTRACTION_FAILURE", "url": source_url},
+            )
+            record_job_diagnostic_event(
+                job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
+                f"Unexpected extraction error: {sanitize_error(str(e))}",
+                metadata={"error_category": "EXTRACTION_FAILURE", "url": source_url}, db=db,
+            )
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value,
+                component="herald-core", message=f"Extraction failed: {e}",
+                error_category="EXTRACTION_FAILURE", commit=False,
+            )
             job.failed_stage = "EXTRACTION"
             job.error_code = "EXTRACTION_FAILURE"
             job.error_detail = str(e)

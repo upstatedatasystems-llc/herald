@@ -540,6 +540,146 @@ Report your comprehensive grounded findings in detail.
     raise GeminiError("Failed to perform grounded research after retries.")
 
 
+def extract_article_via_url_context(
+    url: str,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    job_id: str | None = None,
+) -> dict[str, str] | None:
+    """
+    Use Gemini URL Context tool to extract article content from a URL that blocked direct scraping.
+
+    Returns {"title": "...", "body": "..."} on success, or None if extraction fails.
+    This is a fallback for SourceAccessBlockedError only, on URLs that already passed SSRF validation.
+    """
+    key = api_key or settings.GEMINI_API_KEY
+    model = model_name or settings.GEMINI_MODEL
+
+    if not key:
+        raise GeminiAuthError("Gemini API key is not configured.")
+
+    prompt = f"""Extract the main article content from the following URL.
+
+URL: {url}
+
+Return the article title and the full article body text.
+Do NOT include navigation, advertisements, sidebars, or comments.
+Return ONLY the main article content."""
+
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
+
+    schema_dict = {
+        "type": "OBJECT",
+        "properties": {
+            "title": {"type": "STRING"},
+            "body": {"type": "STRING"},
+        },
+        "required": ["title", "body"],
+    }
+
+    t0 = datetime.now(UTC)
+    try:
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"url_context": {}}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
+                "responseMimeType": "application/json",
+                "responseSchema": schema_dict,
+            },
+        }
+
+        from herald.concurrency import get_semaphores
+        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+            resp = client.post(api_url, json=payload, headers=headers)
+
+        t1 = datetime.now(UTC)
+        req_id = _extract_request_id(resp)
+
+        if resp.status_code != 200:
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                error=f"HTTP {resp.status_code}: {resp.text}",
+                provider_request_id=req_id,
+            )
+            logger.warning(f"URL Context extraction failed with HTTP {resp.status_code}")
+            return None
+
+        result_json = resp.json()
+        p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
+        candidates = result_json.get("candidates", [])
+
+        if not candidates:
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                error="No candidates returned",
+                provider_request_id=req_id,
+            )
+            return None
+
+        raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        data = json.loads(raw_text)
+
+        title = (data.get("title") or "").strip()
+        body = (data.get("body") or "").strip()
+
+        _record_gemini_interaction(
+            job_id=job_id,
+            model=model,
+            operation="url_context_extraction",
+            started_at=t0,
+            completed_at=t1,
+            success=True,
+            http_status=resp.status_code,
+            input_chars=len(prompt),
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+            thought_tokens=th_tok,
+            provider_request_id=req_id,
+            metadata={"url": url, "title_chars": len(title), "body_chars": len(body)},
+        )
+
+        if not body:
+            logger.warning(f"URL Context extraction returned empty body for {url}")
+            return None
+
+        return {"title": title, "body": body}
+
+    except Exception as e:
+        t1 = datetime.now(UTC)
+        _record_gemini_interaction(
+            job_id=job_id,
+            model=model,
+            operation="url_context_extraction",
+            started_at=t0,
+            completed_at=t1,
+            success=False,
+            input_chars=len(prompt),
+            error=e,
+        )
+        logger.warning(f"URL Context extraction error: {e}")
+        return None
+
 def normalize_research_dossier(
     source_text: str,
     grounded_research_data: dict,
@@ -580,7 +720,6 @@ Requirements:
 1. Summarize primary source in source_summary.
 2. In verification and useful_context, populate source_ids ONLY with valid IDs from CANONICAL_SOURCE_REGISTRY ({list(valid_source_ids)}).
 3. Do NOT invent new source IDs or URL strings.
-4. Pass the exact CANONICAL_SOURCE_REGISTRY back into research_sources field.
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -616,41 +755,43 @@ Requirements:
                 },
             },
             "outdated_or_uncertain": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "research_sources": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "source_id": {"type": "STRING"},
-                        "title": {"type": "STRING"},
-                        "url": {"type": "STRING"},
-                        "domain": {"type": "STRING"},
-                        "retrieved_at": {"type": "STRING"},
-                        "search_query": {"type": "STRING"},
-                    },
-                    "required": ["source_id", "title", "url", "domain", "retrieved_at", "search_query"],
-                },
-            },
         },
-        "required": ["source_summary", "verification", "useful_context", "outdated_or_uncertain", "research_sources"],
+        "required": ["source_summary", "verification", "useful_context", "outdated_or_uncertain"],
     }
 
     max_attempts = settings.GEMINI_RETRY_COUNT
     backoff = 2.0
 
+    configured_max = settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS
+    model_ceiling = get_gemini_max_output_tokens_ceiling(model)
+    current_max_tokens = min(configured_max, model_ceiling) if model_ceiling else configured_max
+
+    # Normalization uses LOW thinking to save budget - don't reuse build_script_thinking_config
+    normalization_thinking_config = None
+    model_lower = model.lower()
+    if "gemini-3" in model_lower:
+        normalization_thinking_config = {"thinkingLevel": "low"}
+    elif "gemini-2.5" in model_lower:
+        normalization_thinking_config = {"thinkingBudget": 1024}
+
     for attempt in range(1, max_attempts + 1):
         t0 = datetime.now(UTC)
         interaction_recorded = False
         try:
-            logger.info(f"Sending dossier normalization request to Gemini ({model}), attempt {attempt}/{max_attempts}")
+            logger.info(f"Sending dossier normalization request to Gemini ({model}), max_tokens={current_max_tokens}, attempt {attempt}/{max_attempts}")
+            
+            gen_config = {
+                "temperature": settings.GEMINI_TEMPERATURE,
+                "maxOutputTokens": current_max_tokens,
+                "responseMimeType": "application/json",
+                "responseSchema": schema_dict,
+            }
+            if normalization_thinking_config:
+                gen_config["thinkingConfig"] = normalization_thinking_config
+            
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": settings.GEMINI_TEMPERATURE,
-                    "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
-                    "responseMimeType": "application/json",
-                    "responseSchema": schema_dict,
-                },
+                "generationConfig": gen_config,
             }
 
             from herald.concurrency import get_semaphores
@@ -711,6 +852,43 @@ Requirements:
                 interaction_recorded = True
                 raise GeminiValidationError(err_msg)
 
+            finish_reason = candidates[0].get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                # Output was truncated — do NOT attempt JSON parsing
+                logger.warning(f"Dossier normalization truncated (finishReason=MAX_TOKENS), attempt {attempt}/{max_attempts}, current_max_tokens={current_max_tokens}")
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="dossier_normalization",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    error="OUTPUT_TRUNCATED: finishReason=MAX_TOKENS",
+                    provider_request_id=req_id,
+                    requested_max_output_tokens=current_max_tokens,
+                )
+                interaction_recorded = True
+                # Adaptive retry: increase token budget toward model ceiling
+                if model_ceiling and current_max_tokens < model_ceiling:
+                    new_budget = min(current_max_tokens * 2, model_ceiling)
+                    logger.info(f"Increasing normalization token budget: {current_max_tokens} -> {new_budget}")
+                    current_max_tokens = new_budget
+                if attempt < max_attempts:
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                raise GeminiOutputTruncatedError(
+                    f"Research dossier normalization output truncated after {max_attempts} attempts "
+                    f"(last maxOutputTokens={current_max_tokens})"
+                )
+
             raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             data = json.loads(raw_text)
 
@@ -724,8 +902,8 @@ Requirements:
                     if valid_source_ids and sid not in valid_source_ids:
                         raise GeminiValidationError(f"Dossier referenced invalid source ID '{sid}' not in registry.")
 
-            if not data.get("research_sources") and sources_registry:
-                data["research_sources"] = sources_registry
+            # Locally inject canonical source registry (not echoed by model)
+            data["research_sources"] = sources_registry
 
             response_obj = ResearchDossierResponse(**data)
 
@@ -788,7 +966,7 @@ Requirements:
                     error=e,
                 )
                 interaction_recorded = True
-            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError)):
+            if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError, GeminiOutputTruncatedError)):
                 raise
             if attempt == max_attempts:
                 raise GeminiError(f"Dossier normalization failed: {e}")

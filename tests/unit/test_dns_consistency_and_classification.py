@@ -120,7 +120,7 @@ def test_dns_resolution_failure_classification(monkeypatch):
             resp = process_herald_request(db=db, req=req)
 
     assert resp.status == JobState.FAILED_FINAL.value
-    assert resp.error_category == "EXTRACTION_FAILURE"
+    assert resp.error_category == "DNS_RESOLUTION_ERROR"
     assert "Security violation" not in resp.message
     assert resp.message == "URL retrieval failed: DNS lookup failed for hostname 'archive.ph'."
 

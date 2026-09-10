@@ -36,6 +36,7 @@ from herald.services.redaction import (
     build_safe_environment_summary,
     redact_dict,
     redact_text,
+    redact_value,
     sanitize_content_dict,
     scan_for_secrets,
 )
@@ -442,7 +443,7 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
         # 11b. failure-diagnostics.json (if auto_diagnostics_json exists)
         if job.auto_diagnostics_json:
             (staging_dir / "failure-diagnostics.json").write_text(
-                json.dumps(redact_dict(job.auto_diagnostics_json), indent=2), encoding="utf-8"
+                json.dumps(redact_value(job.auto_diagnostics_json), indent=2), encoding="utf-8"
             )
             included_files.append("failure-diagnostics.json")
 
