@@ -15,6 +15,7 @@ from herald.db.state_machine import transition_job_state
 from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
+    BlockReason,
     DNSResolutionError,
     SourceAccessBlockedError,
     SSRFVulnerabilityError,
@@ -330,6 +331,22 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             canonical_title = art_title
             source_url = canon_url
             extracted_text = f"Title: {art_title}\n\n{art_text}" if art_title else art_text
+            record_stage_metric(
+                job_id=job.id,
+                stage="URL_EXTRACTION",
+                status="SUCCESS",
+                started_at=datetime.now(UTC),
+                metadata_json={"extraction_method": "DIRECT_HTTP", "url": source_url},
+            )
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "extraction",
+                "EXTRACTION_SUCCESS",
+                f"Direct HTTP URL extraction succeeded ({len(art_text)} chars).",
+                metadata={"extraction_method": "DIRECT_HTTP", "url": source_url, "chars": len(art_text)},
+                db=db,
+            )
         except SSRFVulnerabilityError as e:
             error_cat = getattr(e, "error_category", "SSRF_PROTECTION")
             try:
@@ -410,22 +427,32 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             )
         except SourceAccessBlockedError as e:
             error_cat = getattr(e, "error_category", "SOURCE_ACCESS_BLOCKED")
-            # URL Context fallback: only for SourceAccessBlockedError on URLs that already
-            # passed SSRF validation, non-Literal mode, and Gemini is configured.
+            block_reason = getattr(e, "block_reason", BlockReason.PUBLIC_RETRIEVAL_BLOCK)
             url_context_attempted = False
-            if (
-                mode_val != "literal"
+            fallback_result = "NOT_ATTEMPTED"
+
+            # Gemini URL Context may ONLY be attempted for public retrieval blocks or rate limits,
+            # never for 401/auth, paywalls, captchas, interstitials, SSRF, or Literal mode.
+            is_eligible_block = block_reason in (
+                BlockReason.PUBLIC_RETRIEVAL_BLOCK,
+                BlockReason.RATE_LIMITED,
+            )
+            can_attempt_fallback = (
+                is_eligible_block
+                and mode_val != "literal"
                 and settings.is_ai_configured()
                 and (settings.AI_PROVIDER or "").lower().strip() == "gemini"
                 and source_url
-            ):
+            )
+            if can_attempt_fallback:
+                url_context_attempted = True
                 try:
                     from herald.gemini.client import extract_article_via_url_context
-                    logger.info(f"Attempting Gemini URL Context fallback for blocked URL: {source_url}")
+                    logger.info(f"Attempting Gemini URL Context fallback for blocked URL ({block_reason}): {source_url}")
                     record_job_diagnostic_event(
                         job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_ATTEMPT",
-                        f"Source access blocked; attempting Gemini URL Context fallback.",
-                        metadata={"url": source_url, "original_error": error_cat}, db=db,
+                        f"Source access blocked ({block_reason}); attempting Gemini URL Context fallback.",
+                        metadata={"url": source_url, "original_error": error_cat, "block_reason": block_reason}, db=db,
                     )
                     url_ctx_result = extract_article_via_url_context(
                         url=source_url, api_key=None, model_name=None, job_id=job.id,
@@ -436,14 +463,47 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                         ctx_body = url_ctx_result["body"].strip()
                         canonical_title = ctx_title or canonical_title
                         extracted_text = f"Title: {ctx_title}\n\n{ctx_body}" if ctx_title else ctx_body
-                        url_context_attempted = True
+                        fallback_result = "SUCCESS"
+                        record_stage_metric(
+                            job_id=job.id,
+                            stage="URL_EXTRACTION",
+                            status="SUCCESS",
+                            started_at=datetime.now(UTC),
+                            metadata_json={
+                                "extraction_method": "GEMINI_URL_CONTEXT",
+                                "direct_error_category": error_cat,
+                                "direct_error": str(e),
+                                "block_reason": block_reason,
+                                "fallback_attempted": True,
+                                "fallback_result": "SUCCESS",
+                                "url": source_url,
+                            },
+                        )
                         record_job_diagnostic_event(
                             job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_SUCCESS",
                             f"Gemini URL Context fallback succeeded ({len(ctx_body)} chars).",
                             metadata={"url": source_url, "title": ctx_title, "body_chars": len(ctx_body)}, db=db,
                         )
+                        record_job_diagnostic_event(
+                            job.id, "INFO", "extraction", "EXTRACTION_SUCCESS",
+                            f"Gemini URL Context extraction succeeded ({len(ctx_body)} chars).",
+                            metadata={
+                                "extraction_method": "GEMINI_URL_CONTEXT",
+                                "direct_error_category": error_cat,
+                                "direct_error": sanitize_error(str(e)),
+                                "block_reason": block_reason,
+                                "fallback_attempted": True,
+                                "fallback_result": "SUCCESS",
+                                "url": source_url,
+                                "chars": len(ctx_body),
+                            },
+                            db=db,
+                        )
                         logger.info(f"URL Context fallback succeeded for {source_url}: {len(ctx_body)} chars")
+                    else:
+                        fallback_result = "FAILED"
                 except Exception as ctx_err:
+                    fallback_result = "FAILED"
                     logger.warning(f"URL Context fallback failed for {source_url}: {ctx_err}")
                     record_job_diagnostic_event(
                         job.id, "WARNING", "extraction", "URL_CONTEXT_FALLBACK_FAILED",
@@ -451,7 +511,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                         metadata={"url": source_url}, db=db,
                     )
 
-            if not url_context_attempted:
+            if fallback_result != "SUCCESS":
                 # Fallback not attempted or not successful — fail the job
                 try:
                     from herald.services.failure_diagnostics import collect_failure_diagnostics
@@ -460,21 +520,54 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     logger.warning(f"Failure diagnostics capture error: {diag_err}")
                 record_stage_metric(
                     job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
-                    started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url},
+                    started_at=datetime.now(UTC),
+                    metadata_json={
+                        "extraction_method": "DIRECT_HTTP",
+                        "direct_error_category": error_cat,
+                        "direct_error": str(e),
+                        "block_reason": block_reason,
+                        "fallback_attempted": url_context_attempted,
+                        "fallback_result": fallback_result,
+                        "url": source_url,
+                    },
                 )
                 record_job_diagnostic_event(
                     job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
                     f"Source access blocked: {sanitize_error(str(e))}",
-                    metadata={"error_category": error_cat, "url": source_url}, db=db,
+                    metadata={
+                        "extraction_method": "DIRECT_HTTP",
+                        "direct_error_category": error_cat,
+                        "direct_error": sanitize_error(str(e)),
+                        "block_reason": block_reason,
+                        "fallback_attempted": url_context_attempted,
+                        "fallback_result": fallback_result,
+                        "url": source_url,
+                    },
+                    db=db,
                 )
+                if mode_val == "literal":
+                    user_message = (
+                        "URL extraction blocked: Literal mode does not use AI-assisted URL retrieval. "
+                        "Please paste the article text directly into Herald."
+                    )
+                elif url_context_attempted:
+                    user_message = (
+                        "URL extraction failed: Herald could not retrieve the original public page. "
+                        "Please paste the article text directly into Herald."
+                    )
+                else:
+                    user_message = (
+                        f"URL extraction failed: Access blocked ({block_reason.lower().replace('_', ' ')}). "
+                        "Please paste the article text directly into Herald."
+                    )
                 transition_job_state(
                     db, job, JobState.FAILED_FINAL.value,
-                    component="herald-core", message=f"Source access blocked: {e}",
+                    component="herald-core", message=user_message,
                     error_category=error_cat, commit=False,
                 )
                 job.failed_stage = "EXTRACTION"
                 job.error_code = error_cat
-                job.error_detail = str(e)
+                job.error_detail = user_message
                 db.commit()
                 try:
                     from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
@@ -487,7 +580,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     request_mode=mode_val,
                     source_type=SourceType.URL.value,
                     is_duplicate=False,
-                    message=f"URL extraction failed: {e}",
+                    message=user_message,
                     error_category=error_cat,
                 )
         except ArticleExtractionError as e:

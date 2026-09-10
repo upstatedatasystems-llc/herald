@@ -513,9 +513,9 @@ def deliver_job_diagnostics(
     zip_path = None
     is_terminal = job.status in {JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value}
     try:
-        from herald.services.diagnostics_export import get_terminal_diagnostics_path
+        from herald.services.diagnostics_export import get_terminal_diagnostics_path, is_terminal_archive_valid
         canonical_path = get_terminal_diagnostics_path(job.id, job.status) if is_terminal else None
-        if is_terminal and canonical_path and canonical_path.exists() and canonical_path.stat().st_size > 0:
+        if is_terminal and canonical_path and is_terminal_archive_valid(canonical_path, job):
             zip_path = canonical_path
         else:
             zip_path = generate_job_diagnostics_zip(db, job, target_zip_path=canonical_path)

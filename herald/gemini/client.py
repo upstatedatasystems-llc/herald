@@ -558,13 +558,12 @@ def extract_article_via_url_context(
     if not key:
         raise GeminiAuthError("Gemini API key is not configured.")
 
-    prompt = f"""Extract the main article content from the following URL.
-
-URL: {url}
-
-Return the article title and the full article body text.
+    prompt = f"""Faithfully extract the original article content from the following public URL.
+Do NOT summarize, do NOT embellish, do NOT infer missing material, and do NOT reconstruct from other sources.
 Do NOT include navigation, advertisements, sidebars, or comments.
-Return ONLY the main article content."""
+Return ONLY the main article content.
+
+URL: {url}"""
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     headers = {"x-goog-api-key": key}
@@ -608,6 +607,7 @@ Return ONLY the main article content."""
                 success=False,
                 http_status=resp.status_code,
                 input_chars=len(prompt),
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
                 error=f"HTTP {resp.status_code}: {resp.text}",
                 provider_request_id=req_id,
             )
@@ -631,16 +631,106 @@ Return ONLY the main article content."""
                 prompt_tokens=p_tok,
                 completion_tokens=c_tok,
                 total_tokens=t_tok,
+                thought_tokens=th_tok,
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
                 error="No candidates returned",
                 provider_request_id=req_id,
             )
             return None
 
+        finish_reason = candidates[0].get("finishReason", "")
         raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        data = json.loads(raw_text)
+        try:
+            data = json.loads(raw_text)
+        except Exception as json_err:
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                error=f"Malformed JSON returned from URL Context: {json_err}",
+                provider_request_id=req_id,
+            )
+            return None
 
-        title = (data.get("title") or "").strip()
-        body = (data.get("body") or "").strip()
+        if not isinstance(data, dict):
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                error="URL Context response is not a JSON object",
+                provider_request_id=req_id,
+            )
+            return None
+
+        title = data.get("title")
+        body = data.get("body")
+        if not isinstance(title, str) or not isinstance(body, str):
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                error="URL Context title or body has invalid type",
+                provider_request_id=req_id,
+            )
+            return None
+
+        title = title.strip()
+        body = body.strip()
+
+        if len(body) < 100:
+            logger.warning(f"URL Context extraction returned insufficient body ({len(body)} chars) for {url}")
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                error=f"Insufficient article content extracted from URL Context ({len(body)} chars, minimum 100 required)",
+                provider_request_id=req_id,
+            )
+            return None
 
         _record_gemini_interaction(
             job_id=job_id,
@@ -655,14 +745,11 @@ Return ONLY the main article content."""
             completion_tokens=c_tok,
             total_tokens=t_tok,
             thought_tokens=th_tok,
+            finish_reason=finish_reason,
+            requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
             provider_request_id=req_id,
             metadata={"url": url, "title_chars": len(title), "body_chars": len(body)},
         )
-
-        if not body:
-            logger.warning(f"URL Context extraction returned empty body for {url}")
-            return None
-
         return {"title": title, "body": body}
 
     except Exception as e:
@@ -675,9 +762,11 @@ Return ONLY the main article content."""
             completed_at=t1,
             success=False,
             input_chars=len(prompt),
+            requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
             error=e,
         )
         logger.warning(f"URL Context extraction error: {e}")
+        return None
         return None
 
 def normalize_research_dossier(
@@ -762,9 +851,13 @@ Requirements:
     max_attempts = settings.GEMINI_RETRY_COUNT
     backoff = 2.0
 
-    configured_max = settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS
     model_ceiling = get_gemini_max_output_tokens_ceiling(model)
-    current_max_tokens = min(configured_max, model_ceiling) if model_ceiling else configured_max
+    hard_cap = (
+        min(settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS, model_ceiling)
+        if model_ceiling
+        else settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS
+    )
+    current_max_tokens = min(settings.GEMINI_RESEARCH_NORMALIZATION_INITIAL_OUTPUT_TOKENS, hard_cap)
 
     # Normalization uses LOW thinking to save budget - don't reuse build_script_thinking_config
     normalization_thinking_config = None
@@ -812,6 +905,7 @@ Requirements:
                     http_status=resp.status_code,
                     attempt=attempt,
                     input_chars=len(prompt),
+                    requested_max_output_tokens=current_max_tokens,
                     error=f"HTTP {resp.status_code}: {resp.text}",
                     provider_request_id=req_id,
                 )
@@ -846,6 +940,7 @@ Requirements:
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
                     thought_tokens=th_tok,
+                    requested_max_output_tokens=current_max_tokens,
                     error=err_msg,
                     provider_request_id=req_id,
                 )
@@ -870,14 +965,15 @@ Requirements:
                     completion_tokens=c_tok,
                     total_tokens=t_tok,
                     thought_tokens=th_tok,
+                    finish_reason=finish_reason,
                     error="OUTPUT_TRUNCATED: finishReason=MAX_TOKENS",
                     provider_request_id=req_id,
                     requested_max_output_tokens=current_max_tokens,
                 )
                 interaction_recorded = True
-                # Adaptive retry: increase token budget toward model ceiling
-                if model_ceiling and current_max_tokens < model_ceiling:
-                    new_budget = min(current_max_tokens * 2, model_ceiling)
+                # Adaptive retry: increase token budget toward hard cap
+                if current_max_tokens < hard_cap:
+                    new_budget = min(current_max_tokens * 2, hard_cap)
                     logger.info(f"Increasing normalization token budget: {current_max_tokens} -> {new_budget}")
                     current_max_tokens = new_budget
                 if attempt < max_attempts:
@@ -921,6 +1017,8 @@ Requirements:
                 completion_tokens=c_tok,
                 total_tokens=t_tok,
                 thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=current_max_tokens,
                 provider_request_id=req_id,
             )
             interaction_recorded = True
@@ -943,6 +1041,9 @@ Requirements:
                     prompt_tokens=p_tok if "p_tok" in locals() else None,
                     completion_tokens=c_tok if "c_tok" in locals() else None,
                     total_tokens=t_tok if "t_tok" in locals() else None,
+                    thought_tokens=th_tok if "th_tok" in locals() else None,
+                    finish_reason=finish_reason if "finish_reason" in locals() else None,
+                    requested_max_output_tokens=current_max_tokens,
                     error=e,
                     provider_request_id=req_id if "req_id" in locals() else None,
                 )
@@ -963,6 +1064,7 @@ Requirements:
                     success=False,
                     attempt=attempt,
                     input_chars=len(prompt),
+                    requested_max_output_tokens=current_max_tokens,
                     error=e,
                 )
                 interaction_recorded = True

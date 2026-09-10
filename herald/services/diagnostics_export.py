@@ -620,6 +620,33 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             logger.warning(f"Failed to remove staging directory {staging_dir}: {e}")
 
 
+def is_terminal_archive_valid(archive_path: Path | None, job: PodcastJob) -> bool:
+    """
+    Validate that an existing terminal diagnostics archive is intact and contains
+    properly formatted failure diagnostics if the job has persisted auto diagnostics.
+    Detects missing or legacy '{}' root in failure-diagnostics.json.
+    """
+    if not archive_path or not archive_path.exists() or archive_path.stat().st_size == 0:
+        return False
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            names = zf.namelist()
+            if "manifest.json" not in names:
+                return False
+            db_diags = getattr(job, "auto_diagnostics_json", None)
+            if db_diags and isinstance(db_diags, list) and len(db_diags) > 0:
+                if "failure-diagnostics.json" not in names:
+                    return False
+                content = zf.read("failure-diagnostics.json").decode("utf-8")
+                parsed = json.loads(content)
+                # Legacy bug produced {} instead of a list
+                if isinstance(parsed, dict) or not isinstance(parsed, list):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
 def ensure_terminal_diagnostics_archive(
     job_id: str,
     expected_status: str | None = None,
@@ -663,9 +690,9 @@ def ensure_terminal_diagnostics_archive(
             return None
 
         canonical_path = get_terminal_diagnostics_path(job_id, status)
-        if canonical_path.exists() and canonical_path.stat().st_size > 0:
+        if is_terminal_archive_valid(canonical_path, job):
             logger.debug(
-                "ensure_terminal_diagnostics_archive: archive already exists for %s at %s",
+                "ensure_terminal_diagnostics_archive: archive already exists and is valid for %s at %s",
                 job_id,
                 canonical_path,
             )

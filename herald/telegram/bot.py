@@ -723,6 +723,10 @@ def handle_telegram_content_message(
                         from herald.db.state_machine import transition_job_state
                         from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
                         from herald.services.failure_diagnostics import collect_failure_diagnostics
+                        from herald.services.redaction import sanitize_error
+
+                        _, safe_err_detail = sanitize_error(e)
+                        prior_state = provisional.status
 
                         try:
                             collect_failure_diagnostics(
@@ -731,16 +735,31 @@ def handle_telegram_content_message(
                             )
                         except Exception:
                             pass
+
+                        record_job_diagnostic_event(
+                            provisional.id,
+                            "ERROR",
+                            "intake",
+                            "UNEXPECTED_INTAKE_FAILURE",
+                            f"Unexpected intake failure in provisional state: {safe_err_detail}",
+                            metadata={
+                                "prior_state": prior_state,
+                                "failure_stage": "EXTRACTION",
+                                "error_category": "INTAKE_CRASH",
+                            },
+                            db=recovery_db,
+                        )
+
                         transition_job_state(
                             recovery_db, provisional, JobState.FAILED_FINAL.value,
                             component="telegram-intake",
-                            message=f"Unhandled intake error: {redact_text(str(e))}",
+                            message=f"Unhandled intake error: {safe_err_detail}",
                             error_category="INTAKE_CRASH",
                             commit=False,
                         )
                         provisional.failed_stage = "EXTRACTION"
                         provisional.error_code = "INTAKE_CRASH"
-                        provisional.error_detail = str(e)
+                        provisional.error_detail = safe_err_detail
                         recovery_db.commit()
                         try:
                             ensure_terminal_diagnostics_archive(provisional.id, JobState.FAILED_FINAL.value)

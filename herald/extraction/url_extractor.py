@@ -23,9 +23,22 @@ class DNSResolutionError(ArticleExtractionError):
     error_category = "DNS_RESOLUTION_ERROR"
 
 
+class BlockReason:
+    PUBLIC_RETRIEVAL_BLOCK = "PUBLIC_RETRIEVAL_BLOCK"
+    RATE_LIMITED = "RATE_LIMITED"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    PAYWALL = "PAYWALL"
+    CAPTCHA = "CAPTCHA"
+    INTERSTITIAL = "INTERSTITIAL"
+
+
 class SourceAccessBlockedError(ArticleExtractionError):
     """Raised when access to an article URL is blocked by paywall, bot protection, interstitial, or publisher restrictions."""
     error_category = "SOURCE_ACCESS_BLOCKED"
+
+    def __init__(self, message: str, block_reason: str = BlockReason.PUBLIC_RETRIEVAL_BLOCK):
+        super().__init__(message)
+        self.block_reason = block_reason
 
 
 BOT_PAYWALL_MARKERS = (
@@ -42,6 +55,16 @@ BOT_PAYWALL_MARKERS = (
     "pardon our interruption",
     "blocker",
 )
+
+
+def _detect_block_reason(marker: str) -> str:
+    """Classify bot/paywall marker into structured BlockReason."""
+    m = marker.lower()
+    if "captcha" in m or "security check" in m:
+        return BlockReason.CAPTCHA
+    if "paywall" in m or "subscribe" in m:
+        return BlockReason.PAYWALL
+    return BlockReason.INTERSTITIAL
 
 
 def unmap_ipv6(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -166,6 +189,55 @@ def _is_boilerplate(text: str) -> bool:
     return False
 
 
+STRUCTURAL_BOILERPLATE_PATTERNS = (
+    "cookie",
+    "consent",
+    "gdpr",
+    "privacy-banner",
+    "login",
+    "signin",
+    "sign-in",
+    "log-in",
+    "auth-modal",
+    "subscribe",
+    "subscription",
+    "paywall",
+    "newsletter",
+    "related",
+    "recommended",
+    "recirculation",
+    "read-next",
+    "more-stories",
+    "comment",
+    "comments",
+    "discussion",
+    "disqus",
+    "author-bio",
+    "about-author",
+    "author-card",
+    "author-profile",
+    "author-info",
+)
+
+
+def _is_structural_boilerplate(tag) -> bool:
+    """Conservatively identify elements whose structural attributes denote boilerplate."""
+    if not hasattr(tag, "name") or tag.name in ("html", "body", "main", "article"):
+        return False
+    classes = tag.get("class", [])
+    if isinstance(classes, list):
+        class_str = " ".join(classes).lower()
+    else:
+        class_str = str(classes).lower()
+
+    id_str = str(tag.get("id", "")).lower()
+    role_str = str(tag.get("role", "")).lower()
+    aria_str = str(tag.get("aria-label", "")).lower()
+
+    combined = f"{class_str} {id_str} {role_str} {aria_str}"
+    return any(p in combined for p in STRUCTURAL_BOILERPLATE_PATTERNS)
+
+
 def extract_article_from_url(
     url: str,
     timeout_seconds: float = 10.0,
@@ -234,10 +306,22 @@ def extract_article_from_url(
                             retries_429 += 1
                             time.sleep(1.0 * retries_429)
                             continue
-                        raise SourceAccessBlockedError(f"Publisher returned HTTP 429 Too Many Requests after retries: {current_url}")
+                        raise SourceAccessBlockedError(
+                            f"Publisher returned HTTP 429 Too Many Requests after retries: {current_url}",
+                            block_reason=BlockReason.RATE_LIMITED,
+                        )
 
-                    if response.status_code in (401, 403):
-                        raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (HTTP {response.status_code}): {current_url}")
+                    if response.status_code == 401:
+                        raise SourceAccessBlockedError(
+                            f"Publisher authentication required (HTTP 401): {current_url}",
+                            block_reason=BlockReason.AUTH_REQUIRED,
+                        )
+
+                    if response.status_code == 403:
+                        raise SourceAccessBlockedError(
+                            f"Publisher blocked automated retrieval (HTTP 403): {current_url}",
+                            block_reason=BlockReason.PUBLIC_RETRIEVAL_BLOCK,
+                        )
 
                     if response.status_code != 200:
                         raise ArticleExtractionError(f"Server returned non-200 status code: {response.status_code}")
@@ -304,7 +388,11 @@ def extract_article_from_url(
     title_lower = title.lower()
     for marker in BOT_PAYWALL_MARKERS:
         if marker in title_lower or (marker in html_lower and len(html_text) < 5000):
-            raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (bot/paywall/interstitial marker detected): {current_url}")
+            reason = _detect_block_reason(marker)
+            raise SourceAccessBlockedError(
+                f"Publisher blocked automated retrieval ({marker} detected): {current_url}",
+                block_reason=reason,
+            )
 
     extracted_lines = []
     
@@ -319,8 +407,15 @@ def extract_article_from_url(
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript"]):
             tag.extract()
 
+        # Structural boilerplate removal (classes/ids/roles/aria-labels)
+        for el in list(soup.find_all(True)):
+            if getattr(el, "decomposed", False) or el.parent is None:
+                continue
+            if _is_structural_boilerplate(el):
+                el.decompose()
+
         main_container = soup.find("article") or soup.find("main") or soup.find("body") or soup
-        paragraphs = main_container.find_all(["p", "h1", "h2", "h3", "h4"])
+        paragraphs = main_container.find_all(["p", "h1", "h2", "h3"])
     
         for p in paragraphs:
             p_text = p.get_text().strip()
@@ -333,7 +428,11 @@ def extract_article_from_url(
         # Check if the page had paywall/interstitial clues before raising general error
         for marker in BOT_PAYWALL_MARKERS:
             if marker in html_lower:
-                raise SourceAccessBlockedError(f"Publisher blocked automated retrieval (short text with paywall marker): {current_url}")
+                reason = _detect_block_reason(marker)
+                raise SourceAccessBlockedError(
+                    f"Publisher blocked automated retrieval (short text with {marker}): {current_url}",
+                    block_reason=reason,
+                )
         raise ArticleExtractionError("Insufficient article text extracted from page (less than 100 characters).")
 
     canonical_url = current_url

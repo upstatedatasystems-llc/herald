@@ -2263,6 +2263,12 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
             query = query.filter(PodcastJob.transport == "telegram")
         jobs = query.with_for_update(skip_locked=True).all()
         for job in jobs:
+            # Re-check row state inside transaction
+            if job.status != status_val:
+                continue
+            if status_val == JobState.EXTRACTING.value and job.transport != "telegram":
+                continue
+
             last_active = job.last_heartbeat_at or job.claimed_at
             if last_active:
                 if last_active.tzinfo is None:
@@ -2286,6 +2292,44 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
                     if target_state == JobState.FAILED_FINAL.value:
                         failed_final_job_ids.append(job.id)
                     recovered_count += 1
+            elif status_val == JobState.EXTRACTING.value and job.transport == "telegram":
+                # Special recovery for provisional Telegram intake jobs with no claim and no heartbeat
+                baseline = job.updated_at or job.created_at
+                if baseline:
+                    if baseline.tzinfo is None:
+                        baseline = baseline.replace(tzinfo=UTC)
+                    if baseline < cutoff:
+                        job.claimed_at = None
+                        job.claim_owner = None
+                        job.last_heartbeat_at = None
+                        job.failed_stage = "EXTRACTION"
+                        job.error_code = "INTAKE_TIMEOUT"
+                        job.error_detail = "Provisional Telegram extraction abandoned after timeout with no heartbeat."
+                        transition_job_state(
+                            db,
+                            job,
+                            JobState.FAILED_FINAL.value,
+                            component="herald-ops-stale-recovery",
+                            message="Recovered abandoned Telegram intake EXTRACTING job after timeout",
+                            error_category="INTAKE_TIMEOUT",
+                            force=True,
+                            commit=False,
+                        )
+                        record_job_diagnostic_event(
+                            job.id,
+                            "WARNING",
+                            "intake",
+                            "STALE_INTAKE_RECOVERED",
+                            "Recovered abandoned Telegram intake EXTRACTING job to FAILED_FINAL",
+                            metadata={
+                                "prior_state": "EXTRACTING",
+                                "transport": "telegram",
+                                "baseline_age": baseline.isoformat(),
+                            },
+                            db=db,
+                        )
+                        failed_final_job_ids.append(job.id)
+                        recovered_count += 1
 
     db.commit()
     for ff_id in failed_final_job_ids:
