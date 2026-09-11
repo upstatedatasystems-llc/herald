@@ -1,15 +1,15 @@
 # Troubleshooting & Common Issues
 
-## 1. Unauthorized Sender Rejection
+## 1. Unpaired Telegram User Rejection
 
-**Symptom**: Email received but no job created in database.
-**Cause**: Sender email is not listed in `EMAIL_ALLOWED_SENDERS`.
-**Resolution**: Add sender address to `EMAIL_ALLOWED_SENDERS` in `.env` and restart containers.
+**Symptom**: User sends a URL or message to the Telegram bot but receives an unpaired notification or pairing prompt.
+**Cause**: The Telegram user account is not paired with the Herald host instance or the pairing code has expired.
+**Resolution**: Run `docker compose exec herald-worker herald-cli pairing-code` (or review host terminal during setup) to generate a secure pairing code, then send `/pair <code>` in Telegram to authorize your account.
 
 ## 2. SSRF URL Extraction Blocked
 
 **Symptom**: Job fails in state `EXTRACTING` with `SSRFVulnerabilityError`.
-**Cause**: Emailed article URL resolved to loopback, private IP range, or cloud metadata IP.
+**Cause**: Submitted article URL resolved to loopback, private IP range, or cloud metadata IP.
 **Resolution**: Verify that the URL is publicly accessible over standard HTTP/HTTPS.
 
 ## 3. Kokoro TTS Synthesis Timeout
@@ -18,11 +18,11 @@
 **Cause**: Kokoro container is overwhelmed or missing model files on host.
 **Resolution**: Run `make smoke-test` to inspect Kokoro model files and container health.
 
-## 4. Google Drive OAuth Token Expiration
+## 4. Telegram Delivery Failure & Attachment Limits
 
-**Symptom**: Job fails in state `UPLOADING`.
-**Cause**: Google OAuth refresh token expired or was revoked.
-**Resolution**: Re-authenticate the Google Drive OAuth credential in n8n UI.
+**Symptom**: Job succeeds in synthesis but delivery fails with Telegram error.
+**Cause**: Audio payload exceeded Telegram's bot upload size limit (50 MB) or bot network connection timed out.
+**Resolution**: Check worker logs in `logs/herald-worker.log`. For large podcast files, Herald automatically verifies attachment sizes and chunks or streams audio within Telegram's payload constraints.
 
 ## 5. AI Provider Chain Failover & Diagnostics
 

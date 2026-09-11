@@ -39,21 +39,6 @@ def get_ai_provider(provider_name: str | None = None, model: str | None = None) 
     return create_provider(prov_name, model_id=model)
 
 
-def get_research_provider(provider_name: str | None = None, model: str | None = None) -> AIProvider | None:
-    """
-    Return a research provider capable of Google Search Grounding for legacy callers.
-    Defaults to RESEARCH_PROVIDER setting (default 'gemini').
-    """
-    r_prov = (provider_name or getattr(settings, "RESEARCH_PROVIDER", "gemini") or "").lower().strip()
-    if r_prov in ("", "none", "literal"):
-        return None
-
-    prov = create_provider(r_prov, model_id=model)
-    if prov and prov.capabilities.research_grounding:
-        return prov
-    return None
-
-
 def reset_ai_provider() -> None:
     """Reset the cached global AI provider instance."""
     global _global_provider

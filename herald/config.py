@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     HERALD_TTS_PER_JOB: int | None = None
     HERALD_FFMPEG_CONCURRENCY: int | None = None
     HERALD_FFMPEG_TIMEOUT_SECONDS: int = 300
-    HERALD_N8N_CONCURRENCY: int | None = None
     HERALD_TTS_SLOT_BASE: int = 920000
 
     # Database
@@ -89,12 +88,6 @@ class Settings(BaseSettings):
     KOKORO_HEALTH_GRACE_SECONDS: int = 120
     KOKORO_SYNTHESIS_TIMEOUT_SECONDS: int = 180
 
-    # Event-Driven Delivery Nudge
-    ENABLE_EVENT_DRIVEN_DELIVERY: bool = True
-    DELIVERY_NUDGE_WEBHOOK_URL: str = "http://n8n:5678/webhook/herald-audio-ready"
-    DELIVERY_NUDGE_SECRET: str = ""
-    DELIVERY_NUDGE_TIMEOUT_SECONDS: float = 3.0
-
     # ETA Calculation
     NARRATION_WORDS_PER_MINUTE: float = 136.0
     TTS_ESTIMATED_REALTIME_FACTOR: float = 2.4
@@ -122,8 +115,6 @@ class Settings(BaseSettings):
     AI_PROVIDER: str = "gemini"  # "gemini", "groq", "openrouter", "mistral", "cloudflare", "literal", "anthropic", "openai", "ollama"
     AI_SECONDARY_PROVIDER: str | None = None
     AI_TERTIARY_PROVIDER: str | None = None
-    # DEPRECATED LEGACY: Modern research uses snapshotted provider chain
-    RESEARCH_PROVIDER: str = "gemini"
 
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
@@ -188,12 +179,7 @@ class Settings(BaseSettings):
         return False
 
     def is_research_configured(self) -> bool:
-        r_prov = (self.RESEARCH_PROVIDER or "").lower().strip()
-        if r_prov in ("", "none", "literal"):
-            return False
-        if r_prov == "gemini":
-            return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
-        return False
+        return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
 
     def get_default_mode(self) -> str:
         if self.is_ai_configured():
@@ -229,7 +215,6 @@ class Settings(BaseSettings):
             tts_global_slots=self.HERALD_TTS_GLOBAL_SLOTS,
             tts_per_job=self.HERALD_TTS_PER_JOB,
             ffmpeg_concurrency=self.HERALD_FFMPEG_CONCURRENCY,
-            n8n_concurrency=self.HERALD_N8N_CONCURRENCY,
         )
 
 

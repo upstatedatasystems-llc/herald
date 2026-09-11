@@ -149,7 +149,7 @@ def test_parallel_chunk_processing_out_of_order_and_ordered_assembly(
     ]
 
     mock_kokoro = MockKokoroClient()
-    config = ConcurrencyConfig("auto", 4, 2, 2, 4, 2, 1, 2)
+    config = ConcurrencyConfig("auto", 4, 2, 2, 4, 2, 1)
     semaphores = get_semaphores(config)
 
     ordered_paths = process_tts_chunks_parallel(

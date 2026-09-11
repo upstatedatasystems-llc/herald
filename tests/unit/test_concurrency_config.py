@@ -22,7 +22,6 @@ def test_profile_single_forced():
     assert cfg.tts_global_slots == 1
     assert cfg.tts_per_job == 1
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 1
 
 
 def test_profile_auto_1_cpu():
@@ -32,7 +31,6 @@ def test_profile_auto_1_cpu():
     assert cfg.tts_global_slots == 1
     assert cfg.tts_per_job == 1
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 1
 
 
 def test_profile_auto_2_cpu():
@@ -42,7 +40,6 @@ def test_profile_auto_2_cpu():
     assert cfg.tts_global_slots == 2
     assert cfg.tts_per_job == 2
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 1
 
 
 def test_profile_auto_4_cpu():
@@ -52,7 +49,6 @@ def test_profile_auto_4_cpu():
     assert cfg.tts_global_slots == 3
     assert cfg.tts_per_job == 2
     assert cfg.ffmpeg_concurrency == 1
-    assert cfg.n8n_concurrency == 1
 
 
 def test_env_var_overrides():
@@ -89,7 +85,6 @@ def test_semaphores_acquisition():
         tts_global_slots=3,
         tts_per_job=2,
         ffmpeg_concurrency=1,
-        n8n_concurrency=2,
     )
     sem = get_semaphores(cfg)
     assert sem.global_tts.acquire(blocking=False) is True

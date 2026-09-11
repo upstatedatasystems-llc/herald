@@ -9,9 +9,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from apps.telegram_bot.main import TELEGRAM_BOT_COMMANDS_2A
-from apps.worker.main import send_delivery_nudge, should_send_delivery_nudge
 from herald.config import settings
-from herald.db.models import Base, PodcastJob, TelegramPairingCode, TelegramUser
+from herald.db.models import Base, TelegramPairingCode, TelegramUser
 from herald.telegram.auth import (
     generate_pairing_code,
     verify_and_claim_pairing_code,
@@ -199,65 +198,6 @@ def test_set_my_commands_payload_validation():
     with pytest.raises(ValueError, match="Invalid Telegram command name"):
         client.set_my_commands([{"command": "ai-check", "description": "Invalid hyphen command"}])
 
-
-def test_production_worker_delivery_nudge_logic(monkeypatch):
-    """Test actual apps.worker.main delivery nudge helper functions against real conditions."""
-    posted_payloads = []
-
-    class MockResponse:
-        status_code = 200
-
-    def mock_post(url, *args, **kwargs):
-        posted_payloads.append((url, kwargs.get("json")))
-        return MockResponse()
-
-    monkeypatch.setattr("httpx.Client.post", mock_post)
-    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True)
-
-    telegram_job = PodcastJob(
-        id="tg-job-123",
-        transport="telegram",
-        status="AUDIO_READY",
-        source_hash="hash1",
-        source_text="text",
-    )
-    email_job = PodcastJob(
-        id="email-job-456",
-        transport="email",
-        status="AUDIO_READY",
-        source_hash="hash2",
-        source_text="text",
-    )
-
-    # 1. Telegram job -> should_send returns False, send_delivery_nudge returns False without POSTing
-    assert should_send_delivery_nudge(telegram_job) is False
-    res_tg = send_delivery_nudge(telegram_job)
-    assert res_tg is False
-    assert len(posted_payloads) == 0
-
-    # 2. Email job with ENABLE_EVENT_DRIVEN_DELIVERY=True -> should_send returns True, POST occurs
-    assert should_send_delivery_nudge(email_job) is True
-    res_email = send_delivery_nudge(email_job)
-    assert res_email is True
-    assert len(posted_payloads) == 1
-    assert posted_payloads[0][1] == {"job_id": "email-job-456", "event": "AUDIO_READY"}
-
-    # 3. Email job with ENABLE_EVENT_DRIVEN_DELIVERY=False -> should_send returns False
-    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", False)
-    assert should_send_delivery_nudge(email_job) is False
-    res_disabled = send_delivery_nudge(email_job)
-    assert res_disabled is False
-    assert len(posted_payloads) == 1  # No new POST
-
-    # 4. Network failure is handled non-fatally
-    monkeypatch.setattr(settings, "ENABLE_EVENT_DRIVEN_DELIVERY", True)
-
-    def mock_post_fail(*args, **kwargs):
-        raise RuntimeError("Network unreachable")
-
-    monkeypatch.setattr("httpx.Client.post", mock_post_fail)
-    res_fail = send_delivery_nudge(email_job)
-    assert res_fail is False  # Does not raise RuntimeError
 
 
 def test_send_document_dynamic_mime_handling(tmp_path, monkeypatch):

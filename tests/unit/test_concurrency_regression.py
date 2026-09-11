@@ -39,7 +39,6 @@ def test_process_global_semaphore_identity():
         tts_global_slots=3,
         tts_per_job=2,
         ffmpeg_concurrency=1,
-        n8n_concurrency=1,
     )
     sem1 = initialize_semaphores(config)
     sem2 = get_semaphores()
@@ -253,4 +252,3 @@ def test_single_profile_resolves_all_ones():
     assert config.tts_global_slots == 1
     assert config.tts_per_job == 1
     assert config.ffmpeg_concurrency == 1
-    assert config.n8n_concurrency == 1

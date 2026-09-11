@@ -41,7 +41,7 @@ echo "========================================================"
 echo ""
 
 # 1. Verify .env Existence and Permissions (0600)
-echo "[1/9] Checking configuration file and permissions..."
+echo "[1/8] Checking configuration file and permissions..."
 if [ ! -f "$ENV_FILE" ]; then
     report_fail "Configuration file '${ENV_FILE}' not found."
 else
@@ -74,13 +74,12 @@ get_env_key() {
 }
 
 # 2. Check for Placeholder Secrets and Provider Configuration
-echo "[2/9] Auditing credentials and AI provider consistency..."
+echo "[2/8] Auditing credentials and AI provider consistency..."
 KNOWN_PLACEHOLDERS=(
     "your-telegram-bot-token-from-botfather"
     "herald_secure_password"
     "change-this-to-a-secure-random-db-password"
     "change-this-to-a-secure-random-api-key"
-    "default_n8n_encryption_key_32c"
 )
 
 TG_TOKEN=$(get_env_key "TELEGRAM_BOT_TOKEN")
@@ -128,79 +127,125 @@ else
     fi
 fi
 
-N8N_KEY=$(get_env_key "N8N_ENCRYPTION_KEY")
-if [ -n "$N8N_KEY" ]; then
-    is_placeholder=false
-    for p in "${KNOWN_PLACEHOLDERS[@]}"; do
-        if [ "$N8N_KEY" = "$p" ]; then is_placeholder=true; break; fi
-    done
-    if [ "$is_placeholder" = true ]; then
-        report_fail "N8N_ENCRYPTION_KEY matches a known default placeholder."
+audit_provider_credentials() {
+    local prov="$1"
+    local slot="$2"
+
+    if [ -z "$prov" ]; then
+        return 0
+    fi
+
+    case "$prov" in
+        literal|none)
+            report_pass "[${slot}] Literal mode active (no external AI provider key required)."
+            ;;
+        gemini)
+            local g_key
+            g_key=$(get_env_key "GEMINI_API_KEY")
+            if [ -z "$g_key" ]; then
+                report_fail "[${slot}] AI provider is 'gemini' but GEMINI_API_KEY is missing."
+            else
+                report_pass "[${slot}] Gemini API credentials configured."
+            fi
+            ;;
+        groq)
+            local gr_key
+            gr_key=$(get_env_key "GROQ_API_KEY")
+            if [ -z "$gr_key" ]; then
+                report_fail "[${slot}] AI provider is 'groq' but GROQ_API_KEY is missing."
+            else
+                report_pass "[${slot}] Groq API credentials configured."
+            fi
+            ;;
+        openrouter)
+            local or_key
+            or_key=$(get_env_key "OPENROUTER_API_KEY")
+            if [ -z "$or_key" ]; then
+                report_fail "[${slot}] AI provider is 'openrouter' but OPENROUTER_API_KEY is missing."
+            else
+                report_pass "[${slot}] OpenRouter API credentials configured."
+            fi
+            ;;
+        mistral)
+            local m_key
+            m_key=$(get_env_key "MISTRAL_API_KEY")
+            if [ -z "$m_key" ]; then
+                report_fail "[${slot}] AI provider is 'mistral' but MISTRAL_API_KEY is missing."
+            else
+                report_pass "[${slot}] Mistral API credentials configured."
+            fi
+            ;;
+        cloudflare)
+            local cf_t cf_a
+            cf_t=$(get_env_key "CLOUDFLARE_API_TOKEN")
+            cf_a=$(get_env_key "CLOUDFLARE_ACCOUNT_ID")
+            if [ -z "$cf_t" ] || [ -z "$cf_a" ]; then
+                report_fail "[${slot}] Cloudflare API Token or Account ID is missing."
+            else
+                report_pass "[${slot}] Cloudflare Workers AI credentials configured."
+            fi
+            ;;
+        openai)
+            local oa_key
+            oa_key=$(get_env_key "OPENAI_API_KEY")
+            if [ -z "$oa_key" ]; then
+                report_fail "[${slot}] AI provider is 'openai' but OPENAI_API_KEY is missing."
+            else
+                report_pass "[${slot}] OpenAI API credentials configured."
+            fi
+            ;;
+        anthropic)
+            local ant_key
+            ant_key=$(get_env_key "ANTHROPIC_API_KEY")
+            if [ -z "$ant_key" ]; then
+                report_fail "[${slot}] AI provider is 'anthropic' but ANTHROPIC_API_KEY is missing."
+            else
+                report_pass "[${slot}] Anthropic API credentials configured."
+            fi
+            ;;
+        ollama)
+            local ol_url
+            ol_url=$(get_env_key "OLLAMA_BASE_URL")
+            if [ -z "$ol_url" ]; then
+                report_fail "[${slot}] AI provider is 'ollama' but OLLAMA_BASE_URL is missing."
+            else
+                report_pass "[${slot}] Ollama base URL configured."
+            fi
+            ;;
+        *)
+            report_fail "[${slot}] Unknown AI provider '${prov}' configured in ${ENV_FILE}."
+            ;;
+    esac
+}
+
+AI_PRIMARY=$(get_env_key "AI_PROVIDER")
+AI_PRIMARY=${AI_PRIMARY:-"literal"}
+audit_provider_credentials "$AI_PRIMARY" "Primary"
+
+AI_SEC=$(get_env_key "AI_SECONDARY_PROVIDER")
+if [ -n "$AI_SEC" ]; then
+    if [ "$AI_SEC" = "literal" ] || [ "$AI_SEC" = "none" ]; then
+        report_fail "[Secondary] Literal is not allowed as Secondary provider."
+    elif [ "$AI_SEC" = "$AI_PRIMARY" ]; then
+        report_fail "[Secondary] Duplicate provider '${AI_SEC}' matches Primary."
     else
-        report_pass "N8N_ENCRYPTION_KEY is present and configured."
+        audit_provider_credentials "$AI_SEC" "Secondary"
     fi
 fi
 
-
-
-
-AI_PROV=$(get_env_key "AI_PROVIDER")
-AI_PROV=${AI_PROV:-"none"}
-if [ "$AI_PROV" = "literal" ]; then AI_PROV="none"; fi
-
-case "$AI_PROV" in
-    gemini)
-        G_KEY=$(get_env_key "GEMINI_API_KEY")
-        if [ -z "$G_KEY" ]; then report_fail "AI_PROVIDER is 'gemini' but GEMINI_API_KEY is missing."; else report_pass "Gemini API credentials configured."; fi
-        ;;
-    groq)
-        GR_KEY=$(get_env_key "GROQ_API_KEY")
-        if [ -z "$GR_KEY" ]; then report_fail "AI_PROVIDER is 'groq' but GROQ_API_KEY is missing."; else report_pass "Groq API credentials configured."; fi
-        ;;
-    openrouter)
-        OR_KEY=$(get_env_key "OPENROUTER_API_KEY")
-        if [ -z "$OR_KEY" ]; then report_fail "AI_PROVIDER is 'openrouter' but OPENROUTER_API_KEY is missing."; else report_pass "OpenRouter API credentials configured."; fi
-        ;;
-    mistral)
-        M_KEY=$(get_env_key "MISTRAL_API_KEY")
-        if [ -z "$M_KEY" ]; then report_fail "AI_PROVIDER is 'mistral' but MISTRAL_API_KEY is missing."; else report_pass "Mistral API credentials configured."; fi
-        ;;
-    cloudflare)
-        CF_T=$(get_env_key "CLOUDFLARE_API_TOKEN")
-        CF_A=$(get_env_key "CLOUDFLARE_ACCOUNT_ID")
-        if [ -z "$CF_T" ] || [ -z "$CF_A" ]; then report_fail "Cloudflare API Token or Account ID is missing."; else report_pass "Cloudflare Workers AI credentials configured."; fi
-        ;;
-    none)
-        report_pass "Literal mode active (no external AI provider key required)."
-        ;;
-    *)
-        report_fail "Unknown AI_PROVIDER '${AI_PROV}' configured in ${ENV_FILE}."
-        ;;
-esac
-
-# Validate RESEARCH_PROVIDER
-RES_PROV=$(get_env_key "RESEARCH_PROVIDER")
-RES_PROV=${RES_PROV:-"none"}
-
-case "$RES_PROV" in
-    none|"")
-        report_pass "Research provider is disabled (no Gemini research key required)."
-        ;;
-    gemini)
-        G_RES_K=$(get_env_key "GEMINI_API_KEY")
-        if [ -z "$G_RES_K" ]; then
-            report_fail "RESEARCH_PROVIDER is 'gemini' but GEMINI_API_KEY is missing.";
-        else
-            report_pass "Gemini Research credentials configured.";
-        fi
-        ;;
-    *)
-        report_fail "Unsupported RESEARCH_PROVIDER '${RES_PROV}' (only 'gemini' or 'none' supported)."
-        ;;
-esac
+AI_TERT=$(get_env_key "AI_TERTIARY_PROVIDER")
+if [ -n "$AI_TERT" ]; then
+    if [ "$AI_TERT" = "literal" ] || [ "$AI_TERT" = "none" ]; then
+        report_fail "[Tertiary] Literal is not allowed as Tertiary provider."
+    elif [ "$AI_TERT" = "$AI_PRIMARY" ] || [ "$AI_TERT" = "$AI_SEC" ]; then
+        report_fail "[Tertiary] Duplicate provider '${AI_TERT}' in failover chain."
+    else
+        audit_provider_credentials "$AI_TERT" "Tertiary"
+    fi
+fi
 
 # 3. Check Default Service States
-echo "[3/9] Verifying default container service states..."
+echo "[3/8] Verifying default container service states..."
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
     report_fail "Docker Engine or Docker Compose v2 is not available."
 else
@@ -246,7 +291,7 @@ else
 fi
 
 # 4. Check Migration Container Status
-echo "[4/9] Verifying schema migration container completion..."
+echo "[4/8] Verifying schema migration container completion..."
 MIG_STATUS=$(docker compose ps -a herald-migration --format "{{.Status}}" 2>/dev/null || true)
 if echo "$MIG_STATUS" | grep -qi "Exited (0)"; then
     report_pass "Migration container (herald-migration) exited successfully with code 0."
@@ -255,7 +300,7 @@ else
 fi
 
 # 5. Authoritative Live Alembic Revision Parity Check (Dynamic Head)
-echo "[5/9] Verifying database schema matches dynamic Alembic head..."
+echo "[5/8] Verifying database schema matches dynamic Alembic head..."
 if command -v docker >/dev/null 2>&1; then
     HEADS_OUT=$(docker compose run --rm --no-deps --entrypoint alembic herald-migration heads 2>/dev/null || true)
     # Extract revision IDs (leading token on revision line)
@@ -281,29 +326,8 @@ else
     report_fail "Database schema revision mismatch (Live: '${LIVE_REV}', Expected: '${DYNAMIC_HEAD}')."
 fi
 
-# 6. Verify Default Profile Isolation (n8n and herald-api NOT running)
-echo "[6/9] Verifying default profile isolation (optional services disabled)..."
-ALLOW_LEGACY="${HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES:-0}"
-RUNNING_SERVICES=$(docker compose ps --services --filter "status=running" 2>/dev/null || true)
-
-if [ "$ALLOW_LEGACY" = "1" ] || [ "$ALLOW_LEGACY" = "true" ]; then
-    report_pass "Optional profile isolation check bypassed (HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=${ALLOW_LEGACY})."
-else
-    if echo "$RUNNING_SERVICES" | grep -q "^n8n$"; then
-        report_fail "Optional service 'n8n' is running in default installation profile. Stop n8n or set HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=1."
-    else
-        report_pass "Optional service 'n8n' is not running (default profile)."
-    fi
-
-    if echo "$RUNNING_SERVICES" | grep -q "^herald-api$"; then
-        report_fail "Optional service 'herald-api' is running in default installation profile. Stop herald-api or set HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=1."
-    else
-        report_pass "Optional service 'herald-api' is not running (default profile)."
-    fi
-fi
-
-# 7. Check Runtime Disk Space Headroom (HERALD_MIN_DISK_MB runtime minimum)
-echo "[7/9] Verifying runtime disk headroom..."
+# 6. Check Runtime Disk Space Headroom (HERALD_MIN_DISK_MB runtime minimum)
+echo "[6/8] Verifying runtime disk headroom..."
 MIN_DISK_MB="${HERALD_MIN_DISK_MB:-500}"
 AVAIL_KB=$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
 AVAIL_MB=$((AVAIL_KB / 1024))
@@ -313,8 +337,8 @@ else
     report_fail "Available disk space (${AVAIL_MB} MB) is below runtime threshold (${MIN_DISK_MB} MB)."
 fi
 
-# 8. Verify Voice Preview Cache and Manifest Parity
-echo "[8/9] Verifying voice preview cache and manifest completeness..."
+# 7. Verify Voice Preview Cache and Manifest Parity
+echo "[7/8] Verifying voice preview cache and manifest completeness..."
 if [ "${HERALD_TEST_ALLOW_VOICES:-0}" = "1" ]; then
     report_pass "Voice preview cache check bypassed for test harness."
 elif docker compose ps --services --filter "status=running" 2>/dev/null | grep -q "^herald-worker$"; then
@@ -328,8 +352,8 @@ else
     report_fail "Cannot verify voice preview cache because herald-worker is not running."
 fi
 
-# 9. Verify Persistent Logging Directory Layout and Container Log Health
-echo "[9/9] Verifying persistent logging layout and container log accessibility..."
+# 8. Verify Persistent Logging Directory Layout and Container Log Health
+echo "[8/8] Verifying persistent logging layout and container log accessibility..."
 if [ "${HERALD_TEST_ALLOW_LOGS:-0}" = "1" ] || [ "${HERALD_TEST_ALLOW_PERMS:-0}" = "1" ]; then
     report_pass "Logging layout check bypassed for test harness."
 else
@@ -387,7 +411,7 @@ fi
 echo ""
 echo "========================================================"
 if [ "$FAILURES" -eq 0 ]; then
-    echo "🎉 Acceptance Validation Passed: All 9 checks succeeded."
+    echo "🎉 Acceptance Validation Passed: All 8 checks succeeded."
     echo "========================================================"
     exit 0
 else

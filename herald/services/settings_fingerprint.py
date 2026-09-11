@@ -68,9 +68,16 @@ def get_job_generation_settings(job: PodcastJob) -> dict[str, Any]:
         float(job.custom_speed or job.kokoro_speed or getattr(settings, "KOKORO_SPEED", 1.0)),
         2,
     )
-    depth = (job.research_depth or "").lower().strip() if mode == RequestMode.RESEARCH.value else None
-    prov = getattr(job, "ai_provider", None) or ("gemini" if getattr(job, "gemini_model", None) else getattr(settings, "AI_PROVIDER", "none"))
-    mod = getattr(job, "ai_model", None) or getattr(job, "gemini_model", None)
+    prov = getattr(job, "ai_provider", None)
+    mod = getattr(job, "ai_model", None)
+    if not prov or not mod:
+        from herald.ai.legacy_compat import resolve_legacy_job_identity
+
+        leg_prov, leg_mod = resolve_legacy_job_identity(job)
+        prov = prov or leg_prov or getattr(settings, "AI_PROVIDER", "none")
+        mod = mod or leg_mod
+
+    depth = (getattr(job, "research_depth", None) or "").lower().strip() if mode == RequestMode.RESEARCH.value else None
 
     ret: dict[str, Any] = {
         "mode": mode,

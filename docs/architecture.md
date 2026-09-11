@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Herald is a podcast automation system optimized for single-core cloud deployments and edge servers. It turns articles, newsletters, notes, and documents into high-quality spoken audio delivered through Telegram (with optional legacy email/n8n support).
+Herald is a podcast automation system optimized for single-core cloud deployments and edge servers. It turns articles, newsletters, notes, and documents into high-quality spoken audio delivered through Telegram.
 
 Herald operates on a **strictly vendor-neutral AI architecture** supporting 9 providers:
 - **Google Gemini** (Full support: Brief, Standard, Google Search Grounded Research, URL Context)
@@ -83,7 +83,7 @@ Herald operates on a **strictly vendor-neutral AI architecture** supporting 9 pr
   - Token resolution enforces strict collision rejection: ambiguous matches across models are rejected.
 
 ### 4. Vendor-Neutral Core Orchestration & Diagnostic Safety
-- Core business logic (`herald/core/pipeline.py`, `apps/api/main.py`, `apps/worker/main.py`) contains **zero** direct imports of vendor-specific SDKs or provider modules.
+- Core business logic (`herald/core/pipeline.py`, `apps/worker/main.py`) contains **zero** direct imports of vendor-specific SDKs or provider modules.
 - Active jobs construct providers strictly from snapshotted candidate specifications rather than global mutable singletons.
 - All interactions flow through normalized interfaces: `execute_with_failover`, `resolve_job_settings`, and typed `AIProviderError` exceptions preserving the normalized error taxonomy (`error.category`).
 - **Safe Failover Details**: Diagnostic events and error messages redact credentials/tokens, avoid dumping full response payloads or excerpts, and cap detail length to prevent secret leakage.

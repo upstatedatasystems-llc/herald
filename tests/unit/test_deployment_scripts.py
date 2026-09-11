@@ -515,12 +515,12 @@ def test_acceptance_location_independent_from_outside_repo(tmp_path):
         cwd=outside_dir,
     )
     assert res.returncode == 0
-    assert "Acceptance Validation Passed: All 9 checks succeeded." in res.stdout
+    assert "Acceptance Validation Passed: All 8 checks succeeded." in res.stdout
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")
-def test_acceptance_detects_optional_profile_running_unless_allowed(tmp_path):
-    """Verify install_acceptance.sh fails when n8n is running in default profile, but passes with HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=1."""
+def test_acceptance_validates_multi_provider_chain_credentials(tmp_path):
+    """Verify install_acceptance.sh validates multi-provider chain candidates and fails on missing credentials or invalid chain configurations."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(parents=True)
     (fake_bin / "docker").write_text(
@@ -532,7 +532,6 @@ def test_acceptance_detects_optional_profile_running_unless_allowed(tmp_path):
         "        if [ \"$3\" = \"-a\" ]; then echo \"Exited (0)\"; exit 0; fi\n"
         "        echo \"herald-worker\"\n"
         "        echo \"telegram-bot\"\n"
-        "        echo \"n8n\"\n"
         "        exit 0\n"
         "    fi\n"
         "    if [ \"$2\" = \"run\" ]; then echo '014_diag_events'; exit 0; fi\n"
@@ -545,15 +544,15 @@ def test_acceptance_detects_optional_profile_running_unless_allowed(tmp_path):
     )
 
     env_file = tmp_path / ".env"
+    # Case 1: Primary provider missing credentials
     env_file.write_text(
         'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
         'POSTGRES_PASSWORD="custom_secure_pw_98765"\n'
         'HERALD_API_KEY="custom_herald_key_12345"\n'
-        'AI_PROVIDER="none"\n'
+        'AI_PROVIDER="groq"\n'
     )
 
-    # By default, fails because n8n is running
-    res_fail = run_script(
+    res_fail_primary = run_script(
         ACCEPTANCE_SCRIPT_PATH,
         env={
             "HERALD_ENV_FILE": str(env_file),
@@ -561,21 +560,52 @@ def test_acceptance_detects_optional_profile_running_unless_allowed(tmp_path):
             "PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
         },
     )
-    assert res_fail.returncode != 0
-    assert "Optional service 'n8n' is running in default installation profile" in res_fail.stderr
+    assert res_fail_primary.returncode != 0
+    assert "[Primary] AI provider is 'groq' but GROQ_API_KEY is missing." in res_fail_primary.stderr
 
-    # With bypass flag, passes
+    # Case 2: Secondary provider is literal (disallowed)
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_98765"\n'
+        'HERALD_API_KEY="custom_herald_key_12345"\n'
+        'AI_PROVIDER="groq"\n'
+        'GROQ_API_KEY="gsk_test_123"\n'
+        'AI_SECONDARY_PROVIDER="literal"\n'
+    )
+    res_fail_sec = run_script(
+        ACCEPTANCE_SCRIPT_PATH,
+        env={
+            "HERALD_ENV_FILE": str(env_file),
+            "HERALD_TEST_ALLOW_PERMS": "1",
+            "PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+    )
+    assert res_fail_sec.returncode != 0
+    assert "[Secondary] Literal is not allowed as Secondary provider." in res_fail_sec.stderr
+
+    # Case 3: Complete valid chain (Primary + Secondary + Tertiary) passes
+    env_file.write_text(
+        'TELEGRAM_BOT_TOKEN="123456:ABC-DEF"\n'
+        'POSTGRES_PASSWORD="custom_secure_pw_98765"\n'
+        'HERALD_API_KEY="custom_herald_key_12345"\n'
+        'AI_PROVIDER="groq"\n'
+        'GROQ_API_KEY="gsk_test_123"\n'
+        'AI_SECONDARY_PROVIDER="gemini"\n'
+        'GEMINI_API_KEY="AIzaSyTestKey"\n'
+        'AI_TERTIARY_PROVIDER="openrouter"\n'
+        'OPENROUTER_API_KEY="sk-or-test"\n'
+    )
     res_pass = run_script(
         ACCEPTANCE_SCRIPT_PATH,
         env={
             "HERALD_ENV_FILE": str(env_file),
             "HERALD_TEST_ALLOW_PERMS": "1",
-            "HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES": "1",
             "PATH": f"{fake_bin.as_posix()}{os.pathsep}{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
         },
     )
     assert res_pass.returncode == 0
-    assert "Optional profile isolation check bypassed" in res_pass.stdout
+    assert "Acceptance Validation Passed: All 8 checks succeeded." in res_pass.stdout
+
 
 
 @pytest.mark.skipif(BASH_EXE is None, reason="Bash shell not available on host")

@@ -175,8 +175,10 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     for r in m_rows:
         stage_metrics_map[r.stage] = r
 
+    is_email_job = getattr(job, "transport", "telegram") == "email"
+
     lines = [
-        "# Herald Episode Details",
+        f"# Herald Episode Details — {job.id}",
         "",
         "## Episode",
         f"- **Title**: {job.custom_title or script.get('episode_title', 'Herald Episode')}",
@@ -292,7 +294,6 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     if stage_metrics_map:
         lines.extend(["", "### Performance Metrics Summary"])
         metric_order = [
-            ("EMAIL_DETECTION_WAIT", "Email Detection Wait"),
             ("INTAKE_TOTAL", "Intake Total"),
             ("URL_EXTRACTION", "URL Extraction"),
             ("AI_SCRIPT", "AI Script Generation"),
@@ -308,12 +309,20 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             ("TTS_CHUNKING", "TTS Chunking"),
             ("TTS_TOTAL", "TTS Total Synthesis"),
             ("FFMPEG_ENCODING", "FFmpeg Assembly"),
-            ("DELIVERY_DISPATCH_WAIT", "Delivery Dispatch Wait"),
-            ("DRIVE_AUDIO_UPLOAD", "Drive Audio Upload"),
-            ("DRIVE_DETAILS_UPLOAD", "Drive Details Upload"),
-            ("EMAIL_DELIVERY", "Email Delivery"),
-            ("DRIVE_DETAILS_FINALIZE", "Drive Details In-Place Finalize"),
         ]
+        if is_email_job:
+            metric_order = [("EMAIL_DETECTION_WAIT", "Email Detection Wait")] + metric_order + [
+                ("DELIVERY_DISPATCH_WAIT", "Delivery Dispatch Wait"),
+                ("DRIVE_AUDIO_UPLOAD", "Drive Audio Upload"),
+                ("DRIVE_DETAILS_UPLOAD", "Drive Details Upload"),
+                ("EMAIL_DELIVERY", "Email Delivery"),
+                ("DRIVE_DETAILS_FINALIZE", "Drive Details In-Place Finalize"),
+            ]
+        else:
+            metric_order.extend([
+                ("DELIVERY_DISPATCH_WAIT", "Delivery Dispatch Wait"),
+                ("TELEGRAM_DELIVERY", "Telegram Delivery"),
+            ])
         for stage_key, label in metric_order:
             if stage_key in stage_metrics_map:
                 m = stage_metrics_map[stage_key]
@@ -449,10 +458,14 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
             timeline_entries.append(f"- **{created_iso}** — Job received (Intake)")
         if job.audio_ready_at:
             timeline_entries.append(f"- **{audio_ready_iso}** — Audio synthesis completed")
-        if job.drive_uploaded_at:
-            timeline_entries.append(f"- **{job.drive_uploaded_at.isoformat()}** — Google Drive artifacts uploaded")
-        if job.delivered_at:
-            timeline_entries.append(f"- **{job.delivered_at.isoformat()}** — Completion email delivered")
+        if is_email_job:
+            if job.drive_uploaded_at:
+                timeline_entries.append(f"- **{job.drive_uploaded_at.isoformat()}** — Google Drive artifacts uploaded")
+            if job.delivered_at:
+                timeline_entries.append(f"- **{job.delivered_at.isoformat()}** — Completion email delivered")
+        else:
+            if job.delivered_at:
+                timeline_entries.append(f"- **{job.delivered_at.isoformat()}** — Telegram audio delivered")
         if job.completed_at:
             timeline_entries.append(f"- **{completed_iso}** — Job state COMPLETE")
 
@@ -475,14 +488,26 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         "",
         "## Technical Identifiers",
         f"- **Job ID**: `{job.id}`",
-        f"- **Gmail Message ID**: `{job.gmail_message_id or 'N/A'}`",
-        f"- **Gmail Thread ID**: `{job.gmail_thread_id or 'N/A'}`",
-        f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
-        f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
-        f"- **Drive Job Key**: `{job.drive_job_key or 'N/A'}`",
-        f"- **Audio Drive File ID**: `{job.drive_file_id or 'N/A'}`",
-        f"- **Details Drive File ID**: `{job.details_drive_file_id or 'N/A'}`",
     ])
+    if is_email_job:
+        lines.extend([
+            f"- **Gmail Message ID**: `{job.gmail_message_id or 'N/A'}`",
+            f"- **Gmail Thread ID**: `{job.gmail_thread_id or 'N/A'}`",
+            f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
+            f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
+            f"- **Drive Job Key**: `{job.drive_job_key or 'N/A'}`",
+            f"- **Audio Drive File ID**: `{job.drive_file_id or 'N/A'}`",
+            f"- **Details Drive File ID**: `{job.details_drive_file_id or 'N/A'}`",
+        ])
+    else:
+        lines.extend([
+            f"- **Transport**: `{getattr(job, 'transport', 'telegram') or 'telegram'}`",
+            f"- **Telegram Chat ID**: `{getattr(job, 'telegram_chat_id', None) or 'N/A'}`",
+            f"- **Telegram User ID**: `{getattr(job, 'telegram_user_id', None) or 'N/A'}`",
+            f"- **Telegram Message ID**: `{getattr(job, 'telegram_message_id', None) or 'N/A'}`",
+            f"- **Source Hash**: `{job.source_hash or 'N/A'}`",
+            f"- **Audio SHA-256**: `{job.audio_sha256 or 'N/A'}`",
+        ])
 
     content = "\n".join(lines)
     tmp_path = details_path.with_suffix(".md.tmp")

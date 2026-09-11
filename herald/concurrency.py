@@ -85,7 +85,6 @@ class ConcurrencyConfig:
     tts_global_slots: int
     tts_per_job: int
     ffmpeg_concurrency: int
-    n8n_concurrency: int
 
     def log_diagnostics(self):
         logger.info("=== Herald Concurrency Profile Diagnostics ===")
@@ -96,7 +95,6 @@ class ConcurrencyConfig:
         logger.info(f"Global TTS slots: {self.tts_global_slots}")
         logger.info(f"TTS per job: {self.tts_per_job}")
         logger.info(f"FFmpeg concurrency: {self.ffmpeg_concurrency}")
-        logger.info(f"n8n production concurrency: {self.n8n_concurrency}")
         logger.info("===============================================")
 
 
@@ -107,7 +105,6 @@ def resolve_concurrency_settings(
     tts_global_slots: int | None = None,
     tts_per_job: int | None = None,
     ffmpeg_concurrency: int | None = None,
-    n8n_concurrency: int | None = None,
     cpus_override: int | None = None,
 ) -> ConcurrencyConfig:
     """
@@ -147,9 +144,6 @@ def resolve_concurrency_settings(
         tpj = min(4, max(2, detected_cpus // 2))
         ff = min(2, max(1, detected_cpus // 4))
 
-    # n8n production concurrency defaults to 1 unless explicitly overridden
-    n8n = 1
-
     # Apply explicit overrides if provided and > 0
     if worker_concurrency is not None and worker_concurrency > 0:
         w = worker_concurrency
@@ -161,8 +155,6 @@ def resolve_concurrency_settings(
         tpj = tts_per_job
     if ffmpeg_concurrency is not None and ffmpeg_concurrency > 0:
         ff = ffmpeg_concurrency
-    if n8n_concurrency is not None and n8n_concurrency > 0:
-        n8n = n8n_concurrency
 
     # Ensure all settings are at least 1
     return ConcurrencyConfig(
@@ -173,7 +165,6 @@ def resolve_concurrency_settings(
         tts_global_slots=max(1, gt),
         tts_per_job=max(1, tpj),
         ffmpeg_concurrency=max(1, ff),
-        n8n_concurrency=max(1, n8n),
     )
 
 

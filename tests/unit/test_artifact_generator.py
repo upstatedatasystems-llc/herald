@@ -188,3 +188,44 @@ def test_verify_and_research_audit_status_truthfulness(tmp_path):
     p6 = ensure_details_artifact(job6, tmp_path)
     text6 = p6.read_text(encoding="utf-8")
     assert "- **Research Audit Status**: `REPAIRED (1 pass)`" in text6
+
+
+def test_telegram_jobs_artifact_clean_identifiers(tmp_path):
+    """Verify that Telegram jobs do NOT emit Gmail or Google Drive IDs, but emit Telegram IDs."""
+    tg_job = PodcastJob(
+        id="job-tg-001",
+        transport="telegram",
+        telegram_chat_id=12345678,
+        telegram_user_id=87654321,
+        telegram_message_id=999,
+        source_type=SourceType.TELEGRAM_MESSAGE.value,
+        source_hash="tg-hash-123",
+        source_text="Telegram source text.",
+        status=JobState.AUDIO_READY.value,
+        audio_sha256="sha256tg",
+        custom_title="Telegram Podcast",
+        created_at=datetime.now(UTC),
+        delivered_at=datetime.now(UTC),
+        script_json={"episode_title": "Telegram Podcast", "segments": []},
+    )
+    p = ensure_details_artifact(tg_job, tmp_path)
+    content = p.read_text(encoding="utf-8")
+
+    # Assert presence of Telegram technical identifiers
+    assert "- **Transport**: `telegram`" in content
+    assert "- **Telegram Chat ID**: `12345678`" in content
+    assert "- **Telegram User ID**: `87654321`" in content
+    assert "- **Telegram Message ID**: `999`" in content
+    assert "- **Source Hash**: `tg-hash-123`" in content
+    assert "- **Audio SHA-256**: `sha256tg`" in content
+    assert "Telegram audio delivered" in content
+
+    # Assert strict absence of Gmail and Drive identifiers
+    assert "Gmail Message ID" not in content
+    assert "Gmail Thread ID" not in content
+    assert "Drive Job Key" not in content
+    assert "Audio Drive File ID" not in content
+    assert "Details Drive File ID" not in content
+    assert "Google Drive artifacts uploaded" not in content
+    assert "Completion email delivered" not in content
+

@@ -9,11 +9,11 @@ from herald.ai.cloudflare_provider import CloudflareProvider
 from herald.ai.factory import (
     create_ai_provider,
     get_ai_provider,
-    get_research_provider,
     reset_ai_provider,
 )
 from herald.ai.gemini_provider import GeminiProvider
 from herald.ai.groq_provider import GroqProvider
+from herald.ai.legacy_compat import get_research_provider
 from herald.ai.literal_provider import LiteralProvider
 from herald.ai.mistral_provider import MistralProvider
 from herald.ai.ollama_provider import OllamaProvider

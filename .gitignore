@@ -66,8 +66,3 @@ Thumbs.db
 
 # Design doc extraction scratch file if any
 design_doc_extracted.txt
-
-# Temporary n8n deployment import directories
-n8n/import-ready/
-n8n/import-verify/
-n8n/build/

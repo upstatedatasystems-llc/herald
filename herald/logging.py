@@ -79,8 +79,6 @@ def register_all_configured_secrets() -> None:
             (getattr(settings, "CLOUDFLARE_ACCOUNT_ID", None), "[REDACTED_ACCOUNT_ID]"),
             (getattr(settings, "ANTHROPIC_API_KEY", None), "[REDACTED_API_KEY]"),
             (getattr(settings, "OPENAI_API_KEY", None), "[REDACTED_API_KEY]"),
-            (getattr(settings, "N8N_ENCRYPTION_KEY", None), "[REDACTED_ENCRYPTION_KEY]"),
-            (getattr(settings, "DELIVERY_NUDGE_SECRET", None), "[REDACTED_SECRET]"),
         ]
         for secret_val, placeholder in secrets_to_register:
             if secret_val:

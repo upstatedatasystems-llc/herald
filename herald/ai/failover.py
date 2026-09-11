@@ -180,13 +180,15 @@ def get_job_provider_chain(job: PodcastJob) -> list[dict[str, str]]:
     prov = getattr(job, "ai_provider", None)
     if prov and str(prov).lower().strip() != "ambiguous":
         p_clean = str(prov).lower().strip()
-        mod = getattr(job, "ai_model", None) or getattr(job, "gemini_model", None) or ""
+        mod = getattr(job, "ai_model", None) or ""
         return [{"provider": p_clean, "model": mod}]
 
     # Isolated legacy fallback only (historical jobs with gemini_model)
-    legacy_gem = getattr(job, "gemini_model", None)
-    if legacy_gem:
-        return [{"provider": "gemini", "model": legacy_gem}]
+    from herald.ai.legacy_compat import resolve_legacy_job_identity
+
+    leg_prov, leg_model = resolve_legacy_job_identity(job)
+    if leg_prov and leg_model:
+        return [{"provider": leg_prov, "model": leg_model}]
 
     # Server default chain recovery for ambiguous / missing chains
     from herald.ai.resolution import get_server_default_chain

@@ -67,7 +67,6 @@ SENSITIVE_METADATA_KEYS = {
     "telegram_bot_token",
     "herald_api_key",
     "postgres_password",
-    "delivery_nudge_secret",
     "source_text",
     "raw_text",
     "prompt",
@@ -85,7 +84,6 @@ def get_known_secret_map() -> dict[str, str]:
         "GEMINI_API_KEY",
         "HERALD_API_KEY",
         "POSTGRES_PASSWORD",
-        "DELIVERY_NUDGE_SECRET",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "GROQ_API_KEY",
@@ -346,7 +344,6 @@ def build_safe_environment_summary() -> dict[str, Any]:
         tts_global_slots=settings.HERALD_TTS_GLOBAL_SLOTS,
         tts_per_job=settings.HERALD_TTS_PER_JOB,
         ffmpeg_concurrency=settings.HERALD_FFMPEG_CONCURRENCY,
-        n8n_concurrency=settings.HERALD_N8N_CONCURRENCY,
     )
 
     return {
@@ -362,7 +359,6 @@ def build_safe_environment_summary() -> dict[str, Any]:
             "default_mode": settings.get_default_mode(),
             "ai_configured": settings.is_ai_configured(),
             "ai_provider": settings.AI_PROVIDER,
-            "research_provider": getattr(settings, "RESEARCH_PROVIDER", "gemini"),
             "concurrency_profile": conc.profile,
             "worker_concurrency": conc.worker_concurrency,
             "script_concurrency": conc.script_concurrency,

@@ -24,16 +24,11 @@ if [ ! -s "${TARGET_DIR}/database.sql" ]; then
     exit 1
 fi
 
-# 2. Workflow JSON & Manifest
-if [ -d "n8n/workflows" ]; then
-    cp -r n8n/workflows "${TARGET_DIR}/n8n_workflows"
-fi
-
-# 3. App Version Manifest
+# 2. App Version Manifest
 cat <<EOF > "${TARGET_DIR}/manifest.json"
 {
   "timestamp": "${TIMESTAMP}",
-  "system": "Herald Email-to-Podcast",
+  "system": "Herald",
   "version": "1.0.0",
   "environment": "${HERALD_ENV:-production}"
 }

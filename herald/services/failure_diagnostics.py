@@ -465,10 +465,13 @@ def collect_failure_diagnostics(
                                 eff_model = eff_model or latest_inter.model
                         if not eff_prov:
                             eff_prov = getattr(job_obj, "ai_provider", None)
-                            eff_model = eff_model or getattr(job_obj, "ai_model", None)
-                        if not eff_prov and getattr(job_obj, "gemini_model", None):
-                            eff_prov = "gemini"
-                            eff_model = eff_model or job_obj.gemini_model
+                        if not eff_prov:
+                            from herald.ai.legacy_compat import resolve_legacy_job_identity
+
+                            leg_prov, leg_mod = resolve_legacy_job_identity(job_obj)
+                            if leg_prov:
+                                eff_prov = leg_prov
+                                eff_model = eff_model or leg_mod
                 except Exception:
                     pass
 

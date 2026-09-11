@@ -83,7 +83,6 @@ echo "⚠️  WARNING: This will DESTROY Herald application state:"
 echo "    - PostgreSQL database jobs, queue history, and pairing state"
 echo "    - Telegram owner pairing and user settings"
 echo "    - Active diagnostics records and work-volume audio artifacts"
-echo "    - Optional n8n state (if n8n profile was used)"
 echo ""
 echo "Run 'scripts/backup.sh' before proceeding if you need to retain data."
 echo "This operation is IRREVERSIBLE."
@@ -132,7 +131,7 @@ fi
 BUILT_IMAGE_TAGS=""
 if [ "$RESET_MODE" = "cold" ]; then
     echo "🔍 Enumerating locally built Herald Docker image tags..."
-    if ! RAW_COMPOSE_IMAGES=$(docker compose images herald-migration herald-worker telegram-bot herald-api 2>&1); then
+    if ! RAW_COMPOSE_IMAGES=$(docker compose images herald-migration herald-worker telegram-bot 2>&1); then
         echo "❌ Error: Failed to enumerate Herald Docker images: ${RAW_COMPOSE_IMAGES}" >&2
         exit 1
     fi

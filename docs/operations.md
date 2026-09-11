@@ -20,7 +20,7 @@ Returns `0` when:
 - `herald-worker` and `telegram-bot` daemons are running.
 - `herald-migration` exited successfully with code 0.
 - PostgreSQL database revision authoritatively matches the dynamic Alembic head revision.
-- Optional legacy profiles (`n8n`, `herald-api`) are inactive.
+- AI provider failover chain credentials and invariants are satisfied.
 
 ### Status & Queue Monitoring
 Inspect queue depth and job counts:
@@ -94,7 +94,7 @@ Stops containers and removes Compose volumes (`postgres_data`, `work_data`). Pre
 ```
 
 ### Cold Reset (Clean Build State)
-Stops containers, removes Compose volumes, and removes locally built Herald container images (`herald-worker`, `herald-migration`, `telegram-bot`, `herald-api`). Preserves `.env` and upstream images (`postgres:16-alpine`, `ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`):
+Stops containers, removes Compose volumes, and removes locally built Herald container images (`herald-worker`, `herald-migration`, `telegram-bot`). Preserves `.env` and upstream images (`postgres:16-alpine`, `ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`):
 
 ```bash
 ./scripts/reset-herald.sh --cold

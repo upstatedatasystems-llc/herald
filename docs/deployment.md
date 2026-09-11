@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/featu
 4. **Permissions Handoff**: Safely configures user group membership for Docker without requiring manual re-login.
 5. **Configuration Wizard**: Prompts for your Telegram Bot Token and chosen AI provider (Gemini, Groq, OpenRouter, Mistral, Cloudflare, or None/Literal). Writes `.env` with strict `0600` permissions.
 6. **Stack Launch & Migrations**: Launches core services (`postgres`, `kokoro`, `herald-worker`, `telegram-bot`) and executes Alembic schema migrations (`herald-migration`).
-7. **Acceptance Testing**: Automatically executes `scripts/install_acceptance.sh` to guarantee database schema matches latest Alembic head, default services are healthy, and optional legacy services remain isolated.
+7. **Acceptance Testing**: Automatically executes `scripts/install_acceptance.sh` to guarantee database schema matches latest Alembic head, default services are healthy, and credentials and failover chain configurations are validated.
 8. **Pairing Output**: Displays your one-time owner pairing code.
 
 ---
@@ -120,10 +120,12 @@ Run the non-secret acceptance verification tool at any time:
 Checks:
 - `.env` exists with strict `0600` permissions.
 - No default placeholder passwords or tokens.
+- Credentials and provider configurations for all configured chain candidates.
 - PostgreSQL is healthy.
 - Kokoro TTS engine is healthy (`/v1/models` ready).
 - Herald Worker and Telegram Bot daemons are active.
 - Migration container completed with exit code 0.
 - Database schema matches live dynamic Alembic head revision.
-- Optional legacy profiles (`n8n`, `herald-api`) are disabled by default (can be bypassed via `HERALD_ACCEPTANCE_ALLOW_LEGACY_PROFILES=1`).
 - Host has sufficient disk headroom.
+- Voice preview cache and manifest parity.
+- Persistent logging directory layout and container log accessibility.

@@ -421,7 +421,7 @@ if [ -z "$AI_PROVIDER" ]; then
             ;;
     esac
 
-    # Optional Failover Slots (Secondary Provider)
+    # Optional Failover Slots (Secondary & Tertiary Providers)
     if [ "$AI_PROVIDER" != "literal" ] && [ "$AI_PROVIDER" != "none" ]; then
         SEC_PROV=$(get_env_val "AI_SECONDARY_PROVIDER")
         if [ -z "$SEC_PROV" ] && [ "$NON_INTERACTIVE" = false ]; then
@@ -437,10 +437,13 @@ if [ -z "$AI_PROVIDER" ]; then
                 echo "  6) OpenAI"
                 echo "  7) Anthropic"
                 echo "  8) Ollama"
-                echo "  9) Literal"
-                prompt_value SEC_CHOICE "Enter choice [1-9]: " "9"
+                prompt_value SEC_CHOICE "Enter choice [1-8]: " ""
                 case "$SEC_CHOICE" in
                     1)
+                        if [ "$AI_PROVIDER" = "gemini" ]; then
+                            echo "❌ Error: Duplicate provider 'gemini' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "gemini"
                         if [ -z "$(get_env_val "GEMINI_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter Gemini API Key: "
@@ -450,6 +453,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "GEMINI_RESEARCH_MODEL")" ]; then set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"; fi
                         ;;
                     2)
+                        if [ "$AI_PROVIDER" = "groq" ]; then
+                            echo "❌ Error: Duplicate provider 'groq' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "groq"
                         if [ -z "$(get_env_val "GROQ_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter Groq API Key: "
@@ -458,6 +465,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "GROQ_MODEL")" ]; then set_env_val "GROQ_MODEL" "llama-3.3-70b-versatile"; fi
                         ;;
                     3)
+                        if [ "$AI_PROVIDER" = "openrouter" ]; then
+                            echo "❌ Error: Duplicate provider 'openrouter' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "openrouter"
                         if [ -z "$(get_env_val "OPENROUTER_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter OpenRouter API Key: "
@@ -466,6 +477,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "OPENROUTER_MODEL")" ]; then set_env_val "OPENROUTER_MODEL" "meta-llama/llama-3.3-70b-instruct"; fi
                         ;;
                     4)
+                        if [ "$AI_PROVIDER" = "mistral" ]; then
+                            echo "❌ Error: Duplicate provider 'mistral' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "mistral"
                         if [ -z "$(get_env_val "MISTRAL_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter Mistral API Key: "
@@ -474,6 +489,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "MISTRAL_MODEL")" ]; then set_env_val "MISTRAL_MODEL" "mistral-large-latest"; fi
                         ;;
                     5)
+                        if [ "$AI_PROVIDER" = "cloudflare" ]; then
+                            echo "❌ Error: Duplicate provider 'cloudflare' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "cloudflare"
                         if [ -z "$(get_env_val "CLOUDFLARE_API_TOKEN")" ]; then
                             prompt_secret S_TOK "Enter Cloudflare API Token: "
@@ -486,6 +505,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "CLOUDFLARE_AI_MODEL")" ]; then set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"; fi
                         ;;
                     6)
+                        if [ "$AI_PROVIDER" = "openai" ]; then
+                            echo "❌ Error: Duplicate provider 'openai' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "openai"
                         if [ -z "$(get_env_val "OPENAI_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter OpenAI API Key: "
@@ -494,6 +517,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "OPENAI_MODEL")" ]; then set_env_val "OPENAI_MODEL" "gpt-4o"; fi
                         ;;
                     7)
+                        if [ "$AI_PROVIDER" = "anthropic" ]; then
+                            echo "❌ Error: Duplicate provider 'anthropic' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "anthropic"
                         if [ -z "$(get_env_val "ANTHROPIC_API_KEY")" ]; then
                             prompt_secret S_KEY "Enter Anthropic API Key: "
@@ -502,6 +529,10 @@ if [ -z "$AI_PROVIDER" ]; then
                         if [ -z "$(get_env_val "ANTHROPIC_MODEL")" ]; then set_env_val "ANTHROPIC_MODEL" "claude-3-5-sonnet-20241022"; fi
                         ;;
                     8)
+                        if [ "$AI_PROVIDER" = "ollama" ]; then
+                            echo "❌ Error: Duplicate provider 'ollama' is already Primary." >&2
+                            exit 1
+                        fi
                         set_env_val "AI_SECONDARY_PROVIDER" "ollama"
                         if [ -z "$(get_env_val "OLLAMA_BASE_URL")" ]; then
                             prompt_value S_URL "Enter Ollama Base URL: " "http://localhost:11434"
@@ -509,10 +540,139 @@ if [ -z "$AI_PROVIDER" ]; then
                         fi
                         if [ -z "$(get_env_val "OLLAMA_MODEL")" ]; then set_env_val "OLLAMA_MODEL" "llama3.1"; fi
                         ;;
-                    9|*)
-                        set_env_val "AI_SECONDARY_PROVIDER" "literal"
+                    *)
+                        echo "❌ Error: Invalid Secondary AI provider choice. Literal is not permitted as Secondary." >&2
+                        exit 1
                         ;;
                 esac
+            fi
+        fi
+
+        SEC_PROV=$(get_env_val "AI_SECONDARY_PROVIDER")
+        if [ -n "$SEC_PROV" ] && [ "$SEC_PROV" != "literal" ] && [ "$SEC_PROV" != "none" ]; then
+            TERT_PROV=$(get_env_val "AI_TERTIARY_PROVIDER")
+            if [ -z "$TERT_PROV" ] && [ "$NON_INTERACTIVE" = false ]; then
+                echo ""
+                prompt_value WANT_TERT "Configure an optional Tertiary AI failover provider? [y/N]: " "N"
+                if [[ "$WANT_TERT" =~ ^[Yy]$ ]]; then
+                    echo "Select Tertiary AI Provider:"
+                    echo "  1) Google Gemini"
+                    echo "  2) Groq Cloud"
+                    echo "  3) OpenRouter"
+                    echo "  4) Mistral AI"
+                    echo "  5) Cloudflare Workers AI"
+                    echo "  6) OpenAI"
+                    echo "  7) Anthropic"
+                    echo "  8) Ollama"
+                    prompt_value TERT_CHOICE "Enter choice [1-8]: " ""
+                    case "$TERT_CHOICE" in
+                        1)
+                            if [ "$AI_PROVIDER" = "gemini" ] || [ "$SEC_PROV" = "gemini" ]; then
+                                echo "❌ Error: Duplicate provider 'gemini' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "gemini"
+                            if [ -z "$(get_env_val "GEMINI_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter Gemini API Key: "
+                                set_env_val "GEMINI_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "GEMINI_MODEL")" ]; then set_env_val "GEMINI_MODEL" "gemini-3.5-flash"; fi
+                            if [ -z "$(get_env_val "GEMINI_RESEARCH_MODEL")" ]; then set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"; fi
+                            ;;
+                        2)
+                            if [ "$AI_PROVIDER" = "groq" ] || [ "$SEC_PROV" = "groq" ]; then
+                                echo "❌ Error: Duplicate provider 'groq' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "groq"
+                            if [ -z "$(get_env_val "GROQ_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter Groq API Key: "
+                                set_env_val "GROQ_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "GROQ_MODEL")" ]; then set_env_val "GROQ_MODEL" "llama-3.3-70b-versatile"; fi
+                            ;;
+                        3)
+                            if [ "$AI_PROVIDER" = "openrouter" ] || [ "$SEC_PROV" = "openrouter" ]; then
+                                echo "❌ Error: Duplicate provider 'openrouter' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "openrouter"
+                            if [ -z "$(get_env_val "OPENROUTER_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter OpenRouter API Key: "
+                                set_env_val "OPENROUTER_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "OPENROUTER_MODEL")" ]; then set_env_val "OPENROUTER_MODEL" "meta-llama/llama-3.3-70b-instruct"; fi
+                            ;;
+                        4)
+                            if [ "$AI_PROVIDER" = "mistral" ] || [ "$SEC_PROV" = "mistral" ]; then
+                                echo "❌ Error: Duplicate provider 'mistral' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "mistral"
+                            if [ -z "$(get_env_val "MISTRAL_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter Mistral API Key: "
+                                set_env_val "MISTRAL_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "MISTRAL_MODEL")" ]; then set_env_val "MISTRAL_MODEL" "mistral-large-latest"; fi
+                            ;;
+                        5)
+                            if [ "$AI_PROVIDER" = "cloudflare" ] || [ "$SEC_PROV" = "cloudflare" ]; then
+                                echo "❌ Error: Duplicate provider 'cloudflare' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "cloudflare"
+                            if [ -z "$(get_env_val "CLOUDFLARE_API_TOKEN")" ]; then
+                                prompt_secret T_TOK "Enter Cloudflare API Token: "
+                                set_env_val "CLOUDFLARE_API_TOKEN" "$(trim_str "$T_TOK")"
+                            fi
+                            if [ -z "$(get_env_val "CLOUDFLARE_ACCOUNT_ID")" ]; then
+                                prompt_value T_ACC "Enter Cloudflare Account ID: "
+                                set_env_val "CLOUDFLARE_ACCOUNT_ID" "$(trim_str "$T_ACC")"
+                            fi
+                            if [ -z "$(get_env_val "CLOUDFLARE_AI_MODEL")" ]; then set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"; fi
+                            ;;
+                        6)
+                            if [ "$AI_PROVIDER" = "openai" ] || [ "$SEC_PROV" = "openai" ]; then
+                                echo "❌ Error: Duplicate provider 'openai' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "openai"
+                            if [ -z "$(get_env_val "OPENAI_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter OpenAI API Key: "
+                                set_env_val "OPENAI_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "OPENAI_MODEL")" ]; then set_env_val "OPENAI_MODEL" "gpt-4o"; fi
+                            ;;
+                        7)
+                            if [ "$AI_PROVIDER" = "anthropic" ] || [ "$SEC_PROV" = "anthropic" ]; then
+                                echo "❌ Error: Duplicate provider 'anthropic' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "anthropic"
+                            if [ -z "$(get_env_val "ANTHROPIC_API_KEY")" ]; then
+                                prompt_secret T_KEY "Enter Anthropic API Key: "
+                                set_env_val "ANTHROPIC_API_KEY" "$(trim_str "$T_KEY")"
+                            fi
+                            if [ -z "$(get_env_val "ANTHROPIC_MODEL")" ]; then set_env_val "ANTHROPIC_MODEL" "claude-3-5-sonnet-20241022"; fi
+                            ;;
+                        8)
+                            if [ "$AI_PROVIDER" = "ollama" ] || [ "$SEC_PROV" = "ollama" ]; then
+                                echo "❌ Error: Duplicate provider 'ollama' is already in failover chain." >&2
+                                exit 1
+                            fi
+                            set_env_val "AI_TERTIARY_PROVIDER" "ollama"
+                            if [ -z "$(get_env_val "OLLAMA_BASE_URL")" ]; then
+                                prompt_value T_URL "Enter Ollama Base URL: " "http://localhost:11434"
+                                set_env_val "OLLAMA_BASE_URL" "$(trim_str "$T_URL")"
+                            fi
+                            if [ -z "$(get_env_val "OLLAMA_MODEL")" ]; then set_env_val "OLLAMA_MODEL" "llama3.1"; fi
+                            ;;
+                        *)
+                            echo "❌ Error: Invalid Tertiary AI provider choice. Literal is not permitted as Tertiary." >&2
+                            exit 1
+                            ;;
+                    esac
+                fi
             fi
         fi
     fi
@@ -529,145 +689,232 @@ else
     esac
 fi
 
-# 3. Live Validate Active Provider Connection without Echoing Secrets
+# Function to validate credentials and connectivity for an AI provider candidate
+validate_provider_candidate() {
+    local prov="$1"
+    local slot_name="${2:-Primary}"
+    case "$prov" in
+        gemini)
+            local g_key g_mod gem_resp
+            g_key=$(get_env_val "GEMINI_API_KEY")
+            g_mod=$(get_env_val "GEMINI_MODEL")
+            g_mod=${g_mod:-"gemini-3.5-flash"}
+            if [ -z "$g_key" ]; then
+                echo "❌ Error: [${slot_name}] Gemini API key is missing." >&2
+                return 1
+            fi
+            gem_resp=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s"\nheader = "x-goog-api-key: %s"\n' "$g_mod" "$g_key" | call_curl_config)
+            if echo "$gem_resp" | grep -q '"name":'; then
+                echo "✅ [${slot_name}] Gemini API connection and model '${g_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Gemini verification for '${g_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        groq)
+            local gr_key gr_mod gr_resp
+            gr_key=$(get_env_val "GROQ_API_KEY")
+            gr_mod=$(get_env_val "GROQ_MODEL")
+            gr_mod=${gr_mod:-"llama-3.3-70b-versatile"}
+            if [ -z "$gr_key" ]; then
+                echo "❌ Error: [${slot_name}] Groq API key is missing." >&2
+                return 1
+            fi
+            gr_resp=$(printf 'url = "https://api.groq.com/openai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$gr_mod" "$gr_key" | call_curl_config)
+            if echo "$gr_resp" | grep -q '"id":'; then
+                echo "✅ [${slot_name}] Groq Cloud connection and model '${gr_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Groq verification for '${gr_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        openrouter)
+            local or_k or_mod or_resp
+            or_k=$(get_env_val "OPENROUTER_API_KEY")
+            or_mod=$(get_env_val "OPENROUTER_MODEL")
+            or_mod=${or_mod:-"meta-llama/llama-3.3-70b-instruct"}
+            if [ -z "$or_k" ]; then
+                echo "❌ Error: [${slot_name}] OpenRouter API key is missing." >&2
+                return 1
+            fi
+            or_resp=$(printf 'url = "https://openrouter.ai/api/v1/models"\nheader = "Authorization: Bearer %s"\n' "$or_k" | call_curl_config)
+            if echo "$or_resp" | grep -q "${or_mod}"; then
+                echo "✅ [${slot_name}] OpenRouter connection and model '${or_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] OpenRouter verification for '${or_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        mistral)
+            local m_k m_mod m_resp
+            m_k=$(get_env_val "MISTRAL_API_KEY")
+            m_mod=$(get_env_val "MISTRAL_MODEL")
+            m_mod=${m_mod:-"mistral-large-latest"}
+            if [ -z "$m_k" ]; then
+                echo "❌ Error: [${slot_name}] Mistral API key is missing." >&2
+                return 1
+            fi
+            m_resp=$(printf 'url = "https://api.mistral.ai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$m_mod" "$m_k" | call_curl_config)
+            if echo "$m_resp" | grep -q '"id":'; then
+                echo "✅ [${slot_name}] Mistral AI connection and model '${m_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Mistral verification for '${m_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        cloudflare)
+            local cf_t cf_a cf_mod cf_resp
+            cf_t=$(get_env_val "CLOUDFLARE_API_TOKEN")
+            cf_a=$(get_env_val "CLOUDFLARE_ACCOUNT_ID")
+            cf_mod=$(get_env_val "CLOUDFLARE_AI_MODEL")
+            cf_mod=${cf_mod:-$(get_env_val "CLOUDFLARE_MODEL")}
+            cf_mod=${cf_mod:-"@cf/meta/llama-3.3-70b-instruct-fp8-fast"}
+            if [ -z "$cf_t" ] || [ -z "$cf_a" ]; then
+                echo "❌ Error: [${slot_name}] Cloudflare API Token or Account ID is missing." >&2
+                return 1
+            fi
+            cf_resp=$(printf 'url = "https://api.cloudflare.com/client/v4/accounts/%s/ai/models/search?search=%s"\nheader = "Authorization: Bearer %s"\n' "$cf_a" "$cf_mod" "$cf_t" | call_curl_config)
+            if echo "$cf_resp" | grep -q '"success":true' && echo "$cf_resp" | grep -q "${cf_mod}"; then
+                echo "✅ [${slot_name}] Cloudflare Workers AI connection and model '${cf_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Cloudflare verification for '${cf_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        openai)
+            local o_key o_mod o_resp
+            o_key=$(get_env_val "OPENAI_API_KEY")
+            o_mod=$(get_env_val "OPENAI_MODEL")
+            o_mod=${o_mod:-"gpt-4o"}
+            if [ -z "$o_key" ]; then
+                echo "❌ Error: [${slot_name}] OpenAI API key is missing." >&2
+                return 1
+            fi
+            o_resp=$(printf 'url = "https://api.openai.com/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$o_mod" "$o_key" | call_curl_config)
+            if echo "$o_resp" | grep -q '"id":'; then
+                echo "✅ [${slot_name}] OpenAI connection and model '${o_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] OpenAI verification for '${o_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        anthropic)
+            local a_key a_mod a_resp
+            a_key=$(get_env_val "ANTHROPIC_API_KEY")
+            a_mod=$(get_env_val "ANTHROPIC_MODEL")
+            a_mod=${a_mod:-"claude-3-5-sonnet-20241022"}
+            if [ -z "$a_key" ]; then
+                echo "❌ Error: [${slot_name}] Anthropic API key is missing." >&2
+                return 1
+            fi
+            a_resp=$(printf 'url = "https://api.anthropic.com/v1/models/%s"\nheader = "x-api-key: %s"\nheader = "anthropic-version: 2023-06-01"\n' "$a_mod" "$a_key" | call_curl_config)
+            if echo "$a_resp" | grep -q '"id":'; then
+                echo "✅ [${slot_name}] Anthropic connection and model '${a_mod}' verified."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Anthropic verification for '${a_mod}' failed." >&2
+                return 1
+            fi
+            ;;
+        ollama)
+            local ol_url ol_mod ol_resp
+            ol_url=$(get_env_val "OLLAMA_BASE_URL")
+            ol_url=${ol_url:-"http://localhost:11434"}
+            ol_mod=$(get_env_val "OLLAMA_MODEL")
+            ol_mod=${ol_mod:-"llama3.1"}
+            ol_resp=$(printf 'url = "%s/api/tags"\n' "$ol_url" | call_curl_config)
+            if echo "$ol_resp" | grep -q '"models":'; then
+                echo "✅ [${slot_name}] Ollama connection verified at ${ol_url}."
+                return 0
+            else
+                echo "⚠️  [${slot_name}] Ollama verification at ${ol_url} failed." >&2
+                return 1
+            fi
+            ;;
+        literal|none)
+            if [ "$slot_name" != "Primary" ]; then
+                echo "❌ Error: Literal is disallowed as Secondary or Tertiary provider." >&2
+                return 1
+            fi
+            echo "ℹ️  Literal mode selected (no external AI provider calls)."
+            return 0
+            ;;
+        *)
+            echo "❌ Error: [${slot_name}] Unknown AI provider '${prov}'." >&2
+            return 1
+            ;;
+    esac
+}
+
+# 3. Live Validate Finished Provider Chain without Echoing Secrets
 echo ""
-echo "🔍 Validating AI Provider and model availability..."
-AI_VALID=true
-if [ "$AI_PROVIDER" = "gemini" ]; then
-    G_KEY=$(get_env_val "GEMINI_API_KEY")
-    G_MOD=$(get_env_val "GEMINI_MODEL")
-    G_MOD=${G_MOD:-"gemini-3.5-flash"}
-    if [ -z "$G_KEY" ]; then
-        echo "❌ Error: Gemini API key is missing." >&2
-        AI_VALID=false
-    else
-        GEM_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s"\nheader = "x-goog-api-key: %s"\n' "$G_MOD" "$G_KEY" | call_curl_config)
-        if echo "$GEM_RESP" | grep -q '"name":'; then
-            echo "✅ Gemini API connection and model '${G_MOD}' verified."
-        else
-            echo "⚠️  Gemini verification for '${G_MOD}' failed."
-            AI_VALID=false
-        fi
+echo "🔍 Validating AI Provider failover chain and model availability..."
+
+AI_PROVIDER=$(get_env_val "AI_PROVIDER")
+SEC_PROV=$(get_env_val "AI_SECONDARY_PROVIDER")
+TERT_PROV=$(get_env_val "AI_TERTIARY_PROVIDER")
+
+# Validate chain integrity:
+if [ "$AI_PROVIDER" = "literal" ] || [ "$AI_PROVIDER" = "none" ]; then
+    if [ -n "$SEC_PROV" ] || [ -n "$TERT_PROV" ]; then
+        echo "❌ Error: Literal provider cannot have Secondary or Tertiary failover candidates." >&2
+        exit 1
     fi
-elif [ "$AI_PROVIDER" = "groq" ]; then
-    GR_KEY=$(get_env_val "GROQ_API_KEY")
-    GR_MOD=$(get_env_val "GROQ_MODEL")
-    GR_MOD=${GR_MOD:-"llama-3.3-70b-versatile"}
-    if [ -z "$GR_KEY" ]; then
-        echo "❌ Error: Groq API key is missing." >&2
-        AI_VALID=false
-    else
-        GR_RESP=$(printf 'url = "https://api.groq.com/openai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$GR_MOD" "$GR_KEY" | call_curl_config)
-        if echo "$GR_RESP" | grep -q '"id":'; then
-            echo "✅ Groq Cloud connection and model '${GR_MOD}' verified."
-        else
-            echo "⚠️  Groq verification for '${GR_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "openrouter" ]; then
-    OR_K=$(get_env_val "OPENROUTER_API_KEY")
-    OR_MOD=$(get_env_val "OPENROUTER_MODEL")
-    OR_MOD=${OR_MOD:-"meta-llama/llama-3.3-70b-instruct"}
-    if [ -z "$OR_K" ]; then
-        echo "❌ Error: OpenRouter API key is missing." >&2
-        AI_VALID=false
-    else
-        OR_RESP=$(printf 'url = "https://openrouter.ai/api/v1/models"\nheader = "Authorization: Bearer %s"\n' "$OR_K" | call_curl_config)
-        if echo "$OR_RESP" | grep -q "${OR_MOD}"; then
-            echo "✅ OpenRouter connection and model '${OR_MOD}' verified."
-        else
-            echo "⚠️  OpenRouter verification for '${OR_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "mistral" ]; then
-    M_K=$(get_env_val "MISTRAL_API_KEY")
-    M_MOD=$(get_env_val "MISTRAL_MODEL")
-    M_MOD=${M_MOD:-"mistral-large-latest"}
-    if [ -z "$M_K" ]; then
-        echo "❌ Error: Mistral API key is missing." >&2
-        AI_VALID=false
-    else
-        M_RESP=$(printf 'url = "https://api.mistral.ai/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$M_MOD" "$M_K" | call_curl_config)
-        if echo "$M_RESP" | grep -q '"id":'; then
-            echo "✅ Mistral AI connection and model '${M_MOD}' verified."
-        else
-            echo "⚠️  Mistral verification for '${M_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "cloudflare" ]; then
-    CF_T=$(get_env_val "CLOUDFLARE_API_TOKEN")
-    CF_A=$(get_env_val "CLOUDFLARE_ACCOUNT_ID")
-    CF_MOD=$(get_env_val "CLOUDFLARE_AI_MODEL")
-    CF_MOD=${CF_MOD:-$(get_env_val "CLOUDFLARE_MODEL")}
-    CF_MOD=${CF_MOD:-"@cf/meta/llama-3.3-70b-instruct-fp8-fast"}
-    if [ -z "$CF_T" ] || [ -z "$CF_A" ]; then
-        echo "❌ Error: Cloudflare API Token or Account ID is missing." >&2
-        AI_VALID=false
-    else
-        CF_RESP=$(printf 'url = "https://api.cloudflare.com/client/v4/accounts/%s/ai/models/search?search=%s"\nheader = "Authorization: Bearer %s"\n' "$CF_A" "$CF_MOD" "$CF_T" | call_curl_config)
-        if echo "$CF_RESP" | grep -q '"success":true' && echo "$CF_RESP" | grep -q "${CF_MOD}"; then
-            echo "✅ Cloudflare Workers AI connection and model '${CF_MOD}' verified."
-        else
-            echo "⚠️  Cloudflare verification for '${CF_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "openai" ]; then
-    O_KEY=$(get_env_val "OPENAI_API_KEY")
-    O_MOD=$(get_env_val "OPENAI_MODEL")
-    O_MOD=${O_MOD:-"gpt-4o"}
-    if [ -z "$O_KEY" ]; then
-        echo "❌ Error: OpenAI API key is missing." >&2
-        AI_VALID=false
-    else
-        O_RESP=$(printf 'url = "https://api.openai.com/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$O_MOD" "$O_KEY" | call_curl_config)
-        if echo "$O_RESP" | grep -q '"id":'; then
-            echo "✅ OpenAI connection and model '${O_MOD}' verified."
-        else
-            echo "⚠️  OpenAI verification for '${O_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "anthropic" ]; then
-    A_KEY=$(get_env_val "ANTHROPIC_API_KEY")
-    A_MOD=$(get_env_val "ANTHROPIC_MODEL")
-    A_MOD=${A_MOD:-"claude-3-5-sonnet-20241022"}
-    if [ -z "$A_KEY" ]; then
-        echo "❌ Error: Anthropic API key is missing." >&2
-        AI_VALID=false
-    else
-        A_RESP=$(printf 'url = "https://api.anthropic.com/v1/models/%s"\nheader = "x-api-key: %s"\nheader = "anthropic-version: 2023-06-01"\n' "$A_MOD" "$A_KEY" | call_curl_config)
-        if echo "$A_RESP" | grep -q '"id":'; then
-            echo "✅ Anthropic connection and model '${A_MOD}' verified."
-        else
-            echo "⚠️  Anthropic verification for '${A_MOD}' failed."
-            AI_VALID=false
-        fi
-    fi
-elif [ "$AI_PROVIDER" = "ollama" ]; then
-    OL_URL=$(get_env_val "OLLAMA_BASE_URL")
-    OL_URL=${OL_URL:-"http://localhost:11434"}
-    OL_MOD=$(get_env_val "OLLAMA_MODEL")
-    OL_MOD=${OL_MOD:-"llama3.1"}
-    OL_RESP=$(printf 'url = "%s/api/tags"\n' "$OL_URL" | call_curl_config)
-    if echo "$OL_RESP" | grep -q '"models":'; then
-        echo "✅ Ollama connection verified at ${OL_URL}."
-    else
-        echo "⚠️  Ollama verification at ${OL_URL} failed."
-        AI_VALID=false
-    fi
-else
-    echo "ℹ️  Literal mode selected (no external AI provider calls)."
 fi
 
-# Abort if configured AI provider validation failed (do not silently rewrite to Literal)
-if [ "$AI_VALID" = false ]; then
-    echo "❌ Error: Configured AI provider '${AI_PROVIDER}' validation failed." >&2
+if [ -n "$SEC_PROV" ]; then
+    if [ "$SEC_PROV" = "literal" ] || [ "$SEC_PROV" = "none" ]; then
+        echo "❌ Error: Literal is disallowed as Secondary provider." >&2
+        exit 1
+    fi
+    if [ "$SEC_PROV" = "$AI_PROVIDER" ]; then
+        echo "❌ Error: Duplicate provider '${SEC_PROV}' configured in Primary and Secondary slots." >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$TERT_PROV" ]; then
+    if [ "$TERT_PROV" = "literal" ] || [ "$TERT_PROV" = "none" ]; then
+        echo "❌ Error: Literal is disallowed as Tertiary provider." >&2
+        exit 1
+    fi
+    if [ -z "$SEC_PROV" ]; then
+        echo "❌ Error: Tertiary provider configured without Secondary provider." >&2
+        exit 1
+    fi
+    if [ "$TERT_PROV" = "$AI_PROVIDER" ] || [ "$TERT_PROV" = "$SEC_PROV" ]; then
+        echo "❌ Error: Duplicate provider '${TERT_PROV}' in Tertiary slot." >&2
+        exit 1
+    fi
+fi
+
+# Validate credentials for each candidate in the chain (fail hard, never silently rewrite to Literal)
+if ! validate_provider_candidate "$AI_PROVIDER" "Primary"; then
+    echo "❌ Error: Primary AI provider '${AI_PROVIDER}' validation failed." >&2
     echo "Please check your configuration or credentials and rerun setup.sh." >&2
     exit 1
+fi
+
+if [ -n "$SEC_PROV" ]; then
+    if ! validate_provider_candidate "$SEC_PROV" "Secondary"; then
+        echo "❌ Error: Secondary AI provider '${SEC_PROV}' validation failed." >&2
+        echo "Please check your configuration or credentials and rerun setup.sh." >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$TERT_PROV" ]; then
+    if ! validate_provider_candidate "$TERT_PROV" "Tertiary"; then
+        echo "❌ Error: Tertiary AI provider '${TERT_PROV}' validation failed." >&2
+        echo "Please check your configuration or credentials and rerun setup.sh." >&2
+        exit 1
+    fi
 fi
 
 # 4. Ensure internal defaults & secrets are present without overwriting existing

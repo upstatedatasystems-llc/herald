@@ -27,11 +27,11 @@ from herald.ai.cloudflare_provider import CloudflareProvider
 from herald.ai.factory import (
     create_ai_provider,
     get_ai_provider,
-    get_research_provider,
     reset_ai_provider,
 )
 from herald.ai.gemini_provider import GeminiProvider
 from herald.ai.groq_provider import GroqProvider
+from herald.ai.legacy_compat import get_research_provider
 from herald.ai.literal_provider import LiteralProvider
 from herald.ai.mistral_provider import MistralProvider
 from herald.ai.openrouter_provider import OpenRouterProvider
@@ -345,7 +345,6 @@ def test_research_provider_separation_matrix():
     # Case A: Groq primary + Gemini Research -> Success
     with patch.object(settings, "AI_PROVIDER", "groq"), \
          patch.object(settings, "GROQ_API_KEY", "gsk_groq"), \
-         patch.object(settings, "RESEARCH_PROVIDER", "gemini"), \
          patch.object(settings, "GEMINI_API_KEY", "gem_key"):
         reset_ai_provider()
         r_prov = get_research_provider()
@@ -355,7 +354,6 @@ def test_research_provider_separation_matrix():
     # Case B: OpenRouter primary + Gemini Research -> Success
     with patch.object(settings, "AI_PROVIDER", "openrouter"), \
          patch.object(settings, "OPENROUTER_API_KEY", "sk-or-key"), \
-         patch.object(settings, "RESEARCH_PROVIDER", "gemini"), \
          patch.object(settings, "GEMINI_API_KEY", "gem_key"):
         reset_ai_provider()
         r_prov = get_research_provider()
@@ -365,7 +363,6 @@ def test_research_provider_separation_matrix():
     # Case C: Missing Research Provider -> Rejection without silent downgrade
     with patch.object(settings, "AI_PROVIDER", "groq"), \
          patch.object(settings, "GROQ_API_KEY", "gsk_groq"), \
-         patch.object(settings, "RESEARCH_PROVIDER", "gemini"), \
          patch.object(settings, "GEMINI_API_KEY", ""):
         reset_ai_provider()
         req = HeraldRequest(

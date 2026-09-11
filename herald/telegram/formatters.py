@@ -92,7 +92,9 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
         return disp_name, ai_mod
 
     # 5. Isolated legacy fallback only (historical jobs with only gemini_model column)
-    legacy_model = getattr(job, "gemini_model", None)
+    from herald.ai.legacy_compat import resolve_legacy_job_identity
+
+    _, legacy_model = resolve_legacy_job_identity(job)
     if legacy_model:
         return "Gemini", legacy_model
 
