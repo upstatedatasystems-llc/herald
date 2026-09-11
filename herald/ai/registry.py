@@ -6,6 +6,7 @@ and non-cached per-job provider instantiation.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from herald.ai.base import AIProvider
 from herald.ai.capabilities import AIModelCapabilities, ProviderCapabilities
@@ -98,7 +99,7 @@ def get_default_model(provider_id: str | None) -> str:
     return desc.default_model
 
 
-def create_provider(provider_id: str | None, model_id: str | None = None) -> AIProvider:
+def create_provider(provider_id: str | None, model_id: str | None = None, **kwargs: Any) -> AIProvider:
     """
     Instantiate a new AIProvider for job execution without global mutable caching.
     Uses specified model_id, or falls back to provider default model.
@@ -115,7 +116,7 @@ def create_provider(provider_id: str | None, model_id: str | None = None) -> AIP
         raise ValueError(f"Unknown AI provider '{provider_id}'")
 
     eff_model = model_id or get_default_model(p_id)
-    return desc.factory(eff_model)
+    return desc.factory(eff_model, **kwargs)
 
 
 def validate_server_default_chain(
@@ -167,47 +168,47 @@ def validate_server_default_chain(
 
 
 # Factory helper closures to avoid circular imports
-def _create_gemini(model: str | None) -> AIProvider:
+def _create_gemini(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.gemini_provider import GeminiProvider
-    return GeminiProvider(model_name=model)
+    return GeminiProvider(model_name=model, research_model=kwargs.get("research_model"))
 
 
-def _create_groq(model: str | None) -> AIProvider:
+def _create_groq(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.groq_provider import GroqProvider
     return GroqProvider(model=model)
 
 
-def _create_cloudflare(model: str | None) -> AIProvider:
+def _create_cloudflare(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.cloudflare_provider import CloudflareProvider
     return CloudflareProvider(model=model)
 
 
-def _create_openai(model: str | None) -> AIProvider:
+def _create_openai(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.openai_provider import OpenAIProvider
     return OpenAIProvider(model=model)
 
 
-def _create_openrouter(model: str | None) -> AIProvider:
+def _create_openrouter(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.openrouter_provider import OpenRouterProvider
     return OpenRouterProvider(model=model)
 
 
-def _create_mistral(model: str | None) -> AIProvider:
+def _create_mistral(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.mistral_provider import MistralProvider
     return MistralProvider(model=model)
 
 
-def _create_anthropic(model: str | None) -> AIProvider:
+def _create_anthropic(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.anthropic_provider import AnthropicProvider
     return AnthropicProvider(model=model)
 
 
-def _create_ollama(model: str | None) -> AIProvider:
+def _create_ollama(model: str | None, **kwargs: Any) -> AIProvider:
     from herald.ai.ollama_provider import OllamaProvider
     return OllamaProvider(model=model)
 
 
-def _create_literal(model: str | None = None) -> AIProvider:
+def _create_literal(model: str | None = None, **kwargs: Any) -> AIProvider:
     from herald.ai.literal_provider import LiteralProvider
     return LiteralProvider()
 

@@ -54,3 +54,69 @@ def test_secret_redaction_in_emitted_logs():
         assert "[REDACTED_AUTH]" in captured
     finally:
         test_logger.removeHandler(handler)
+
+
+class TestRedactValue:
+    """Verify redact_value() handles all JSON-serializable types correctly."""
+
+    def test_list_root_preserved(self):
+        """auto_diagnostics_json is a list — redact_value must preserve list structure."""
+        from herald.services.redaction import redact_value
+
+        records = [
+            {"attempt": 1, "stage": "extraction", "error_message": "blocked"},
+            {"attempt": 2, "stage": "extraction", "api_key": "sk-secret123"},
+        ]
+        result = redact_value(records)
+        assert isinstance(result, list), "List root must be preserved"
+        assert len(result) == 2
+        assert result[0]["attempt"] == 1
+        assert result[0]["stage"] == "extraction"
+
+    def test_dict_input_delegates_to_redact_dict(self):
+        from herald.services.redaction import redact_dict, redact_value
+
+        d = {"api_key": "secret", "stage": "tts"}
+        rv = redact_value(d)
+        rd = redact_dict(d)
+        assert rv == rd
+
+    def test_string_input_delegates_to_redact_text(self):
+        from herald.services.redaction import redact_value
+
+        result = redact_value("my api_key=sk-12345 is here")
+        assert isinstance(result, str)
+
+    def test_primitive_passthrough(self):
+        from herald.services.redaction import redact_value
+
+        assert redact_value(42) == 42
+        assert redact_value(3.14) == 3.14
+        assert redact_value(True) is True
+        assert redact_value(False) is False
+        assert redact_value(None) is None
+
+    def test_nested_list_of_dicts(self):
+        from herald.services.redaction import redact_value
+
+        data = [
+            {"network_probe": {"dns_ok": True, "tcp_ok": True, "summary": "OK"}},
+            {"api_key": "secret-key-value"},
+        ]
+        result = redact_value(data)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        # network_probe should survive
+        assert result[0]["network_probe"]["dns_ok"] is True
+        # api_key should be redacted
+        assert result[1]["api_key"] != "secret-key-value"
+
+    def test_sensitive_keys_redacted_in_list_items(self):
+        """Verify secrets inside list items get redacted."""
+        from herald.services.redaction import redact_value
+
+        data = [{"password": "hunter2", "stage": "delivery"}]
+        result = redact_value(data)
+        assert result[0]["password"] != "hunter2"
+        assert result[0]["stage"] == "delivery"
+

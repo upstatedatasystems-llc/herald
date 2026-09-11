@@ -381,52 +381,6 @@ def test_research_provider_separation_matrix():
         assert ("Google Search Grounding" in resp.message) or ("research grounding" in resp.message.lower())
 
 
-def test_api_provider_neutral_routing():
-    """Verify apps/api/main.py routes Brief/Standard scripts through AIProvider uniformly."""
-    from fastapi.testclient import TestClient
-
-    from apps.api.main import app, get_db, verify_api_key
-
-    db = setup_in_memory_db()
-    app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[verify_api_key] = lambda: True
-    client = TestClient(app)
-
-    job = PodcastJob(
-        id="api-route-job-1",
-        transport="api",
-        request_mode="standard",
-        source_hash="sha256_mock_api_source",
-        status=JobState.SOURCE_READY.value,
-        source_text="API source content to convert into script",
-        created_at=datetime.now(UTC),
-    )
-    db.add(job)
-    db.commit()
-
-    mock_provider = MagicMock()
-    mock_provider.is_configured.return_value = True
-    mock_provider.configured_model = "llama-3.3-70b-versatile"
-    from herald.ai.schema import PodcastScriptResponse
-    mock_provider.generate_script.return_value = PodcastScriptResponse(**SAMPLE_SCRIPT_JSON)
-
-    with patch("herald.ai.factory.get_ai_provider", return_value=mock_provider):
-        response = client.post("/api/v1/script/generate", json={"job_id": job.id})
-
-    app.dependency_overrides.clear()
-    assert response.status_code == 200
-    res_data = response.json()
-    assert res_data["status"] == JobState.QUEUED_TTS.value
-    assert res_data["episode_title"] == "AI Provider Expansion"
-    assert mock_provider.generate_script.called
-
-    db_job = db.query(PodcastJob).filter(PodcastJob.id == job.id).first()
-    assert (
-        db_job.ai_model == "llama-3.3-70b-versatile"
-        or db_job.ai_effective_model == "llama-3.3-70b-versatile"
-        or db_job.gemini_model == "llama-3.3-70b-versatile"
-    )
-    assert db_job.script_json["episode_title"] == "AI Provider Expansion"
 
 
 def test_cloudflare_model_precedence_and_validation():
@@ -464,42 +418,6 @@ def test_cloudflare_model_precedence_and_validation():
         assert res["error"] == "configured model unavailable"
 
 
-def test_api_research_endpoint_validation():
-    """Verify apps/api/main.py /api/v1/research rejects when research provider is unconfigured or incompatible."""
-    from fastapi.testclient import TestClient
-
-    from apps.api.main import app, get_db, verify_api_key
-
-    db = setup_in_memory_db()
-    app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[verify_api_key] = lambda: True
-    client = TestClient(app)
-
-    job = PodcastJob(
-        id="api-research-job-1",
-        transport="api",
-        request_mode="research",
-        source_hash="sha256_mock_res",
-        status=JobState.SOURCE_READY.value,
-        source_text="Research source content",
-        created_at=datetime.now(UTC),
-    )
-    db.add(job)
-    db.commit()
-
-    # Case 1: Research provider not configured
-    with patch("herald.ai.factory.get_research_provider", return_value=None):
-        resp = client.post("/api/v1/script/generate", json={"job_id": job.id})
-        assert resp.status_code == 400
-        detail = resp.json()["detail"]
-        assert ("Google Search Grounding" in detail) or ("search grounding" in detail.lower())
-
-    # Reset job status for Case 2
-    job.status = JobState.SOURCE_READY.value
-    db.commit()
-
-    # Case 2: Research provider configured but lacks capabilities.research_grounding
-    app.dependency_overrides.clear()
 
 
 def test_provider_generation_matrix_brief_and_standard():
@@ -732,3 +650,163 @@ def test_gemini_one_http_call_one_ai_interaction_invariant():
         assert len(rows_7) == 1
         assert rows_7[0].operation == "fidelity_audit"
         assert rows_7[0].success is True
+
+
+def test_cloudflare_all_4_response_shapes():
+    """Verify parser extracts content from all 4 Cloudflare Workers AI response schemas."""
+    from herald.ai.cloudflare_provider import extract_cloudflare_content
+
+    s1 = {"result": {"response": '{"episode_title": "Title 1"}'}}
+    assert extract_cloudflare_content(s1) == '{"episode_title": "Title 1"}'
+
+    s2 = {"result": {"choices": [{"message": {"content": '{"episode_title": "Title 2"}'}}]}}
+    assert extract_cloudflare_content(s2) == '{"episode_title": "Title 2"}'
+
+    s3 = {"response": '{"episode_title": "Title 3"}'}
+    assert extract_cloudflare_content(s3) == '{"episode_title": "Title 3"}'
+
+    s4 = {"choices": [{"message": {"content": '{"episode_title": "Title 4"}'}}]}
+    assert extract_cloudflare_content(s4) == '{"episode_title": "Title 4"}'
+
+
+def test_cloudflare_error_classification():
+    """Verify Cloudflare timeout and HTTP error mapping."""
+    import httpx
+    import pytest
+
+    from herald.ai.errors import (
+        AIAuthFailedError,
+        AIClientTimeoutError,
+        AIPermissionDeniedError,
+        AIProviderTimeoutError,
+        AIProviderUnavailableError,
+    )
+
+    prov = CloudflareProvider(account_id="acc", api_token="tok")
+    req = httpx.Request("POST", "https://api.cloudflare.com")
+
+    with pytest.raises(AIClientTimeoutError):
+        prov._classify_transport_error(httpx.TimeoutException("Read timed out", request=req))
+
+    resp_408 = httpx.Response(408, request=req, text="Request Timeout")
+    with pytest.raises(AIProviderTimeoutError):
+        prov._classify_http_error(resp_408)
+
+    resp_401 = httpx.Response(401, request=req, text="Unauthorized token")
+    with pytest.raises(AIAuthFailedError):
+        prov._classify_http_error(resp_401)
+
+    resp_403 = httpx.Response(403, request=req, text="Forbidden access")
+    with pytest.raises(AIPermissionDeniedError):
+        prov._classify_http_error(resp_403)
+
+    resp_500 = httpx.Response(500, request=req, text="Internal server error")
+    with pytest.raises(AIProviderUnavailableError):
+        prov._classify_http_error(resp_500)
+
+
+def test_cloudflare_qwen_and_gemma_authoritative_tuning():
+    """Verify verified catalog Qwen and Gemma request payloads contain authoritative tuning, but unverified models do not."""
+    prov_qwen_verified = CloudflareProvider(
+        account_id="acc",
+        api_token="tok",
+        model="@cf/qwen/qwen3.8-27b",
+    )
+    payload_qwen = prov_qwen_verified._build_request_payload(
+        system_prompt="sys",
+        user_prompt="usr",
+        max_output_tokens=16384,
+    )
+    assert payload_qwen["max_tokens"] == 16384
+    assert payload_qwen["reasoning_effort"] == "low"
+    assert payload_qwen["max_completion_tokens"] == 16384
+
+    prov_gemma_verified = CloudflareProvider(
+        account_id="acc",
+        api_token="tok",
+        model="@cf/google/gemma-4-26b-a4b-it",
+    )
+    payload_gemma = prov_gemma_verified._build_request_payload(
+        system_prompt="sys",
+        user_prompt="usr",
+        max_output_tokens=16384,
+    )
+    assert payload_gemma["max_tokens"] == 16384
+    assert payload_gemma["reasoning_effort"] == "low"
+    assert payload_gemma["max_completion_tokens"] == 16384
+
+    prov_unverified = CloudflareProvider(
+        account_id="acc",
+        api_token="tok",
+        model="@cf/qwen/custom-unverified-qwen-model",
+    )
+    payload_unverified = prov_unverified._build_request_payload(
+        system_prompt="sys",
+        user_prompt="usr",
+    )
+    assert "reasoning_effort" not in payload_unverified
+    assert "max_completion_tokens" not in payload_unverified
+
+
+def test_groq_413_vs_context_exceeded():
+    """Verify HTTP 413 maps to AIRequestTooLargeError and context window maps to AIContextExceededError."""
+    import httpx
+    import pytest
+
+    from herald.ai.errors import (
+        AIAuthFailedError,
+        AIContextExceededError,
+        AIPermissionDeniedError,
+        AIRateLimitedError,
+        AIRequestTooLargeError,
+    )
+
+    prov = GroqProvider(api_key="gsk_test")
+    req = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+
+    resp_413 = httpx.Response(413, request=req, text="Request Entity Too Large")
+    with pytest.raises(AIRequestTooLargeError):
+        prov._classify_http_error(resp_413)
+
+    resp_ctx = httpx.Response(
+        400, request=req, text='{"error": {"message": "context_length_exceeded: maximum context length is 8192"}}'
+    )
+    with pytest.raises(AIContextExceededError):
+        prov._classify_http_error(resp_ctx)
+
+    resp_429 = httpx.Response(
+        429, request=req, headers={"retry-after": "5"}, text="Rate limit reached"
+    )
+    with pytest.raises(AIRateLimitedError) as exc_info:
+        prov._classify_http_error(resp_429)
+    assert exc_info.value.retry_after_seconds == 5.0
+
+    resp_403 = httpx.Response(403, request=req, text="Access denied for organization")
+    with pytest.raises(AIPermissionDeniedError):
+        prov._classify_http_error(resp_403)
+
+    resp_401 = httpx.Response(401, request=req, text="Invalid API key provided")
+    with pytest.raises(AIAuthFailedError):
+        prov._classify_http_error(resp_401)
+
+
+def test_provider_distillation_actually_runs():
+    """Verify distill_chunk invokes provider.distill_text and propagates typed errors."""
+    import pytest
+
+    from herald.ai.adaptation import distill_chunk
+    from herald.ai.errors import AIRateLimitedError
+
+    mock_prov = MagicMock()
+    mock_prov.distill_text.return_value = "Structured distilled text"
+
+    res = distill_chunk("Long text chunk", chunk_index=0, total_chunks=1, provider=mock_prov)
+    assert res == "Structured distilled text"
+    mock_prov.distill_text.assert_called_once()
+
+    mock_failing_prov = MagicMock()
+    mock_failing_prov.distill_text.side_effect = AIRateLimitedError("Rate limit in distillation")
+
+    with pytest.raises(AIRateLimitedError):
+        distill_chunk("Long text chunk", chunk_index=0, total_chunks=1, provider=mock_failing_prov)
+

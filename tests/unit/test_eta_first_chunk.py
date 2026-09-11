@@ -1,12 +1,11 @@
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.config import settings
-from herald.db.models import Base, JobProcessingMetric, JobState, PodcastJob
+from herald.db.models import Base, JobState, PodcastJob
 from herald.services.eta_calculator import calculate_job_eta
 
 

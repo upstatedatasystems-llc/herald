@@ -174,7 +174,6 @@ def test_progress_claim_retry_on_failure_and_lease_expiry(db_session):
     If send_message fails, the CAS claim is cleared to allow immediate retry.
     If a claim was somehow abandoned without a message_id and is >30s old, the lease expires and allows retry.
     """
-    from datetime import timedelta
 
     now = datetime.now(UTC)
     job = PodcastJob(
@@ -238,3 +237,80 @@ def test_progress_claim_retry_on_failure_and_lease_expiry(db_session):
         telegram_client=mock_client,
     )
     assert res3 is False
+
+
+def test_first_chunk_milestone_retry_on_later_chunks(db_session):
+    """
+    Verify:
+    - Chunk 1 milestone fails delivery (e.g. transient network error). Claim is cleared.
+    - Chunk 2 milestone retries and succeeds, formatting dynamic chunk progress.
+    - Chunk 3 milestone does not resend because telegram_progress_message_id is now populated.
+    """
+    job = PodcastJob(
+        id="job-retry-milestone",
+        transport="telegram",
+        telegram_chat_id=1001,
+        telegram_message_id=2001,
+        request_mode="standard",
+        status=JobState.SYNTHESIZING.value,
+        source_hash="hash-retry-123",
+        source_text="source text for testing retry",
+        custom_voice="af_bella",
+        custom_speed=1.0,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    mock_client = MagicMock(spec=TelegramClient)
+    mock_client.is_configured = True
+
+    # 1. Chunk 1 attempt fails
+    mock_client.send_message.return_value = None  # delivery failed
+    res1 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=1,
+        total_chunks=4,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res1 is False
+    db_session.refresh(job)
+    assert job.telegram_progress_message_id is None
+    # Claim should have been cleared for retry
+    assert job.first_chunk_progress_claimed_at is None
+
+    # 2. Chunk 2 attempt succeeds
+    mock_client.send_message.return_value = {"message_id": 777}
+    res2 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=2,
+        total_chunks=4,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res2 is True
+    db_session.refresh(job)
+    assert job.telegram_progress_message_id == 777
+
+    # Check text sent on chunk 2 reflects multi-chunk progress
+    sent_text = mock_client.send_message.call_args[1]["text"]
+    assert "2/4 segments completed" in sent_text
+
+    # 3. Chunk 3 does NOT resend
+    mock_client.send_message.reset_mock()
+    res3 = notify_tts_chunk_progress(
+        db=db_session,
+        job=job,
+        chunk_index=3,
+        total_chunks=4,
+        chunk_audio_duration_s=10.0,
+        chunk_synthesis_duration_s=5.0,
+        telegram_client=mock_client,
+    )
+    assert res3 is False
+    mock_client.send_message.assert_not_called()
+

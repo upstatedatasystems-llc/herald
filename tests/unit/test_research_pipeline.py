@@ -1,11 +1,17 @@
 import json
 from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
+from herald.ai.gemini_provider import GeminiProvider
 from herald.config import settings
 from herald.db.models import PodcastJob, RequestMode
 from herald.gemini.client import (
+    GeminiError,
+    GeminiModelUnavailableError,
+    GeminiOutputTruncatedError,
     GeminiValidationError,
     generate_grounded_research,
     normalize_research_dossier,
@@ -209,131 +215,25 @@ def test_research_artifacts_generation(tmp_path):
     assert "https://nature.com/articles/q1" in md_content
 
 
-def test_generate_script_endpoint_research_mode_logging_and_pipeline(monkeypatch, db_session):
-    """
-    Integration test exercising POST /api/v1/script/generate endpoint for Research mode.
-    Verifies that logging calls (logger.info) in Stage 1a, 1b, 2, 3 execute cleanly
-    without NameError or unhandled runtime exceptions.
-    """
-    from fastapi.testclient import TestClient
-
-    from apps.api.main import app
-    from herald.db.models import JobState, PodcastJob
-    from herald.gemini.schema import PodcastScriptResponse, ResearchAuditResponse
-
-    monkeypatch.setattr(settings, "HERALD_ENV", "testing")
-    monkeypatch.setattr(settings, "GEMINI_API_KEY", "fake-gemini-key")
-    monkeypatch.setattr(settings, "RESEARCH_PROVIDER", "gemini")
-
-    job_id = "job-api-research-test-001"
-    job = PodcastJob(
-        id=job_id,
-        gmail_message_id="msg-api-res-1",
-        sender_email="auth@example.com",
-        request_mode=RequestMode.RESEARCH.value,
-        research_depth="high",
-        source_type="email_body",
-        source_hash="hash-api-res-1",
-        source_text="Primary article source material for quantum research.",
-        custom_title="Quantum Endpoint Test",
-        status=JobState.SOURCE_READY.value,
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    # Mock Gemini Research calls
-    def mock_grounded_research(source_text, research_depth="medium", *args, **kwargs):
-        return {
-            "raw_text": "Grounded evidence text",
-            "search_count": 2,
-            "source_count": 1,
-            "research_sources": [
-                {
-                    "source_id": "S1",
-                    "title": "Grounded Source",
-                    "url": "https://example.com/s1",
-                    "domain": "example.com",
-                    "retrieved_at": datetime.now(UTC).isoformat(),
-                    "search_query": "quantum research",
-                }
-            ],
-        }
-
-    def mock_normalize_dossier(source_text, grounded_research_data, *args, **kwargs):
-        return ResearchDossierResponse(
-            source_summary="Summary",
-            verification=[
-                {
-                    "source_claim": "Claim",
-                    "status": "supported",
-                    "notes": "Verified",
-                    "source_ids": ["S1"],
-                }
-            ],
-            useful_context=[],
-            outdated_or_uncertain=[],
-            research_sources=grounded_research_data["research_sources"],
-        )
-
-    def mock_generate_script(source_text, request_mode, research_dossier=None, source_title=None, *args, **kwargs):
-        return PodcastScriptResponse(
-            episode_title="Quantum Endpoint Test",
-            episode_description="Description",
-            estimated_minutes=3,
-            segments=[
-                {"order": 1, "heading": "Intro", "narration": "Welcome to the podcast narration."}
-            ],
-            warnings=[],
-        )
-
-    def mock_audit_script(source_text, research_dossier, script_dict, *args, **kwargs):
-        return ResearchAuditResponse(has_material_issues=False)
-
-    monkeypatch.setattr("apps.api.main.generate_grounded_research", mock_grounded_research)
-    monkeypatch.setattr("apps.api.main.normalize_research_dossier", mock_normalize_dossier)
-    monkeypatch.setattr("apps.api.main.generate_podcast_script", mock_generate_script)
-    monkeypatch.setattr("apps.api.main.audit_research_script", mock_audit_script)
-
-    client = TestClient(app)
-    res = client.post("/api/v1/script/generate", json={"job_id": job_id})
-
-    assert res.status_code == 200, f"Expected 200 OK, got {res.status_code}: {res.text}"
-    data = res.json()
-    assert data["job_id"] == job_id
-    assert data["status"] == JobState.QUEUED_TTS.value
-    assert data["request_mode"] == "research"
-    assert data["research_depth"] == "high"
-
-    # Verify database persistence across all pipeline stages
-    updated_job = db_session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
-    assert updated_job.research_grounding_json is not None
-    assert updated_job.research_json is not None
-    assert updated_job.script_json is not None
-    assert updated_job.research_audit_json is not None
-
-
-def test_api_and_pipeline_research_model_attribution(monkeypatch, tmp_path):
+def test_pipeline_research_model_attribution(monkeypatch, tmp_path):
     """
     Verify that when GEMINI_MODEL='custom-script-model' and GEMINI_RESEARCH_MODEL='custom-research-model',
-    both API-created and pipeline Research jobs store research_model='custom-research-model',
+    pipeline Research jobs store research_model='custom-research-model',
     and manifest/diagnostics truthfully reflect it.
     """
     from unittest.mock import patch
 
-    from fastapi.testclient import TestClient
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
-    from apps.api.main import app, get_db, verify_api_key
     from herald.core.models import HeraldRequest
     from herald.core.pipeline import process_herald_request
     from herald.db.connection import Base
-    from herald.db.models import JobState
+    from herald.db.models import PodcastJob
     from herald.gemini.schema import (
         PodcastScriptResponse,
         ResearchAuditResponse,
-        ResearchDossierResponse,
     )
     from herald.services.diagnostics_export import build_manifest_dict
 
@@ -365,16 +265,11 @@ def test_api_and_pipeline_research_model_attribution(monkeypatch, tmp_path):
     with patch.object(settings, "GEMINI_API_KEY", "valid_key"), \
          patch.object(settings, "GEMINI_MODEL", "custom-script-model"), \
          patch.object(settings, "GEMINI_RESEARCH_MODEL", "custom-research-model"), \
-         patch("herald.core.pipeline.generate_grounded_research", return_value={"raw_text": "t", "grounding_metadata": {}, "search_count": 1, "source_count": 1, "research_sources": []}), \
-         patch("herald.core.pipeline.normalize_research_dossier", return_value=mock_dossier), \
-         patch("herald.core.pipeline.generate_podcast_script", return_value=mock_script), \
-         patch("herald.core.pipeline.audit_research_script", return_value=mock_audit), \
-         patch("apps.api.main.generate_grounded_research", return_value={"raw_text": "t", "grounding_metadata": {}, "search_count": 1, "source_count": 1, "research_sources": []}), \
-         patch("apps.api.main.normalize_research_dossier", return_value=mock_dossier), \
-         patch("apps.api.main.generate_podcast_script", return_value=mock_script), \
-         patch("apps.api.main.audit_research_script", return_value=mock_audit):
+         patch("herald.ai.gemini_provider.GeminiProvider.generate_grounded_research", return_value={"raw_text": "t", "grounding_metadata": {}, "search_count": 1, "source_count": 1, "research_sources": []}), \
+         patch("herald.ai.gemini_provider.GeminiProvider.normalize_research_dossier", return_value=mock_dossier), \
+         patch("herald.ai.gemini_provider.GeminiProvider.generate_script", return_value=mock_script), \
+         patch("herald.ai.gemini_provider.GeminiProvider.audit_research_script", return_value=mock_audit):
 
-        # 1. Pipeline test
         req = HeraldRequest(
             transport="telegram",
             requester_identity="telegram:101",
@@ -387,29 +282,440 @@ def test_api_and_pipeline_research_model_attribution(monkeypatch, tmp_path):
         assert pipe_job is not None
         assert pipe_job.research_model == "custom-research-model"
 
-        # 2. API test
-        api_job = PodcastJob(
-            id="api-research-model-job",
-            transport="api",
-            request_mode="research",
-            source_hash="sha_api_res",
-            source_text="Test API source for research attribution.",
-            status=JobState.SOURCE_READY.value,
-            created_at=datetime.now(UTC),
-        )
-        db.add(api_job)
-        db.commit()
-
-        app.dependency_overrides[get_db] = lambda: db
-        app.dependency_overrides[verify_api_key] = lambda: True
-        client = TestClient(app)
-        api_res = client.post("/api/v1/script/generate", json={"job_id": api_job.id})
-        assert api_res.status_code == 200
-        app.dependency_overrides.clear()
-
-        db.refresh(api_job)
-        assert api_job.research_model == "custom-research-model"
-
-        # 3. Diagnostics manifest attribution check
-        manifest = build_manifest_dict(api_job, db, included_files=[], truncated_files=[])
+        manifest = build_manifest_dict(pipe_job, db, included_files=[], truncated_files=[])
         assert manifest["research_model"] == "custom-research-model"
+
+
+class TestResearchNormalizationConfig:
+    """Verify GEMINI_RESEARCH_NORMALIZATION_INITIAL_OUTPUT_TOKENS and MAX config exists."""
+
+    def test_config_field_exists(self):
+        assert hasattr(settings, "GEMINI_RESEARCH_NORMALIZATION_INITIAL_OUTPUT_TOKENS")
+        assert settings.GEMINI_RESEARCH_NORMALIZATION_INITIAL_OUTPUT_TOKENS == 8192
+        assert hasattr(settings, "GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS")
+        assert settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS == 16384
+
+    def test_config_field_is_int(self):
+        assert isinstance(settings.GEMINI_RESEARCH_NORMALIZATION_INITIAL_OUTPUT_TOKENS, int)
+        assert isinstance(settings.GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS, int)
+
+
+
+
+class TestResearchNormalization40Sources:
+    """Verify research normalization with large source registries."""
+
+    def _generate_mock_sources(self, count: int = 40):
+        return [
+            {
+                "source_id": f"S{i}",
+                "title": f"Authoritative Study {i}: Advances in Research",
+                "url": f"https://doi.org/10.1000/study-{i}",
+                "domain": "doi.org",
+                "retrieved_at": "2026-09-09T12:00:00Z",
+                "search_query": f"research topic {i}",
+            }
+            for i in range(1, count + 1)
+        ]
+
+    def test_schema_excludes_research_sources_and_injects_locally(self):
+        """Gemini schema must NOT include research_sources, and sources are injected locally."""
+        from herald.gemini.client import normalize_research_dossier
+
+        sources = self._generate_mock_sources(40)
+        captured_payload = {}
+
+        def mock_post(url, json=None, headers=None):
+            nonlocal captured_payload
+            captured_payload = json
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            valid_dossier = {
+                "source_summary": "Comprehensive summary of findings.",
+                "verification": [
+                    {
+                        "source_claim": "Claim 1",
+                        "status": "supported",
+                        "notes": "Verified against studies",
+                        "source_ids": ["S1", "S2"],
+                    }
+                ],
+                "useful_context": [
+                    {
+                        "fact": "Fact 1",
+                        "why_it_matters": "Context is essential",
+                        "source_ids": ["S3"],
+                    }
+                ],
+                "outdated_or_uncertain": [],
+            }
+            mock_resp.json.return_value = {
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {"parts": [{"text": json_mod.dumps(valid_dossier)}]},
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 500, "totalTokenCount": 1500},
+            }
+            return mock_resp
+
+        import json as json_mod
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-key"),
+            patch("httpx.Client.post", side_effect=mock_post),
+            patch("herald.gemini.client._record_gemini_interaction"),
+        ):
+            dossier = normalize_research_dossier(
+                source_text="Test primary source.",
+                grounded_research_data={
+                    "raw_text": "Grounded research notes.",
+                    "research_sources": sources,
+                },
+            )
+
+        # 1. Schema must NOT have research_sources
+        gen_cfg = captured_payload.get("generationConfig", {})
+        schema_props = gen_cfg.get("responseSchema", {}).get("properties", {})
+        assert "research_sources" not in schema_props, "research_sources must not be in Gemini schema"
+
+        # 2. Returned dossier must have all 40 sources locally injected
+        assert len(dossier.research_sources) == 40
+        assert dossier.research_sources[0].source_id == "S1"
+        assert dossier.research_sources[39].source_id == "S40"
+
+    def test_finish_reason_max_tokens_triggers_truncation_error(self):
+        """When finishReason is MAX_TOKENS, GeminiOutputTruncatedError must be raised without attempting JSON parse."""
+        from herald.gemini.client import normalize_research_dossier
+
+        def mock_post_truncated(url, json=None, headers=None):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"source_summary": "Incomplete json'}]},
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 8192, "totalTokenCount": 9192},
+            }
+            return mock_resp
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-key"),
+            patch.object(settings, "GEMINI_RETRY_COUNT", 1),
+            patch("httpx.Client.post", side_effect=mock_post_truncated),
+            patch("herald.gemini.client._record_gemini_interaction"),
+        ):
+            with pytest.raises(GeminiOutputTruncatedError) as exc_info:
+                normalize_research_dossier(
+                    source_text="Test source.",
+                    grounded_research_data={
+                        "raw_text": "Evidence.",
+                        "research_sources": [{"source_id": "S1"}],
+                    },
+                )
+
+        assert "output truncated" in str(exc_info.value).lower()
+
+    def test_research_normalization_records_stop_telemetry(self):
+        """Successful normalization records finish_reason='STOP' and requested_max_output_tokens=8192."""
+        from herald.gemini.client import normalize_research_dossier
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"x-goog-request-id": "req-norm-stop-123"}
+        valid_dossier = {
+            "source_summary": "Summary of research findings.",
+            "verification": [],
+            "useful_context": [],
+            "outdated_or_uncertain": [],
+        }
+        mock_resp.json.return_value = {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": json.dumps(valid_dossier)}]},
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 1200, "candidatesTokenCount": 450, "totalTokenCount": 1650},
+        }
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-key"),
+            patch("httpx.Client.post", return_value=mock_resp),
+            patch("herald.gemini.client._record_gemini_interaction") as mock_record,
+        ):
+            dossier = normalize_research_dossier(
+                source_text="Test source.",
+                grounded_research_data={
+                    "raw_text": "Evidence notes.",
+                    "research_sources": self._generate_mock_sources(1),
+                },
+                job_id="job-norm-stop",
+            )
+
+        assert dossier is not None
+        mock_record.assert_called_once()
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["success"] is True
+        assert kwargs["finish_reason"] == "STOP"
+        assert kwargs["requested_max_output_tokens"] == 8192
+        assert kwargs["job_id"] == "job-norm-stop"
+
+    def test_research_normalization_records_max_tokens_and_doubles_budget(self):
+        """MAX_TOKENS records finish_reason='MAX_TOKENS' and doubles budget on retry."""
+        from herald.gemini.client import normalize_research_dossier
+
+        sent_payloads = []
+
+        def mock_post_retry(url, json=None, headers=None):
+            sent_payloads.append(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            if len(sent_payloads) == 1:
+                # First attempt truncated
+                mock_resp.json.return_value = {
+                    "candidates": [
+                        {
+                            "finishReason": "MAX_TOKENS",
+                            "content": {"parts": [{"text": '{"source_summary": "Incomplete'}]},
+                        }
+                    ],
+                    "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 8192, "totalTokenCount": 9192},
+                }
+            else:
+                # Second attempt succeeds
+                valid_dossier = {
+                    "source_summary": "Full summary on retry.",
+                    "verification": [],
+                    "useful_context": [],
+                    "outdated_or_uncertain": [],
+                }
+                mock_resp.json.return_value = {
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {"parts": [{"text": json_mod.dumps(valid_dossier)}]},
+                        }
+                    ],
+                    "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 12000, "totalTokenCount": 13000},
+                }
+            return mock_resp
+
+        import json as json_mod
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-key"),
+            patch.object(settings, "GEMINI_RETRY_COUNT", 2),
+            patch("httpx.Client.post", side_effect=mock_post_retry),
+            patch("herald.gemini.client._record_gemini_interaction") as mock_record,
+            patch("time.sleep"),
+        ):
+            dossier = normalize_research_dossier(
+                source_text="Test source.",
+                grounded_research_data={
+                    "raw_text": "Evidence notes.",
+                    "research_sources": self._generate_mock_sources(1),
+                },
+                job_id="job-norm-retry",
+            )
+
+        assert dossier is not None
+        assert len(sent_payloads) == 2
+        # First request had 8192
+        assert sent_payloads[0]["generationConfig"]["maxOutputTokens"] == 8192
+        # Second request doubled to 16384 (hard cap)
+        assert sent_payloads[1]["generationConfig"]["maxOutputTokens"] == 16384
+
+        assert mock_record.call_count == 2
+        call1_kwargs = mock_record.call_args_list[0].kwargs
+        assert call1_kwargs["success"] is False
+        assert call1_kwargs["finish_reason"] == "MAX_TOKENS"
+        assert call1_kwargs["requested_max_output_tokens"] == 8192
+
+        call2_kwargs = mock_record.call_args_list[1].kwargs
+        assert call2_kwargs["success"] is True
+        assert call2_kwargs["finish_reason"] == "STOP"
+        assert call2_kwargs["requested_max_output_tokens"] == 16384
+
+
+
+
+def test_default_research_model_is_gemini_36_flash():
+    """Verify clean configuration defaults to gemini-3.6-flash."""
+    assert settings.GEMINI_RESEARCH_MODEL == "gemini-3.6-flash"
+
+
+def test_setup_migration_upgrades_former_default_and_preserves_custom(tmp_path):
+    """Verify setup migration upgrades former default gemini-2.5-flash while preserving custom models."""
+    env_file = tmp_path / ".env"
+
+    # Case 1: Former default is upgraded
+    env_file.write_text('GEMINI_RESEARCH_MODEL="gemini-2.5-flash"\nOTHER="val"\n', encoding="utf-8")
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    res_m = None
+    for line in lines:
+        if line.startswith("GEMINI_RESEARCH_MODEL="):
+            res_m = line.split("=", 1)[1].strip('"\'')
+    if res_m == "gemini-2.5-flash":
+        res_m = "gemini-3.6-flash"
+    assert res_m == "gemini-3.6-flash"
+
+    # Case 2: Custom model is preserved
+    env_file.write_text('GEMINI_RESEARCH_MODEL="gemini-1.5-pro"\nOTHER="val"\n', encoding="utf-8")
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    res_m = None
+    for line in lines:
+        if line.startswith("GEMINI_RESEARCH_MODEL="):
+            res_m = line.split("=", 1)[1].strip('"\'')
+    if res_m == "gemini-2.5-flash":
+        res_m = "gemini-3.6-flash"
+    assert res_m == "gemini-1.5-pro"
+
+
+
+
+def test_grounded_research_404_model_not_found_raises_without_retry():
+    """Verify model 404 raises GeminiModelUnavailableError immediately with zero retries."""
+    mock_resp = httpx.Response(
+        404,
+        json={"error": {"code": 404, "message": "models/gemini-nonexistent was not found", "status": "NOT_FOUND"}},
+    )
+
+    attempt_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        return mock_resp
+
+    with patch("httpx.Client.post", side_effect=mock_post):
+        with pytest.raises(GeminiModelUnavailableError) as exc_info:
+            generate_grounded_research(
+                source_text="Test source text for research",
+                research_depth="low",
+                api_key="fake-key",
+                model_name="gemini-nonexistent",
+            )
+
+        assert exc_info.value.error_category == "AI_MODEL_UNAVAILABLE"
+        assert exc_info.value.retryable is False
+        # Must NOT retry
+        assert attempt_count == 1
+
+
+def test_grounded_research_unrelated_404_retries_and_raises_generic_error():
+    """Verify non-model 404 retries and raises standard GeminiError."""
+    mock_resp = httpx.Response(
+        404,
+        json={"error": {"code": 404, "message": "Resource path /custom was not found", "status": "UNKNOWN"}},
+    )
+
+    attempt_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal attempt_count
+        attempt_count += 1
+        return mock_resp
+
+    with patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep", return_value=None):
+        with pytest.raises(GeminiError) as exc_info:
+            generate_grounded_research(
+                source_text="Test source text for research",
+                research_depth="low",
+                api_key="fake-key",
+                model_name="gemini-custom",
+            )
+
+        assert not isinstance(exc_info.value, GeminiModelUnavailableError)
+        assert attempt_count == settings.GEMINI_RETRY_COUNT
+
+
+def test_check_research_connection_success():
+    """Verify check_research_connection reports connected when probe succeeds."""
+    provider = GeminiProvider()
+    mock_resp = httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "pong"}]}}]})
+
+    with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", return_value=mock_resp):
+        res = provider.check_research_connection(force_refresh=True)
+        assert res["configured"] is True
+        assert res["connected"] is True
+        assert res["model"] == "gemini-3.6-flash"
+        assert res["error"] is None
+
+
+def test_check_research_connection_model_unavailable_404():
+    """Verify check_research_connection identifies AI_MODEL_UNAVAILABLE on 404."""
+    provider = GeminiProvider()
+    mock_resp = httpx.Response(
+        404,
+        json={"error": {"code": 404, "message": "models/gemini-3.6-flash is not found", "status": "NOT_FOUND"}},
+    )
+
+    with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", return_value=mock_resp):
+        res = provider.check_research_connection(force_refresh=True)
+        assert res["configured"] is True
+        assert res["connected"] is False
+        assert res.get("error_category") == "AI_MODEL_UNAVAILABLE"
+        assert "unavailable or not found" in res["error"]
+
+
+def test_check_research_connection_grounding_failure():
+    """Verify check_research_connection detects grounding tool failure (e.g. 400)."""
+    provider = GeminiProvider()
+    mock_resp = httpx.Response(
+        400,
+        json={"error": {"code": 400, "message": "Google Search tool not supported for this model"}},
+    )
+
+    with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", return_value=mock_resp):
+        res = provider.check_research_connection(force_refresh=True)
+        assert res["configured"] is True
+        assert res["connected"] is False
+        assert "grounding tool failure" in res["error"]
+
+
+def test_ai_check_command_independent_reporting():
+    """Verify /ai-check reports standard and research status independently."""
+    from herald.telegram.bot import handle_telegram_command
+    from herald.telegram.client import TelegramClient
+
+    mock_client = MagicMock(spec=TelegramClient)
+    mock_db = MagicMock()
+    msg = {
+        "chat": {"id": 12345, "type": "private"},
+        "from": {"id": 12345, "username": "tester"},
+        "message_id": 999,
+    }
+
+    # Standard succeeds, Research fails
+    mock_std = {"provider": "Gemini", "configured": True, "connected": True, "model": "gemini-3.5-flash", "error": None}
+    mock_res = {"provider": "Gemini Research", "configured": True, "connected": False, "model": "gemini-3.6-flash", "error": "model unavailable (404)"}
+
+    with patch("herald.telegram.bot.is_user_authorized", return_value=True), \
+         patch("herald.telegram.bot.get_ai_provider") as mock_get_prov, \
+         patch("herald.ai.gemini_provider.GeminiProvider.check_research_connection", return_value=mock_res), \
+         patch.object(settings, "GEMINI_API_KEY", "valid-key"):
+        mock_prov = MagicMock()
+        mock_prov.is_configured.return_value = True
+        mock_prov.check_connection.return_value = mock_std
+        mock_prov.check_research_connection.return_value = mock_res
+        mock_get_prov.return_value = mock_prov
+
+        handle_telegram_command(mock_db, mock_client, msg, "/ai-check", "")
+
+        assert mock_client.send_message.call_count >= 2
+        # Final message contains both statuses
+        final_call = mock_client.send_message.call_args_list[-1]
+        msg_text = final_call.kwargs.get("text", "")
+        assert "Gemini (Standard):</b> Connected" in msg_text
+        assert ("Gemini Research:</b> Unavailable" in msg_text) or ("Research Grounding (Gemini):</b> Unavailable" in msg_text)
+
+

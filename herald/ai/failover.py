@@ -9,6 +9,7 @@ Enforces:
 6. Safe preflight logging and failover telemetry with zero secret/source leakage.
 """
 
+import json
 import logging
 import time
 from typing import Any, Callable
@@ -23,13 +24,12 @@ from herald.ai.policy import (
     ActionType,
     AdaptationBudget,
     AdaptationUsage,
-    RetryDecision,
     classify_error,
     decide_policy,
 )
 from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
 from herald.config import settings
-from herald.db.models import PodcastJob
+from herald.db.models import AIInteraction, PodcastJob
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 
 logger = logging.getLogger("herald.ai.failover")
@@ -71,17 +71,53 @@ def record_ai_preflight(
                 reasoning_effort = m.model_specific_defaults.get("reasoning_effort")
                 break
 
+    op_instructions = {
+        "script_generation": 2200,
+        "grounded_research": 1800,
+        "research_normalization": 2500,
+        "research_script": 2800,
+        "research_audit": 1900,
+        "research_repair": 2100,
+        "verification": 1600,
+        "verification_repair": 1800,
+        "adaptation": 800,
+    }
+    instruction_len = op_instructions.get(operation, 1500)
+
+    op_max_output = {
+        "grounded_research": 8192,
+        "research_normalization": getattr(settings, "GEMINI_RESEARCH_MAX_OUTPUT_TOKENS", 16384),
+        "research_script": getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 8192),
+        "script_generation": getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 8192),
+        "verification": 4096,
+        "verification_repair": 8192,
+        "adaptation": 4096,
+    }
+    req_output = op_max_output.get(operation, 8192)
+    if known_max_output:
+        req_output = min(req_output, known_max_output)
+
+    estimated_envelope = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "X" * instruction_len},
+            {"role": "user", "content": text},
+        ],
+        "max_tokens": req_output,
+    }
+    serialized_req_bytes = len(json.dumps(estimated_envelope).encode("utf-8"))
+
     preflight_meta = {
         "provider": provider,
         "model": model,
         "operation": operation,
         "source_characters": source_chars,
         "source_utf8_bytes": source_bytes,
-        "serialized_request_bytes": source_bytes,
+        "serialized_request_bytes": serialized_req_bytes,
         "estimated_input_tokens": estimated_tokens,
         "known_context_limit": known_context,
         "known_output_limit": known_max_output,
-        "requested_max_output": known_max_output,
+        "requested_max_output": req_output,
         "known_request_body_limit": known_body_limit,
         "attempt": attempt,
         "configured_timeout_seconds": settings.effective_ai_timeout_seconds,
@@ -127,27 +163,38 @@ def record_ai_preflight(
 def get_job_provider_chain(job: PodcastJob) -> list[dict[str, str]]:
     """
     Extract immutable provider candidate chain from job snapshot.
-    Falls back cleanly to primary provider/model columns for legacy jobs.
+    Falls back cleanly to primary provider/model columns or isolated legacy recovery.
+    Never returns ambiguous provider in executable chain.
     """
     raw_chain = getattr(job, "ai_provider_chain_json", None)
     if raw_chain and isinstance(raw_chain, list) and len(raw_chain) > 0:
-        return [
+        candidates = [
             {"provider": str(c.get("provider", "")).lower().strip(), "model": str(c.get("model", "")).strip()}
             for c in raw_chain
-            if isinstance(c, dict) and c.get("provider")
+            if isinstance(c, dict) and c.get("provider") and str(c.get("provider", "")).lower().strip() != "ambiguous"
         ]
+        if candidates:
+            return candidates
 
-    # Fallback from primary columns or settings
-    prov = (
-        getattr(job, "ai_provider", None)
-        or getattr(settings, "AI_PROVIDER", "gemini")
-    ).lower().strip()
-    mod = (
-        getattr(job, "ai_model", None)
-        or getattr(job, "gemini_model", None)
-        or (getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash") if prov == "gemini" else "")
-    )
-    return [{"provider": prov, "model": mod}]
+    # Fallback from primary columns for legacy jobs
+    prov = getattr(job, "ai_provider", None)
+    if prov and str(prov).lower().strip() != "ambiguous":
+        p_clean = str(prov).lower().strip()
+        mod = getattr(job, "ai_model", None) or getattr(job, "gemini_model", None) or ""
+        return [{"provider": p_clean, "model": mod}]
+
+    # Isolated legacy fallback only (historical jobs with gemini_model)
+    legacy_gem = getattr(job, "gemini_model", None)
+    if legacy_gem:
+        return [{"provider": "gemini", "model": legacy_gem}]
+
+    # Server default chain recovery for ambiguous / missing chains
+    from herald.ai.resolution import get_server_default_chain
+    try:
+        def_chain = get_server_default_chain()
+        return [{"provider": c.provider_id, "model": c.model_id} for c in def_chain]
+    except Exception:
+        return [{"provider": "literal", "model": "none"}]
 
 
 def _call_execute_fn(fn: Callable[..., Any], provider: Any, attempt: int, source_text: str | None) -> Any:
@@ -280,8 +327,9 @@ def execute_with_failover(
                 db.commit()
             continue
 
-        # 3. Instantiate provider for execution
-        prov_instance = create_provider(p_id, model_id=m_id)
+        # 3. Instantiate provider for execution with immutable research model snapshot
+        res_model = getattr(job, "research_model", None)
+        prov_instance = create_provider(p_id, model_id=m_id, research_model=res_model)
 
         # 4. Same-provider execution & bounded retry loop
         attempt = 1
@@ -312,17 +360,32 @@ def execute_with_failover(
                         source_title=getattr(job, "custom_title", None),
                         db=db,
                     )
-                    # Item 17: Canonical job.source_text is NEVER overwritten by adapted content
+                    # Canonical job.source_text is NEVER overwritten by adapted content
                     source_text = adapted_text
                     continue
+                except (TypeError, ValueError, AttributeError, NameError, KeyError, IndexError, SyntaxError, AssertionError):
+                    # Programmer errors and local validation bugs must never trigger failover
+                    raise
                 except Exception as adapt_err:
                     logger.warning(f"Preflight adaptation failed on {p_id}/{m_id}: {adapt_err}")
+                    classified_adapt = classify_error(
+                        adapt_err, provider=p_id, model=m_id, operation=f"{operation}_adaptation"
+                    )
+                    has_next = (curr_index + 1) < len(chain)
+                    adapt_decision = decide_policy(
+                        error=classified_adapt,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        has_next_candidate=has_next,
+                    )
                     failures_log.append({
                         "provider": p_id,
                         "model": m_id,
-                        "reason": size_err.category,
-                        "detail": f"{size_err.safe_detail} (adaptation failed: {adapt_err})",
+                        "reason": classified_adapt.category,
+                        "detail": f"{classified_adapt.safe_detail} (adaptation failed: {adapt_err})",
                     })
+                    if adapt_decision.action == ActionType.FAIL_FINAL or not has_next:
+                        raise classified_adapt
                     break  # Break inner loop to advance to next candidate
 
             try:
@@ -337,6 +400,22 @@ def execute_with_failover(
                 if db:
                     db.commit()
                     if getattr(job, "id", None):
+                        actual_in = getattr(result, "prompt_tokens", None)
+                        actual_out = getattr(result, "completion_tokens", None)
+                        if actual_in is None and getattr(prov_instance, "last_usage", None):
+                            actual_in = prov_instance.last_usage.get("prompt_tokens")
+                            actual_out = prov_instance.last_usage.get("completion_tokens")
+                        if actual_in is None and getattr(job, "id", None):
+                            latest_inter = (
+                                db.query(AIInteraction)
+                                .filter(AIInteraction.job_id == job.id)
+                                .order_by(AIInteraction.started_at.desc())
+                                .first()
+                            )
+                            if latest_inter:
+                                actual_in = latest_inter.prompt_tokens
+                                actual_out = latest_inter.completion_tokens
+
                         record_job_diagnostic_event(
                             job_id=job.id,
                             level="INFO",
@@ -350,8 +429,8 @@ def execute_with_failover(
                                 "attempt": attempt,
                                 "elapsed_ms": elapsed_ms,
                                 "failover_chain_index": curr_index,
-                                "actual_input_tokens": getattr(result, "prompt_tokens", None),
-                                "actual_output_tokens": getattr(result, "completion_tokens", None),
+                                "actual_input_tokens": actual_in,
+                                "actual_output_tokens": actual_out,
                             },
                             db=db,
                         )
@@ -395,16 +474,23 @@ def execute_with_failover(
                         source_text = adapted_text
                         attempt += 1
                         continue
+                    except (TypeError, ValueError, AttributeError, NameError, KeyError, IndexError, SyntaxError, AssertionError):
+                        # Programmer errors and local validation bugs must never trigger failover
+                        raise
                     except Exception as adapt_err:
                         logger.warning(f"Large-source adaptation failed on {p_id}/{m_id}: {adapt_err}")
-                        if has_next:
-                            decision = RetryDecision(
-                                action=ActionType.FAILOVER_NEXT_PROVIDER,
-                                reason=f"Large-source adaptation failed ({adapt_err}); failing over",
-                                error=classified,
-                            )
-                        else:
-                            raise
+                        classified_adapt = classify_error(
+                            adapt_err, provider=p_id, model=m_id, operation=f"{operation}_adaptation"
+                        )
+                        adapt_decision = decide_policy(
+                            error=classified_adapt,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            has_next_candidate=has_next,
+                        )
+                        if adapt_decision.action == ActionType.FAIL_FINAL or not has_next:
+                            raise classified_adapt
+                        decision = adapt_decision
 
                 if decision.action == ActionType.RETRY_SAME_PROVIDER:
                     if decision.backoff_seconds > 0:

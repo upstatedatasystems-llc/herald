@@ -15,12 +15,12 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.orm import Session
 
+from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 from herald.db.state_machine import transition_job_state
 from herald.services.diagnostics_export import (
     cleanup_expired_diagnostics_archives,
     ensure_terminal_diagnostics_archive,
-    get_diagnostics_base_dir,
     get_terminal_diagnostics_path,
     sweep_unarchived_terminal_jobs,
 )
@@ -239,6 +239,7 @@ def test_pipeline_extraction_failure_generates_archive(clean_diagnostics_dir, db
 def test_deliver_job_diagnostics_preserves_terminal_archive(clean_diagnostics_dir, db_session: Session):
     """Verify deliver_job_diagnostics serves canonical archive for terminal job without unlinking."""
     from unittest.mock import MagicMock
+
     from herald.telegram.delivery import deliver_job_diagnostics
 
     job = _create_dummy_job(db_session, status=JobState.COMPLETE.value)
@@ -313,6 +314,7 @@ def test_delivery_telemetry_persisted_in_complete_archive(clean_diagnostics_dir,
     TELEGRAM_DELIVERY_COMPLETE diagnostic event before ensure_terminal_diagnostics_archive,
     proving final persisted COMPLETE ZIP contains all delivery telemetry."""
     from unittest.mock import MagicMock
+
     from herald.telegram.delivery import deliver_single_job
 
     job = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
@@ -364,6 +366,7 @@ def test_delivery_telemetry_persisted_in_complete_archive(clean_diagnostics_dir,
 def test_delivery_permanent_failure_persisted_in_failed_final_archive(clean_diagnostics_dir, db_session: Session):
     """Verify permanent delivery failure (3 attempts) creates FAILED_FINAL archive with TELEGRAM_DELIVERY_FAILED event."""
     from unittest.mock import MagicMock
+
     from herald.telegram.client import TelegramAPIError
     from herald.telegram.delivery import deliver_single_job
 
@@ -423,6 +426,7 @@ def test_telegram_delivery_missing_audio_creates_failed_final_archive(
     """Point 1A: missing local audio transitions to FAILED_FINAL, records failure telemetry,
     and automatically persists canonical <job>_FAILED_FINAL.zip containing failure evidence."""
     from unittest.mock import MagicMock
+
     from herald.telegram.delivery import deliver_single_job
 
     job = _create_dummy_job(db_session, status=JobState.AUDIO_READY.value)
@@ -471,6 +475,7 @@ def test_telegram_delivery_oversized_audio_creates_failed_final_archive(
     """Point 1B: oversized audio transitions to FAILED_FINAL, records failure telemetry,
     and automatically persists canonical <job>_FAILED_FINAL.zip containing failure evidence."""
     from unittest.mock import MagicMock
+
     from herald.telegram.delivery import deliver_single_job
 
     monkeypatch.setattr("herald.config.settings.TELEGRAM_MAX_AUDIO_BYTES", 500)
@@ -499,7 +504,6 @@ def test_telegram_delivery_oversized_audio_creates_failed_final_archive(
     assert canonical_path.stat().st_size > 0
 
     with zipfile.ZipFile(canonical_path, "r") as zf:
-        namelist = zf.namelist()
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         assert manifest["job_id"] == job.id
         assert manifest["status"] == JobState.FAILED_FINAL.value
@@ -522,7 +526,8 @@ def test_telegram_failed_final_characterization_table(
     """Point 2: Characterization table proving every Telegram FAILED_FINAL path produces
     a canonical <job>_FAILED_FINAL.zip archive with failure telemetry."""
     from unittest.mock import MagicMock
-    from herald.core.pipeline import process_herald_request, HeraldRequest
+
+    from herald.core.pipeline import HeraldRequest, process_herald_request
     from herald.extraction.url_extractor import ArticleExtractionError, SSRFVulnerabilityError
     from herald.gemini.client import GeminiError
     from herald.telegram.client import TelegramAPIError
@@ -600,10 +605,8 @@ def test_telegram_failed_final_characterization_table(
         paths_tested.append("EXTRACTION_FAILURE")
 
     # 6. Scripting failure
-    mock_provider = MagicMock()
-    mock_provider.is_configured.return_value = True
-    mock_provider.generate_script.side_effect = GeminiError("Script generation error")
-    with patch("herald.core.pipeline.get_ai_provider", return_value=mock_provider):
+    with patch.object(settings, "GEMINI_API_KEY", "test-key-1234"), \
+         patch("herald.ai.gemini_provider.GeminiProvider.generate_script", side_effect=GeminiError("Script generation error")):
         req_scr = HeraldRequest(
             source_type="text",
             source_text="Valid source text for scripting test",
@@ -634,106 +637,17 @@ def test_telegram_failed_final_characterization_table(
     assert len(paths_tested) == 7
 
 
-def test_api_extraction_failed_final_creates_canonical_archive(
-    clean_diagnostics_dir, db_session: Session, monkeypatch
-):
-    """Point 3A: apps/api/main.py URL extraction failure transitions to FAILED_FINAL,
-    records stage metrics and diagnostic events, and persists canonical FAILED_FINAL ZIP."""
-    from apps.api.main import process_intake, IntakeRequest
-    from herald.extraction.url_extractor import SourceAccessBlockedError
-
-    monkeypatch.setattr("herald.config.Settings.get_allowed_senders_list", lambda self: ["operator@herald.local"])
-
-    req = IntakeRequest(
-        gmail_message_id="msg_intake_fail_001",
-        sender_email="operator@herald.local",
-        subject="Podcast: Standard",
-        body_text="https://paywalled-news.com/article",
-    )
-    with patch("apps.api.main.extract_article_from_url", side_effect=SourceAccessBlockedError("Cloudflare 403 Forbidden")):
-        resp = process_intake(req=req, db=db_session)
-        assert resp.status == JobState.FAILED_FINAL.value
-        assert resp.error_category == "SOURCE_ACCESS_BLOCKED"
-
-        canonical_path = get_terminal_diagnostics_path(resp.job_id, JobState.FAILED_FINAL.value)
-        assert canonical_path.exists()
-        assert canonical_path.stat().st_size > 0
-
-        with zipfile.ZipFile(canonical_path, "r") as zf:
-            namelist = zf.namelist()
-            assert "manifest.json" in namelist
-            assert "processing-metrics.json" in namelist
-            assert "diagnostic-events.jsonl" in namelist
-
-            metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
-            ext_metric = next((m for m in metrics if m["stage"] == "URL_EXTRACTION"), None)
-            assert ext_metric is not None
-            assert ext_metric["status"] == "failed"
-
-            events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
-            ext_event = next((e for e in events if e["event_type"] == "EXTRACTION_FAILED"), None)
-            assert ext_event is not None
-            assert ext_event["metadata"]["category"] == "SOURCE_ACCESS_BLOCKED"
-
-
-def test_api_n8n_delivery_complete_creates_canonical_archive_with_metrics(
-    clean_diagnostics_dir, db_session: Session
-):
-    """Point 3B & 3C: n8n delivery complete transitions to COMPLETE, records EMAIL_DELIVERY,
-    DELIVERY_TOTAL, and END_TO_END metrics, and generates canonical COMPLETE archive."""
-    from apps.api.main import update_delivery_complete, DeliveryCompleteRequest
-
-    now = datetime.now(UTC)
-    job = _create_dummy_job(db_session, status=JobState.DELIVERING.value)
-    job.drive_file_id = "drive_audio_123"
-    job.details_drive_file_id = "drive_details_123"
-    job.audio_ready_at = now - timedelta(seconds=60)
-    job.created_at = now - timedelta(seconds=120)
-    db_session.commit()
-
-    req = DeliveryCompleteRequest(
-        gmail_result_message_id="msg_gmail_987",
-        started_at=(now - timedelta(seconds=10)).isoformat(),
-        finished_at=now.isoformat(),
-        duration_ms=10000,
-    )
-    resp = update_delivery_complete(job_id=job.id, req=req, db=db_session)
-    assert resp["status"] == JobState.COMPLETE.value
-
-    canonical_path = get_terminal_diagnostics_path(job.id, JobState.COMPLETE.value)
-    assert canonical_path.exists()
-    assert canonical_path.stat().st_size > 0
-
-    with zipfile.ZipFile(canonical_path, "r") as zf:
-        namelist = zf.namelist()
-        assert "manifest.json" in namelist
-        assert "processing-metrics.json" in namelist
-        assert "diagnostic-events.jsonl" in namelist
-
-        metrics = json.loads(zf.read("processing-metrics.json").decode("utf-8"))
-        metric_stages = {m["stage"] for m in metrics}
-        assert "EMAIL_DELIVERY" in metric_stages
-        assert "DELIVERY_TOTAL" in metric_stages
-        assert "END_TO_END" in metric_stages
-
-        events = [json.loads(line) for line in zf.read("diagnostic-events.jsonl").decode("utf-8").splitlines() if line.strip()]
-        complete_event = next((e for e in events if e["event_type"] == "EMAIL_DELIVERY_COMPLETE"), None)
-        assert complete_event is not None
-
-
 def test_terminal_coverage_guard_suite(clean_diagnostics_dir, db_session: Session, monkeypatch):
     """Point 6: Focused regression guard suite ensuring every production terminal finalization path
     produces its required canonical diagnostics archive."""
     from unittest.mock import MagicMock
-    from apps.api.main import process_intake, update_delivery_complete, DeliveryCompleteRequest, IntakeRequest
+
     from apps.worker.main import claim_next_job
-    from herald.core.pipeline import process_herald_request, HeraldRequest
+    from herald.core.pipeline import HeraldRequest, process_herald_request
     from herald.extraction.url_extractor import ArticleExtractionError
     from herald.telegram.bot import handle_telegram_callback_query
     from herald.telegram.client import TelegramAPIError
     from herald.telegram.delivery import deliver_single_job
-
-    monkeypatch.setattr("herald.config.Settings.get_allowed_senders_list", lambda self: ["operator@herald.local"])
 
     guard_results = {}
 
@@ -842,28 +756,7 @@ def test_terminal_coverage_guard_suite(clean_diagnostics_dir, db_session: Sessio
     arc = get_terminal_diagnostics_path(job_postscript.id, JobState.CANCELLED.value)
     guard_results["telegram_postscript_cancelled"] = arc.exists() and arc.stat().st_size > 0
 
-    # 9. Supported API COMPLETE
-    job_api_comp = _create_dummy_job(db_session, status=JobState.DELIVERING.value)
-    job_api_comp.drive_file_id = "drive_audio_709"
-    job_api_comp.details_drive_file_id = "drive_details_709"
-    db_session.commit()
-    update_delivery_complete(job_id=job_api_comp.id, req=DeliveryCompleteRequest(gmail_result_message_id="m709"), db=db_session)
-    arc = get_terminal_diagnostics_path(job_api_comp.id, JobState.COMPLETE.value)
-    guard_results["supported_api_complete"] = arc.exists() and arc.stat().st_size > 0
-
-    # 10. Supported API representative FAILED_FINAL
-    with patch("apps.api.main.extract_article_from_url", side_effect=ArticleExtractionError("API Extract Fail")):
-        req_api = IntakeRequest(
-            gmail_message_id="msg_guard_710",
-            sender_email="operator@herald.local",
-            subject="Podcast: Standard",
-            body_text="https://site.org/bad",
-        )
-        resp_api = process_intake(req=req_api, db=db_session)
-        arc = get_terminal_diagnostics_path(resp_api.job_id, JobState.FAILED_FINAL.value)
-        guard_results["supported_api_failed_final"] = arc.exists() and arc.stat().st_size > 0
-
     assert all(guard_results.values()), f"Some terminal paths failed archive guard: {guard_results}"
-    assert len(guard_results) == 10
+    assert len(guard_results) == 8
 
 

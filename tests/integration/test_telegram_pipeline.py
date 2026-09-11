@@ -24,7 +24,6 @@ def test_telegram_end_to_end_literal_pipeline(db_session, tmp_path, monkeypatch)
     5. Deliver MP3 back to Telegram chat
     """
     monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path / "work"))
-    monkeypatch.setattr(settings, "LOCAL_COMPLETE_RETENTION_HOURS", 48)
 
     # 1. Pairing
     code = generate_pairing_code(db_session)

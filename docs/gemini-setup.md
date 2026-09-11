@@ -1,19 +1,17 @@
-# Gemini API Setup Guide (Historical)
+# Google Gemini Provider Setup Guide
 
 > [!NOTE]
-> **Historical Design Reference**: This document describes Herald's legacy Gemini-first setup.
-> Herald now features a fully **vendor-neutral multi-provider architecture** supporting Google Gemini,
-> Groq, Cloudflare Workers AI, OpenAI, OpenRouter, Mistral, Anthropic, Ollama, and Literal (Zero-AI).
-> See [Architecture Reference](architecture.md) and [Deployment Guide](deployment.md) for current configuration.
+> Herald features a fully **vendor-neutral multi-provider architecture** supporting Google Gemini, Groq, Cloudflare Workers AI, OpenAI, OpenRouter, Mistral, Anthropic, Ollama, and Literal (Zero-AI).
+> This document provides provider-specific setup details for Google Gemini.
 
 ## Overview
 
-Herald supports Google Gemini alongside multiple external providers to transform incoming content into structured JSON podcast scripts. When configured with Gemini, Herald supports Google Search Grounding for `research` mode.
+Herald supports Google Gemini as a primary, secondary, or tertiary AI provider for podcast scripting. Providers with search grounding capabilities (such as Google Gemini with Google Search Grounding) also power Herald's `research` mode.
 
 ## Setup Steps
 
 1. Obtain a Gemini API Key from [Google AI Studio](https://aistudio.google.com/).
-2. Add your API key to `.env`:
+2. Add your API key and model configuration to `.env`:
    ```env
    AI_PROVIDER=gemini
    GEMINI_API_KEY=AIzaSy...
@@ -24,4 +22,3 @@ Herald supports Google Gemini alongside multiple external providers to transform
    ```bash
    uv run pytest tests/unit/test_phase2f_ai_providers.py
    ```
-

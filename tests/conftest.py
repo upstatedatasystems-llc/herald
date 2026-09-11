@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import herald.db.connection as db_conn
+import herald.db.models  # noqa: F401
 from herald.db.connection import Base
 
 db_url = os.getenv("HERALD_TEST_DATABASE_URL")
@@ -25,8 +26,6 @@ db_conn.SessionLocal = TestingSessionLocal
 
 Base.metadata.create_all(bind=test_engine)
 
-from apps.api.main import app  # noqa: E402
-from herald.db.connection import get_db  # noqa: E402
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -35,19 +34,10 @@ def db_session():
     Base.metadata.create_all(bind=test_engine)
     session = TestingSessionLocal()
 
-    def override_get_db():
-        try:
-            yield session
-        finally:
-            pass
-
-    app.dependency_overrides[get_db] = override_get_db
-
     try:
         yield session
     finally:
         session.close()
-        app.dependency_overrides.clear()
         with test_engine.begin() as conn:
             for table in reversed(Base.metadata.sorted_tables):
                 conn.execute(table.delete())

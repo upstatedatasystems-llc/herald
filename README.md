@@ -87,7 +87,7 @@ https://example.com/morning-news
 brief
 ```
 
-### 4. Deep-Dive Grounded Research (Gemini)
+### 4. Deep-Dive Grounded Research (Research Grounding)
 ```text
 https://example.com/complex-topic
 research high

@@ -39,7 +39,7 @@ def build_generation_settings_snapshot(
         "custom_title": (custom_title or "").strip() or None,
         "chunk_chars": chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500),
         "verify": bool(verify),
-        "ai_provider": (ai_provider or getattr(settings, "AI_PROVIDER", "gemini")).strip(),
+        "ai_provider": (ai_provider or getattr(settings, "AI_PROVIDER", "none")).strip(),
     }
     if ai_model:
         snap["ai_model"] = ai_model.strip()
@@ -69,7 +69,7 @@ def get_job_generation_settings(job: PodcastJob) -> dict[str, Any]:
         2,
     )
     depth = (job.research_depth or "").lower().strip() if mode == RequestMode.RESEARCH.value else None
-    prov = getattr(job, "ai_provider", None) or getattr(settings, "AI_PROVIDER", "gemini")
+    prov = getattr(job, "ai_provider", None) or ("gemini" if getattr(job, "gemini_model", None) else getattr(settings, "AI_PROVIDER", "none"))
     mod = getattr(job, "ai_model", None) or getattr(job, "gemini_model", None)
 
     ret: dict[str, Any] = {
@@ -131,8 +131,8 @@ def are_generation_settings_identical(prior: dict[str, Any], current: dict[str, 
     if ver_prior != ver_curr:
         return False
 
-    ai_prior = (prior.get("ai_provider") or getattr(settings, "AI_PROVIDER", "gemini")).lower().strip()
-    ai_curr = (current.get("ai_provider") or getattr(settings, "AI_PROVIDER", "gemini")).lower().strip()
+    ai_prior = (prior.get("ai_provider") or "none").lower().strip()
+    ai_curr = (current.get("ai_provider") or "none").lower().strip()
     if ai_prior != ai_curr:
         return False
 

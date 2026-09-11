@@ -1,6 +1,3 @@
-import uuid
-from datetime import UTC, datetime
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -8,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from herald.core.models import HeraldRequest
 from herald.core.pipeline import execute_script_generation, process_herald_request
-from herald.db.models import Base, JobState, PodcastJob, RequestMode, SourceType
+from herald.db.models import Base, JobState, PodcastJob
 
 
 @pytest.fixture

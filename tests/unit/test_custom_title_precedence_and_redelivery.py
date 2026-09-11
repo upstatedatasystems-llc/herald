@@ -31,20 +31,19 @@ def test_custom_title_precedence_in_herald_response_and_duplicates(db_session, m
     - Duplicate by Telegram message
     - Duplicate by source content & settings
     """
-    monkeypatch.setattr("herald.core.pipeline.settings.AI_PROVIDER", "gemini")
-    monkeypatch.setattr("herald.core.pipeline.settings.GEMINI_API_KEY", "dummy_key")
+    from herald.config import settings
+    from herald.gemini.schema import PodcastScriptResponse
 
-    mock_provider = MagicMock()
-    mock_provider.model_name = "gemini-3.5-flash"
-    mock_provider.generate_script.return_value = MagicMock(
-        model_dump=lambda: {
-            "episode_title": "AI Generated Episode Title",
-            "episode_description": "AI Generated Description",
-            "segments": [{"speaker": "Host", "narration": "Hello world from AI script."}],
-        }
+    mock_script_resp = PodcastScriptResponse(
+        episode_title="AI Generated Episode Title",
+        episode_description="AI Generated Description",
+        estimated_minutes=2,
+        segments=[{"order": 1, "heading": "Intro", "narration": "Hello world from AI script."}],
+        warnings=[],
     )
 
-    with patch("herald.core.pipeline.get_ai_provider", return_value=mock_provider):
+    with patch.object(settings, "GEMINI_API_KEY", "dummy_key"), \
+         patch("herald.ai.gemini_provider.GeminiProvider.generate_script", return_value=mock_script_resp):
         # 1. Newly created job with custom_title
         req1 = HeraldRequest(
             requester_identity="telegram:12345",

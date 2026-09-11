@@ -410,3 +410,70 @@ def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, mo
     # 6. Nonexistent document_path -> raises FileNotFoundError
     with pytest.raises(FileNotFoundError, match="does not exist"):
         client.send_document(chat_id=123, document_path=tmp_path / "nonexistent.doc")
+
+
+def test_telegram_unconfigured_provider_rejected(db_session):
+    """Verify unconfigured provider cannot be persisted in Telegram chain."""
+    from herald.telegram.auth import set_user_ai_provider_chain
+
+    with patch("herald.telegram.auth.is_provider_configured", return_value=False):
+        with pytest.raises(ValueError, match="not configured"):
+            set_user_ai_provider_chain(db_session, user_id=123, chain=["mistral"])
+
+
+def test_telegram_duplicate_provider_rejected(db_session):
+    """Verify duplicate provider selection in Telegram chain is rejected cleanly."""
+    from herald.telegram.auth import set_user_ai_provider_chain
+
+    with patch("herald.telegram.auth.is_provider_configured", return_value=True):
+        with pytest.raises(ValueError, match="Duplicate provider"):
+            set_user_ai_provider_chain(db_session, user_id=123, chain=["groq", "openai", "groq"])
+
+
+def test_telegram_max_3_enforced_in_persistence(db_session):
+    """Verify persistence layer enforces max 3 providers."""
+    from herald.telegram.auth import set_user_ai_provider_chain
+
+    with pytest.raises(ValueError, match="cannot exceed 3"):
+        set_user_ai_provider_chain(db_session, user_id=123, chain=["groq", "openai", "mistral", "gemini"])
+
+
+def test_telegram_literal_rules(db_session):
+    """Verify Literal may only be Primary and sets mode to Literal if AI required."""
+    from herald.db.models import TelegramUser
+    from herald.telegram.auth import set_user_ai_provider_chain
+
+    with patch("herald.telegram.auth.is_provider_configured", return_value=True):
+        with pytest.raises(ValueError, match="Literal provider may only be Primary"):
+            set_user_ai_provider_chain(db_session, user_id=123, chain=["groq", "literal"])
+
+    user = TelegramUser(telegram_user_id=123, telegram_chat_id=123, role="owner", is_active=True, default_mode="standard")
+    db_session.add(user)
+    db_session.commit()
+
+    set_user_ai_provider_chain(db_session, user_id=123, chain=["literal"])
+    db_session.refresh(user)
+    assert user.ai_provider_chain_json == ["literal"]
+    assert user.default_mode == "literal"
+
+
+def test_telegram_model_callback_token_collision_rejection():
+    """Verify resolve_model_token rejects ambiguous collisions across models."""
+    from herald.ai.catalog import (
+        generate_model_token,
+        get_models_for_provider,
+        resolve_model_token,
+    )
+
+    prov = "groq"
+    models = get_models_for_provider(prov)
+    if models:
+        m = models[0]
+        tok = generate_model_token(prov, m.model_id)
+        res = resolve_model_token(prov, tok)
+        assert res == m.model_id
+
+    with patch("herald.ai.catalog.generate_model_token", return_value="collision123"):
+        res = resolve_model_token(prov, "collision123")
+        assert res is None
+

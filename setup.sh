@@ -226,7 +226,6 @@ validate_env_keys() {
         "POSTGRES_USER"
         "POSTGRES_PASSWORD"
         "HERALD_API_KEY"
-        "N8N_ENCRYPTION_KEY"
         "TELEGRAM_BOT_TOKEN"
         "AI_PROVIDER"
     )
@@ -295,13 +294,15 @@ if [ -z "$AI_PROVIDER" ]; then
     echo "  4) OpenRouter (Multi-model gateway, e.g. Claude, Llama 3.3, DeepSeek)"
     echo "  5) Mistral AI (Mistral Large / Mistral Small Chat API)"
     echo "  6) Cloudflare Workers AI (Serverless Edge Inference)"
-    prompt_value AI_CHOICE "Enter choice [1-6, default: 2]: " "2"
+    echo "  7) OpenAI (GPT-4o, GPT-4o-mini)"
+    echo "  8) Anthropic (Claude 3.5 Sonnet / Haiku)"
+    echo "  9) Ollama (Local LLM via HTTP)"
+    prompt_value AI_CHOICE "Enter choice [1-9, default: 2]: " "2"
 
     case "$AI_CHOICE" in
         1)
-            AI_PROVIDER="none"
-            set_env_val "AI_PROVIDER" "none"
-            set_env_val "RESEARCH_PROVIDER" "none"
+            AI_PROVIDER="literal"
+            set_env_val "AI_PROVIDER" "literal"
             ;;
         2)
             AI_PROVIDER="gemini"
@@ -317,7 +318,6 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "GEMINI_API_KEY" "$GEMINI_KEY"
             set_env_val "GEMINI_MODEL" "gemini-3.5-flash"
             set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
-            set_env_val "RESEARCH_PROVIDER" "gemini"
             ;;
         3)
             AI_PROVIDER="groq"
@@ -378,47 +378,152 @@ if [ -z "$AI_PROVIDER" ]; then
             set_env_val "CLOUDFLARE_ACCOUNT_ID" "$CF_ACCT"
             set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
             ;;
+        7)
+            AI_PROVIDER="openai"
+            OPENAI_KEY=""
+            while [ -z "$OPENAI_KEY" ]; do
+                prompt_secret OPENAI_KEY "Enter your OpenAI API Key (sk-...): "
+                OPENAI_KEY=$(trim_str "$OPENAI_KEY")
+                if [ -z "$OPENAI_KEY" ]; then
+                    echo "⚠️  OpenAI API Key cannot be empty."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "openai"
+            set_env_val "OPENAI_API_KEY" "$OPENAI_KEY"
+            set_env_val "OPENAI_MODEL" "gpt-4o"
+            ;;
+        8)
+            AI_PROVIDER="anthropic"
+            ANTHROPIC_KEY=""
+            while [ -z "$ANTHROPIC_KEY" ]; do
+                prompt_secret ANTHROPIC_KEY "Enter your Anthropic API Key (sk-ant-...): "
+                ANTHROPIC_KEY=$(trim_str "$ANTHROPIC_KEY")
+                if [ -z "$ANTHROPIC_KEY" ]; then
+                    echo "⚠️  Anthropic API Key cannot be empty."
+                fi
+            done
+            set_env_val "AI_PROVIDER" "anthropic"
+            set_env_val "ANTHROPIC_API_KEY" "$ANTHROPIC_KEY"
+            set_env_val "ANTHROPIC_MODEL" "claude-3-5-sonnet-20241022"
+            ;;
+        9)
+            AI_PROVIDER="ollama"
+            OLLAMA_URL=""
+            prompt_value OLLAMA_URL "Enter Ollama Base URL [default: http://localhost:11434]: " "http://localhost:11434"
+            OLLAMA_URL=$(trim_str "$OLLAMA_URL")
+            set_env_val "AI_PROVIDER" "ollama"
+            set_env_val "OLLAMA_BASE_URL" "$OLLAMA_URL"
+            set_env_val "OLLAMA_MODEL" "llama3.1"
+            ;;
         *)
             echo "❌ Error: Invalid AI provider choice '${AI_CHOICE}'." >&2
             exit 1
             ;;
     esac
 
-    # Optional Gemini Research configuration for non-Gemini providers
-    if [ "$AI_PROVIDER" != "gemini" ] && [ "$AI_PROVIDER" != "none" ]; then
-        echo ""
-        echo "ℹ️  Research mode requires Google Search Grounding (Gemini)."
-        prompt_value WANT_RES "Would you like to configure an optional GEMINI_API_KEY for Research mode? [y/N]: " "N"
-        if [[ "$WANT_RES" =~ ^[Yy]$ ]]; then
-            prompt_secret RES_KEY "Enter Gemini API Key for Research: "
-            RES_KEY=$(trim_str "$RES_KEY")
-            if [ -n "$RES_KEY" ]; then
-                set_env_val "GEMINI_API_KEY" "$RES_KEY"
-                set_env_val "RESEARCH_PROVIDER" "gemini"
-                echo "✅ Gemini Research configured alongside ${AI_PROVIDER}."
-            else
-                set_env_val "RESEARCH_PROVIDER" "none"
+    # Optional Failover Slots (Secondary Provider)
+    if [ "$AI_PROVIDER" != "literal" ] && [ "$AI_PROVIDER" != "none" ]; then
+        SEC_PROV=$(get_env_val "AI_SECONDARY_PROVIDER")
+        if [ -z "$SEC_PROV" ] && [ "$NON_INTERACTIVE" = false ]; then
+            echo ""
+            prompt_value WANT_SEC "Configure an optional Secondary AI failover provider? [y/N]: " "N"
+            if [[ "$WANT_SEC" =~ ^[Yy]$ ]]; then
+                echo "Select Secondary AI Provider:"
+                echo "  1) Google Gemini"
+                echo "  2) Groq Cloud"
+                echo "  3) OpenRouter"
+                echo "  4) Mistral AI"
+                echo "  5) Cloudflare Workers AI"
+                echo "  6) OpenAI"
+                echo "  7) Anthropic"
+                echo "  8) Ollama"
+                echo "  9) Literal"
+                prompt_value SEC_CHOICE "Enter choice [1-9]: " "9"
+                case "$SEC_CHOICE" in
+                    1)
+                        set_env_val "AI_SECONDARY_PROVIDER" "gemini"
+                        if [ -z "$(get_env_val "GEMINI_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter Gemini API Key: "
+                            set_env_val "GEMINI_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "GEMINI_MODEL")" ]; then set_env_val "GEMINI_MODEL" "gemini-3.5-flash"; fi
+                        if [ -z "$(get_env_val "GEMINI_RESEARCH_MODEL")" ]; then set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"; fi
+                        ;;
+                    2)
+                        set_env_val "AI_SECONDARY_PROVIDER" "groq"
+                        if [ -z "$(get_env_val "GROQ_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter Groq API Key: "
+                            set_env_val "GROQ_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "GROQ_MODEL")" ]; then set_env_val "GROQ_MODEL" "llama-3.3-70b-versatile"; fi
+                        ;;
+                    3)
+                        set_env_val "AI_SECONDARY_PROVIDER" "openrouter"
+                        if [ -z "$(get_env_val "OPENROUTER_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter OpenRouter API Key: "
+                            set_env_val "OPENROUTER_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "OPENROUTER_MODEL")" ]; then set_env_val "OPENROUTER_MODEL" "meta-llama/llama-3.3-70b-instruct"; fi
+                        ;;
+                    4)
+                        set_env_val "AI_SECONDARY_PROVIDER" "mistral"
+                        if [ -z "$(get_env_val "MISTRAL_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter Mistral API Key: "
+                            set_env_val "MISTRAL_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "MISTRAL_MODEL")" ]; then set_env_val "MISTRAL_MODEL" "mistral-large-latest"; fi
+                        ;;
+                    5)
+                        set_env_val "AI_SECONDARY_PROVIDER" "cloudflare"
+                        if [ -z "$(get_env_val "CLOUDFLARE_API_TOKEN")" ]; then
+                            prompt_secret S_TOK "Enter Cloudflare API Token: "
+                            set_env_val "CLOUDFLARE_API_TOKEN" "$(trim_str "$S_TOK")"
+                        fi
+                        if [ -z "$(get_env_val "CLOUDFLARE_ACCOUNT_ID")" ]; then
+                            prompt_value S_ACC "Enter Cloudflare Account ID: "
+                            set_env_val "CLOUDFLARE_ACCOUNT_ID" "$(trim_str "$S_ACC")"
+                        fi
+                        if [ -z "$(get_env_val "CLOUDFLARE_AI_MODEL")" ]; then set_env_val "CLOUDFLARE_AI_MODEL" "@cf/meta/llama-3.3-70b-instruct-fp8-fast"; fi
+                        ;;
+                    6)
+                        set_env_val "AI_SECONDARY_PROVIDER" "openai"
+                        if [ -z "$(get_env_val "OPENAI_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter OpenAI API Key: "
+                            set_env_val "OPENAI_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "OPENAI_MODEL")" ]; then set_env_val "OPENAI_MODEL" "gpt-4o"; fi
+                        ;;
+                    7)
+                        set_env_val "AI_SECONDARY_PROVIDER" "anthropic"
+                        if [ -z "$(get_env_val "ANTHROPIC_API_KEY")" ]; then
+                            prompt_secret S_KEY "Enter Anthropic API Key: "
+                            set_env_val "ANTHROPIC_API_KEY" "$(trim_str "$S_KEY")"
+                        fi
+                        if [ -z "$(get_env_val "ANTHROPIC_MODEL")" ]; then set_env_val "ANTHROPIC_MODEL" "claude-3-5-sonnet-20241022"; fi
+                        ;;
+                    8)
+                        set_env_val "AI_SECONDARY_PROVIDER" "ollama"
+                        if [ -z "$(get_env_val "OLLAMA_BASE_URL")" ]; then
+                            prompt_value S_URL "Enter Ollama Base URL: " "http://localhost:11434"
+                            set_env_val "OLLAMA_BASE_URL" "$(trim_str "$S_URL")"
+                        fi
+                        if [ -z "$(get_env_val "OLLAMA_MODEL")" ]; then set_env_val "OLLAMA_MODEL" "llama3.1"; fi
+                        ;;
+                    9|*)
+                        set_env_val "AI_SECONDARY_PROVIDER" "literal"
+                        ;;
+                esac
             fi
-        else
-            set_env_val "RESEARCH_PROVIDER" "none"
         fi
-    elif [ "$AI_PROVIDER" = "none" ]; then
-        set_env_val "RESEARCH_PROVIDER" "none"
     fi
 else
-    # Normalize aliases
-    if [ "$AI_PROVIDER" = "literal" ]; then
-        AI_PROVIDER="none"
-        set_env_val "AI_PROVIDER" "none"
-    fi
-
     case "$AI_PROVIDER" in
-        none|gemini|groq|openrouter|mistral|cloudflare)
+        none|literal|gemini|groq|openrouter|mistral|cloudflare|openai|anthropic|ollama)
             echo "✅ AI Provider is configured: ${AI_PROVIDER}"
             ;;
         *)
             echo "❌ Error: Unknown AI_PROVIDER '${AI_PROVIDER}' in ${ENV_FILE}." >&2
-            echo "Allowed values: none, gemini, groq, openrouter, mistral, cloudflare." >&2
+            echo "Allowed values: literal, gemini, groq, openrouter, mistral, cloudflare, openai, anthropic, ollama." >&2
             exit 1
             ;;
     esac
@@ -510,44 +615,59 @@ elif [ "$AI_PROVIDER" = "cloudflare" ]; then
             AI_VALID=false
         fi
     fi
+elif [ "$AI_PROVIDER" = "openai" ]; then
+    O_KEY=$(get_env_val "OPENAI_API_KEY")
+    O_MOD=$(get_env_val "OPENAI_MODEL")
+    O_MOD=${O_MOD:-"gpt-4o"}
+    if [ -z "$O_KEY" ]; then
+        echo "❌ Error: OpenAI API key is missing." >&2
+        AI_VALID=false
+    else
+        O_RESP=$(printf 'url = "https://api.openai.com/v1/models/%s"\nheader = "Authorization: Bearer %s"\n' "$O_MOD" "$O_KEY" | call_curl_config)
+        if echo "$O_RESP" | grep -q '"id":'; then
+            echo "✅ OpenAI connection and model '${O_MOD}' verified."
+        else
+            echo "⚠️  OpenAI verification for '${O_MOD}' failed."
+            AI_VALID=false
+        fi
+    fi
+elif [ "$AI_PROVIDER" = "anthropic" ]; then
+    A_KEY=$(get_env_val "ANTHROPIC_API_KEY")
+    A_MOD=$(get_env_val "ANTHROPIC_MODEL")
+    A_MOD=${A_MOD:-"claude-3-5-sonnet-20241022"}
+    if [ -z "$A_KEY" ]; then
+        echo "❌ Error: Anthropic API key is missing." >&2
+        AI_VALID=false
+    else
+        A_RESP=$(printf 'url = "https://api.anthropic.com/v1/models/%s"\nheader = "x-api-key: %s"\nheader = "anthropic-version: 2023-06-01"\n' "$A_MOD" "$A_KEY" | call_curl_config)
+        if echo "$A_RESP" | grep -q '"id":'; then
+            echo "✅ Anthropic connection and model '${A_MOD}' verified."
+        else
+            echo "⚠️  Anthropic verification for '${A_MOD}' failed."
+            AI_VALID=false
+        fi
+    fi
+elif [ "$AI_PROVIDER" = "ollama" ]; then
+    OL_URL=$(get_env_val "OLLAMA_BASE_URL")
+    OL_URL=${OL_URL:-"http://localhost:11434"}
+    OL_MOD=$(get_env_val "OLLAMA_MODEL")
+    OL_MOD=${OL_MOD:-"llama3.1"}
+    OL_RESP=$(printf 'url = "%s/api/tags"\n' "$OL_URL" | call_curl_config)
+    if echo "$OL_RESP" | grep -q '"models":'; then
+        echo "✅ Ollama connection verified at ${OL_URL}."
+    else
+        echo "⚠️  Ollama verification at ${OL_URL} failed."
+        AI_VALID=false
+    fi
 else
     echo "ℹ️  Literal mode selected (no external AI provider calls)."
 fi
 
-# Fallback safely to Literal if configured AI provider validation failed
+# Abort if configured AI provider validation failed (do not silently rewrite to Literal)
 if [ "$AI_VALID" = false ]; then
-    if [ "$NON_INTERACTIVE" = true ]; then
-        echo "❌ Error: Configured AI provider validation failed in non-interactive mode." >&2
-        exit 1
-    fi
-    echo "⚠️  Configured AI provider was not verified. Falling back to Literal mode to ensure pipeline stability."
-    set_env_val "AI_PROVIDER" "none"
-    AI_PROVIDER="none"
-fi
-
-# Validate optional Gemini Research configuration if present
-RES_PROV=$(get_env_val "RESEARCH_PROVIDER")
-if [ "$RES_PROV" = "gemini" ]; then
-    G_RES_K=$(get_env_val "GEMINI_API_KEY")
-    G_RES_M=$(get_env_val "GEMINI_RESEARCH_MODEL")
-    if [ "$G_RES_M" = "gemini-2.5-flash" ]; then
-        echo "🔄 Migrating GEMINI_RESEARCH_MODEL from former default gemini-2.5-flash to gemini-3.6-flash..."
-        G_RES_M="gemini-3.6-flash"
-        set_env_val "GEMINI_RESEARCH_MODEL" "gemini-3.6-flash"
-    fi
-    G_RES_M=${G_RES_M:-"gemini-3.6-flash"}
-    if [ -z "$G_RES_K" ]; then
-        echo "⚠️  Gemini Research validation failed (GEMINI_API_KEY missing). Disabling RESEARCH_PROVIDER."
-        set_env_val "RESEARCH_PROVIDER" "none"
-    else
-        G_RES_RESP=$(printf 'url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"\nheader = "x-goog-api-key: %s"\nheader = "Content-Type: application/json"\ndata = "{\\"contents\\":[{\\"role\\":\\"user\\",\\"parts\\":[{\\"text\\":\\"ping\\"}]}],\\"tools\\":[{\\"google_search\\":{}}],\\"generationConfig\\":{\\"maxOutputTokens\\":5}}"\n' "$G_RES_M" "$G_RES_K" | call_curl_config)
-        if echo "$G_RES_RESP" | grep -q -E '"candidates":|"name":'; then
-            echo "✅ Gemini Research model '${G_RES_M}' verified."
-        else
-            echo "⚠️  Gemini Research verification for '${G_RES_M}' failed. Disabling RESEARCH_PROVIDER."
-            set_env_val "RESEARCH_PROVIDER" "none"
-        fi
-    fi
+    echo "❌ Error: Configured AI provider '${AI_PROVIDER}' validation failed." >&2
+    echo "Please check your configuration or credentials and rerun setup.sh." >&2
+    exit 1
 fi
 
 # 4. Ensure internal defaults & secrets are present without overwriting existing
@@ -600,16 +720,6 @@ fi
             fi
         fi
         set_env_val "HERALD_API_KEY" "$HERALD_API_KEY"
-    fi
-
-    N8N_KEY=$(get_env_val "N8N_ENCRYPTION_KEY")
-    if [ -z "$N8N_KEY" ]; then
-        N8N_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' || true)
-        if [ -z "$N8N_KEY" ]; then
-            echo "❌ Error: Cryptographically secure random generator unavailable." >&2
-            exit 1
-        fi
-        set_env_val "N8N_ENCRYPTION_KEY" "$N8N_KEY"
     fi
 
     KOKORO_URL=$(get_env_val "KOKORO_BASE_URL")

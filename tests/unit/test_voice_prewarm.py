@@ -1,6 +1,3 @@
-import json
-import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,12 +5,9 @@ import pytest
 from herald.config import settings
 from herald.services.voice_manager import (
     HERALD_VOICE_SAMPLE_CACHE_VERSION,
-    VOICE_SAMPLE_TEXT,
     compute_sample_text_hash,
     ensure_voice_sample,
     get_cached_voice_sample,
-    get_voice_sample_manifest_path,
-    get_voice_samples_dir,
     load_voice_sample_manifest,
     prewarm_all_voice_samples,
     save_voice_sample_manifest,

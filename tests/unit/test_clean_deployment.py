@@ -1,12 +1,8 @@
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect
 from sqlalchemy import text as sa_text
 
-from apps.api.main import app
 from herald.config import settings
 from herald.db.connection import Base
-
-client = TestClient(app)
 
 
 def test_clean_alembic_migration_and_idempotency(tmp_path):

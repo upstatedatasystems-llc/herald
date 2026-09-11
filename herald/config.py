@@ -113,23 +113,17 @@ class Settings(BaseSettings):
     LOUDNORM_TARGET_TP: float = -1.5
     LOUDNORM_TARGET_LRA: float = 11.0
 
-    # Google Drive Delivery
-    GOOGLE_DRIVE_FOLDER_ID: str = ""
-
-    # Gmail Intake & Allowed Senders
-    EMAIL_ALLOWED_SENDERS: str = ""
-    LOCAL_COMPLETE_RETENTION_HOURS: int = 48
-
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_POLL_TIMEOUT_SECONDS: int = 30
     TELEGRAM_ALLOWED_USER_IDS: str = ""
     TELEGRAM_MAX_AUDIO_BYTES: int = 50 * 1024 * 1024  # 50MB Bot API upload limit
     # AI Providers Configuration
-    AI_PROVIDER: str = "gemini"  # "gemini", "groq", "openrouter", "mistral", "cloudflare", "none", "anthropic", "openai", "ollama"
+    AI_PROVIDER: str = "gemini"  # "gemini", "groq", "openrouter", "mistral", "cloudflare", "literal", "anthropic", "openai", "ollama"
     AI_SECONDARY_PROVIDER: str | None = None
     AI_TERTIARY_PROVIDER: str | None = None
-    RESEARCH_PROVIDER: str = "gemini"  # Dedicated research provider (legacy fallback)
+    # DEPRECATED LEGACY: Modern research uses snapshotted provider chain
+    RESEARCH_PROVIDER: str = "gemini"
 
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
@@ -211,15 +205,6 @@ class Settings(BaseSettings):
             return self.DATABASE_URL
         return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
-    def get_allowed_senders_list(self) -> list[str]:
-        if not self.EMAIL_ALLOWED_SENDERS:
-            return []
-        return [
-            email.strip().lower()
-            for email in self.EMAIL_ALLOWED_SENDERS.split(",")
-            if email.strip()
-        ]
-
     def get_allowed_voices_list(self) -> list[str]:
         if not self.ALLOWED_VOICES:
             return ["af_heart"]
@@ -227,23 +212,10 @@ class Settings(BaseSettings):
 
     # Explicit Feature / Transport flags
     ENABLE_TELEGRAM_TRANSPORT: bool = True
-    ENABLE_EMAIL_TRANSPORT: bool = False
 
     def is_production_valid(self) -> bool:
         if self.HERALD_ENV.lower() == "production":
-            is_email_active = bool(
-                self.ENABLE_EMAIL_TRANSPORT
-                or self.EMAIL_ALLOWED_SENDERS.strip()
-                or self.GOOGLE_DRIVE_FOLDER_ID.strip()
-            )
-            if is_email_active:
-                if not self.HERALD_API_KEY or self.HERALD_API_KEY == "default-insecure-api-key":
-                    return False
-                if not self.EMAIL_ALLOWED_SENDERS.strip():
-                    return False
-                if not self.GOOGLE_DRIVE_FOLDER_ID or not self.GOOGLE_DRIVE_FOLDER_ID.strip():
-                    return False
-            elif not self.TELEGRAM_BOT_TOKEN:
+            if not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_BOT_TOKEN.strip():
                 return False
         return True
 

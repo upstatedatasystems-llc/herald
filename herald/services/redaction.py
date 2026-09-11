@@ -373,7 +373,6 @@ def build_safe_environment_summary() -> dict[str, Any]:
             "default_speed": settings.KOKORO_SPEED,
             "allowed_voices": settings.get_allowed_voices_list(),
             "telegram_transport_enabled": settings.ENABLE_TELEGRAM_TRANSPORT,
-            "email_transport_enabled": settings.ENABLE_EMAIL_TRANSPORT,
             "metrics_enabled": settings.HERALD_METRICS_ENABLED,
         },
     }

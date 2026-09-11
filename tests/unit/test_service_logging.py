@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from herald.logging import (
-    RedactingFormatter,
     clear_registered_secrets,
     register_secret,
     setup_service_logging,

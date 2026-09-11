@@ -1,27 +1,29 @@
 import socket
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 
-from apps.api.main import app
-from herald.config import Settings, settings
+from herald.config import Settings
 from herald.core.models import HeraldRequest
 from herald.core.pipeline import process_herald_request
 from herald.db.connection import SessionLocal
 from herald.db.models import JobState, PodcastJob
 from herald.extraction.url_extractor import (
-    ArticleExtractionError,
     DNSResolutionError,
+    SourceAccessBlockedError,
     SSRFVulnerabilityError,
     extract_article_from_url,
     validate_url_host,
 )
-
-api_client = TestClient(app)
+from herald.services.failure_diagnostics import (
+    _probe_network_target,
+    _probe_trusted_kokoro,
+    _resolve_dns_bounded,
+)
 
 
 def test_compose_yaml_dns_configuration():
@@ -35,7 +37,7 @@ def test_compose_yaml_dns_configuration():
 
     # Outbound services must have DNS configured
     expected_dns = ["${HERALD_DNS_PRIMARY:-1.1.1.1}", "${HERALD_DNS_SECONDARY:-8.8.8.8}"]
-    for outbound_svc in ["telegram-bot", "herald-worker", "herald-api"]:
+    for outbound_svc in ["telegram-bot", "herald-worker"]:
         assert outbound_svc in services, f"Service '{outbound_svc}' missing from compose.yaml"
         svc_cfg = services[outbound_svc]
         assert "dns" in svc_cfg, f"Service '{outbound_svc}' must have explicit dns configuration"
@@ -202,67 +204,112 @@ def test_safe_public_dns_result_extraction_flow(monkeypatch):
     assert canonical_url == "https://archive.ph/KttMu"
 
 
-def test_api_intake_dns_vs_ssrf_error_categorization(monkeypatch, db_session):
-    """Test that the HTTP API /api/v1/intake and /api/v1/extract endpoints distinguish DNS resolution failure from SSRF violations."""
-    monkeypatch.setattr(settings, "HERALD_ENV", "testing")
-    monkeypatch.setattr(settings, "HERALD_API_KEY", "")
-    monkeypatch.setattr(settings, "EMAIL_ALLOWED_SENDERS", "tester@example.com")
+class TestErrorClassificationPreservation:
+    """Verify pipeline preserves specific error categories instead of collapsing to EXTRACTION_FAILURE."""
 
-    # Case A: DNS Failure on /api/v1/intake
-    def mock_dns_fail(host, port, family=0, type=0, proto=0, flags=0):
-        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+    def test_dns_error_preserves_category(self, db_session):
+        """DNSResolutionError should produce DNS_RESOLUTION_ERROR, not EXTRACTION_FAILURE."""
+        dns_err = DNSResolutionError("Could not resolve example.com")
 
-    monkeypatch.setattr(socket, "getaddrinfo", mock_dns_fail)
+        with (
+            patch("herald.core.pipeline.extract_article_from_url", side_effect=dns_err),
+            patch("herald.services.failure_diagnostics.collect_failure_diagnostics"),
+            patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"),
+            patch("herald.services.performance_metrics.record_stage_metric"),
+            patch("herald.services.diagnostic_recorder.record_job_diagnostic_event"),
+        ):
+            req = HeraldRequest(
+                transport="telegram",
+                transport_message_id=100,
+                requester_identity="telegram:12345",
+                delivery_target="12345",
+                request_mode="literal",
+                source_url="https://unresolvable.example.com/article",
+            )
+            response = process_herald_request(db=db_session, req=req)
 
-    with patch("time.sleep", return_value=None):
-        resp_dns = api_client.post(
-            "/api/v1/intake",
-            json={
-                "gmail_message_id": "msg-dns-fail-1",
-                "sender_email": "tester@example.com",
-                "subject": "Podcast: Literal",
-                "body_text": "https://archive.ph/KttMu",
-            },
-        )
-    assert resp_dns.status_code == 200
-    data_dns = resp_dns.json()
-    assert data_dns["error_category"] == "DNS_RESOLUTION_FAILURE"
-    assert "URL retrieval failed: DNS lookup failed for hostname 'archive.ph'." in data_dns["message"]
+        assert response.error_category == "DNS_RESOLUTION_ERROR"
+        job = db_session.query(PodcastJob).filter(PodcastJob.id == response.job_id).first()
+        assert job is not None
+        assert job.error_code == "DNS_RESOLUTION_ERROR"
 
-    # Case B: SSRF Security Violation on /api/v1/intake
-    def mock_ssrf(host, port, family=0, type=0, proto=0, flags=0):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+    def test_source_access_blocked_preserves_category(self, db_session):
+        """SourceAccessBlockedError should produce SOURCE_ACCESS_BLOCKED."""
+        err = SourceAccessBlockedError("403 Forbidden")
 
-    monkeypatch.setattr(socket, "getaddrinfo", mock_ssrf)
+        with (
+            patch("herald.core.pipeline.extract_article_from_url", side_effect=err),
+            patch("herald.services.failure_diagnostics.collect_failure_diagnostics"),
+            patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"),
+            patch("herald.services.performance_metrics.record_stage_metric"),
+            patch("herald.services.diagnostic_recorder.record_job_diagnostic_event"),
+        ):
+            req = HeraldRequest(
+                transport="telegram",
+                transport_message_id=100,
+                requester_identity="telegram:12345",
+                delivery_target="12345",
+                request_mode="literal",
+                source_url="https://blocked.example.com/article",
+            )
+            response = process_herald_request(db=db_session, req=req)
 
-    resp_ssrf = api_client.post(
-        "/api/v1/intake",
-        json={
-            "gmail_message_id": "msg-ssrf-fail-1",
-            "sender_email": "tester@example.com",
-            "subject": "Podcast: Literal",
-            "body_text": "https://internal-service.local/admin",
-        },
-    )
-    assert resp_ssrf.status_code == 200
-    data_ssrf = resp_ssrf.json()
-    assert data_ssrf["error_category"] == "SSRF_PROTECTION"
-    assert "Security violation" in data_ssrf["message"]
+        assert response.error_category == "SOURCE_ACCESS_BLOCKED"
+        job = db_session.query(PodcastJob).filter(PodcastJob.id == response.job_id).first()
+        assert job is not None
+        assert job.error_code == "SOURCE_ACCESS_BLOCKED"
 
-    # Case C: /api/v1/extract HTTP status code differentiation
-    monkeypatch.setattr(socket, "getaddrinfo", mock_dns_fail)
-    with patch("time.sleep", return_value=None):
-        resp_extract_dns = api_client.post(
-            "/api/v1/extract",
-            json={"url": "https://archive.ph/KttMu"},
-        )
-    assert resp_extract_dns.status_code == 422
-    assert "DNS lookup failed" in resp_extract_dns.json()["detail"]
 
-    monkeypatch.setattr(socket, "getaddrinfo", mock_ssrf)
-    resp_extract_ssrf = api_client.post(
-        "/api/v1/extract",
-        json={"url": "https://internal-service.local/admin"},
-    )
-    assert resp_extract_ssrf.status_code == 403
-    assert "SSRF Protection" in resp_extract_ssrf.json()["detail"]
+def test_wall_clock_bounded_dns_and_timeout():
+    """
+    Verify:
+    - _resolve_dns_bounded uses a daemon thread and returns within the specified timeout if getaddrinfo hangs.
+    - _probe_network_target records TIMEOUT and skips TCP connect if deadline expires after DNS.
+    """
+    def hanging_getaddrinfo(*args, **kwargs):
+        time.sleep(2.0)
+        return []
+
+    with patch("socket.getaddrinfo", hanging_getaddrinfo):
+        t0 = time.monotonic()
+        res, err = _resolve_dns_bounded("slow-host.example.com", 80, timeout=0.1)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.8
+        assert res is None
+        assert isinstance(err, TimeoutError)
+
+    mock_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+    with patch("herald.services.failure_diagnostics._resolve_dns_bounded", return_value=(mock_addrinfo, None)), \
+         patch("time.monotonic", side_effect=[100.0, 100.0, 105.0, 105.0]), \
+         patch("socket.socket") as mock_sock:
+        probe_res = _probe_network_target("http://example.com/test", timeout_seconds=1.0)
+        assert probe_res["status"] == "TIMEOUT"
+        assert "Timed out before TCP probe" in probe_res["summary"]
+        mock_sock.assert_not_called()
+
+
+def test_trusted_kokoro_probe_vs_public_ssrf():
+    """
+    Verify:
+    - _probe_trusted_kokoro allows private Docker network IP (e.g. 172.18.0.5) and checks reachability.
+    - _probe_network_target refuses private IP with SSRF_REFUSAL without opening socket.
+    """
+    mock_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.18.0.5", 8880))]
+
+    with patch("herald.services.failure_diagnostics._resolve_dns_bounded", return_value=(mock_addrinfo, None)), \
+         patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock_cls.return_value = mock_sock
+
+        kokoro_res = _probe_trusted_kokoro(timeout_seconds=1.0)
+        assert kokoro_res["status"] == "HEALTHY"
+        assert kokoro_res["target_ip"] == "172.18.0.5"
+        mock_sock.connect.assert_called_once_with(("172.18.0.5", 8880))
+
+    with patch("herald.services.failure_diagnostics._resolve_dns_bounded", return_value=(mock_addrinfo, None)), \
+         patch("socket.socket") as mock_sock_cls2:
+        public_res = _probe_network_target("http://172.18.0.5/article", timeout_seconds=1.0)
+        assert public_res["status"] == "SSRF_REFUSAL"
+        assert "Blocked prohibited IP" in public_res["summary"]
+        mock_sock_cls2.assert_not_called()
+

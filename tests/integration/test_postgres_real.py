@@ -868,12 +868,13 @@ def test_postgres_provisional_recovery_and_stale_intake_concurrency(
     E. Resulting terminal archive contains the event/state transition.
     """
     import json
-    from unittest.mock import MagicMock, patch
     import zipfile
-    from apps.api.main import ops_stale_recovery
+    from unittest.mock import MagicMock, patch
+
     from herald.config import settings
     from herald.db.models import JobDiagnosticEvent, JobState, PodcastJob
     from herald.services.diagnostics_export import get_terminal_diagnostics_archive_path
+    from herald.services.recovery import ops_stale_recovery
     from herald.telegram.bot import handle_telegram_content_message
 
     monkeypatch.setattr("herald.db.connection.engine", postgres_engine)
@@ -972,7 +973,7 @@ def test_postgres_provisional_recovery_and_stale_intake_concurrency(
 
     # Stale recovery runs - must NOT overwrite competing job
     RecoverySession1 = pg_session_factory()
-    res1 = ops_stale_recovery(db=RecoverySession1)
+    ops_stale_recovery(db=RecoverySession1)
     RecoverySession1.close()
 
     VerifySession.expire_all()

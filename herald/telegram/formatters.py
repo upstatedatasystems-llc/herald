@@ -66,12 +66,24 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
         res_prov = gen_settings.get("research_provider") if isinstance(gen_settings, dict) else None
         if not res_prov and hasattr(job, "ai_provider") and job.ai_provider:
             res_prov = job.ai_provider
+        if not res_prov and res_mod:
+            r_low = str(res_mod).lower()
+            if "gemini" in r_low:
+                res_prov = "gemini"
+            elif "groq" in r_low:
+                res_prov = "groq"
+            elif "openrouter" in r_low:
+                res_prov = "openrouter"
+            elif "claude" in r_low or "anthropic" in r_low:
+                res_prov = "anthropic"
+            elif "gpt" in r_low or "o1" in r_low or "o3" in r_low:
+                res_prov = "openai"
         if res_prov or res_mod:
-            p_low = str(res_prov or "gemini").lower().strip()
-            disp_name = provider_display_map.get(p_low, p_low.capitalize())
+            p_clean = str(res_prov).lower().strip() if res_prov else None
+            disp_name = provider_display_map.get(p_clean, p_clean.capitalize()) if p_clean else "Research AI"
             return disp_name, res_mod
 
-    # 4. ai_provider / ai_model (primary configured provider)
+    # 4. ai_provider / ai_model (primary configured provider from job snapshot)
     ai_prov = getattr(job, "ai_provider", None)
     ai_mod = getattr(job, "ai_model", None)
     if ai_prov:
@@ -84,11 +96,8 @@ def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
     if legacy_model:
         return "Gemini", legacy_model
 
-    # Default configured server provider
-    def_prov = getattr(settings, "AI_PROVIDER", "gemini").lower().strip()
-    disp_name = provider_display_map.get(def_prov, def_prov.capitalize())
-    def_model = getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash") if def_prov == "gemini" else None
-    return disp_name, def_model
+    # Unknown / unspecified (never guess from current environment for existing job)
+    return "AI Provider", None
 
 
 
@@ -134,7 +143,7 @@ def format_help() -> str:
         "• <code>literal</code> — Local deterministic reading (no AI required)\n"
         "• <code>brief</code> — Concise AI summary\n"
         "• <code>standard</code> — Full AI podcast narration\n"
-        "• <code>research high</code> — Deep-dive grounded research podcast (Gemini)\n\n"
+        "• <code>research high</code> — Deep-dive grounded research podcast (requires provider with research grounding)\n\n"
         "<b>Directives (top of message):</b>\n"
         "• <code>Voice: af_bella</code> (af_heart, af_bella, af_sarah, am_adam, am_michael)\n"
         "• <code>Speed: 1.1</code> (0.8 to 1.2)\n"

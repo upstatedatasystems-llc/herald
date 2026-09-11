@@ -1,7 +1,6 @@
 import logging
 import sys
 
-from herald.ai.factory import get_ai_provider
 from herald.config import settings
 from herald.db.connection import SessionLocal
 from herald.logging import setup_service_logging
@@ -33,17 +32,26 @@ def print_startup_banner():
     except Exception:
         tts_ok = False
 
-    ai_provider = get_ai_provider()
+    from herald.ai.registry import create_provider, is_provider_configured
+    from herald.ai.resolution import get_server_default_chain
+
     ai_status = "Not configured (Literal mode only)"
-    if ai_provider and settings.is_ai_configured():
-        try:
+    try:
+        def_chain = get_server_default_chain()
+        primary_c = def_chain[0]
+        if primary_c.provider_id == "literal":
+            ai_status = "Literal (Zero-AI narration)"
+        elif not is_provider_configured(primary_c.provider_id):
+            ai_status = f"{primary_c.provider_id.capitalize()} — Not configured on server"
+        else:
+            ai_provider = create_provider(primary_c.provider_id, model_id=primary_c.model_id)
             conn_res = ai_provider.check_connection(timeout_seconds=4.0)
             if conn_res.get("connected"):
-                ai_status = f"{ai_provider.provider_name} — Connected ({conn_res.get('model')})"
+                ai_status = f"{ai_provider.provider_name} — Connected ({conn_res.get('model', primary_c.model_id)})"
             else:
                 ai_status = f"{ai_provider.provider_name} — FAILED ({conn_res.get('error')})"
-        except Exception as e:
-            ai_status = f"{ai_provider.provider_name} — Error ({e})"
+    except Exception as e:
+        ai_status = f"Chain error ({e})"
 
     print("\n" + "=" * 60)
     print("                HERALD PODCAST BOT")

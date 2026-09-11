@@ -21,7 +21,6 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from herald.config import settings
-from herald.db.models import PodcastJob
 from herald.extraction.url_extractor import is_ip_allowed
 from herald.services.redaction import redact_dict, redact_text, sanitize_error
 
@@ -436,25 +435,45 @@ def collect_failure_diagnostics(
         summary = probe_result.get("summary", "")
         if is_http_403:
             summary = f"HTTP 403: Publisher blocked automated retrieval ({probe_result.get('summary', '')})"
-    elif stage in ("scripting", "ai_script", "gemini", "research", "ai"):
+    elif stage in ("scripting", "ai_script", "research", "ai"):
         if operation == "literal_script" or getattr(error, "mode", None) == "literal":
             ai_diag = None
             summary = f"Scripting: {error_cat} - {safe_msg}"
         else:
-            if provider is not None:
-                eff_prov = provider
-            elif stage == "research":
-                eff_prov = getattr(settings, "RESEARCH_PROVIDER", None) or getattr(settings, "AI_PROVIDER", "gemini")
-            else:
-                eff_prov = getattr(settings, "AI_PROVIDER", "none")
+            # Derive provider and model from truthful evidence:
+            # 1. explicit parameter / error attributes
+            eff_prov = provider or getattr(error, "provider", None)
+            eff_model = model or getattr(error, "model", None)
 
-            if model is not None:
-                eff_model = model
-            elif eff_prov and eff_prov != "none":
-                from herald.ai.registry import get_default_model
-                eff_model = get_default_model(eff_prov)
-            else:
-                eff_model = ""
+            # 2. Inspect job in DB if available
+            if (eff_prov is None or eff_model is None) and db and job_id:
+                try:
+                    from herald.db.models import AIInteraction, PodcastJob
+                    job_obj = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+                    if job_obj:
+                        eff_prov = eff_prov or getattr(job_obj, "ai_effective_provider", None)
+                        eff_model = eff_model or getattr(job_obj, "ai_effective_model", None)
+                        if not eff_prov or not eff_model:
+                            latest_inter = (
+                                db.query(AIInteraction)
+                                .filter(AIInteraction.job_id == job_id)
+                                .order_by(AIInteraction.started_at.desc())
+                                .first()
+                            )
+                            if latest_inter:
+                                eff_prov = eff_prov or latest_inter.provider
+                                eff_model = eff_model or latest_inter.model
+                        if not eff_prov:
+                            eff_prov = getattr(job_obj, "ai_provider", None)
+                            eff_model = eff_model or getattr(job_obj, "ai_model", None)
+                        if not eff_prov and getattr(job_obj, "gemini_model", None):
+                            eff_prov = "gemini"
+                            eff_model = eff_model or job_obj.gemini_model
+                except Exception:
+                    pass
+
+            eff_prov = eff_prov or "none"
+            eff_model = eff_model or ""
 
             status_code = getattr(error, "status_code", None) or getattr(error, "http_status", None)
             if hasattr(error, "retryable") and isinstance(getattr(error, "retryable"), bool):
@@ -528,6 +547,7 @@ def collect_failure_diagnostics(
         owns_session = False
         session = db
         try:
+            from herald.db.models import PodcastJob
             if session is None:
                 from herald.db.connection import SessionLocal
                 session = SessionLocal()

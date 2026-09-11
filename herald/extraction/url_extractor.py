@@ -1,11 +1,17 @@
 import ipaddress
 import json
+import re
 import socket
 import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+
+URL_REGEX = re.compile(
+    r"https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s<>'\"\)]*)?"
+)
+
 
 
 class SSRFVulnerabilityError(Exception):

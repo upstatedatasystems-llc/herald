@@ -2,22 +2,30 @@
 Unit test suite for stage-aware failure diagnostics & anti-SSRF protections.
 """
 
+import json
 import socket
 import ssl
+import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from herald.config import settings
 from herald.db.models import Base, JobState, PodcastJob
 from herald.extraction.url_extractor import (
     DNSResolutionError,
-    SSRFVulnerabilityError,
     SourceAccessBlockedError,
+    SSRFVulnerabilityError,
 )
 from herald.gemini.client import GeminiModelUnavailableError
-from herald.services.failure_diagnostics import collect_failure_diagnostics
+from herald.services.failure_diagnostics import (
+    collect_failure_diagnostics,
+    format_concise_failure_summary,
+)
+from herald.telegram.formatters import format_generation_failure_card
 
 
 @pytest.fixture
@@ -130,7 +138,7 @@ def test_diagnostics_ssrf_refusal_zero_connections():
             res = collect_failure_diagnostics(
                 stage="extraction",
                 error=SSRFVulnerabilityError(f"Target host resolves to prohibited IP '{ip}'"),
-                target_url=f"http://internal-host.local/admin",
+                target_url="http://internal-host.local/admin",
             )
 
             probe = res.get("network_probe", {})
@@ -232,3 +240,213 @@ def test_diagnostics_redacts_secrets():
     assert "sk-proj-supersecret" not in res["error_message"]
     # Target URL must not contain sensitive token value in plaintext if redacted
     assert "secret123" not in res["target_url"] or "[REDACTED]" in res["target_url"]
+
+
+class TestFailureDiagnosticsZipExport:
+    """Verify failure-diagnostics.json in diagnostics ZIP retains list root and redacts secrets."""
+
+    def test_zip_contains_list_root_failure_diagnostics(self, db_session, tmp_path, monkeypatch):
+        import zipfile
+
+        from herald.services.diagnostics_export import generate_job_diagnostics_zip
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("herald.config.settings.HERALD_LOG_DIR", str(log_dir))
+
+        job = PodcastJob(
+            id=str(uuid.uuid4()),
+            transport="telegram",
+            request_mode="standard",
+            source_hash="hash-diag-test",
+            source_text="Test source text for diagnostics export.",
+            status=JobState.FAILED_FINAL.value,
+            error_code="SOURCE_ACCESS_BLOCKED",
+            error_detail="Cloudflare 403 Forbidden",
+            auto_diagnostics_json=[
+                {
+                    "attempt": 1,
+                    "stage": "extraction",
+                    "error_category": "SOURCE_ACCESS_BLOCKED",
+                    "network_probe": {"dns_ok": True, "tcp_ok": True, "tls_ok": True},
+                    "api_key": "sk-secret-do-not-leak",
+                },
+                {
+                    "attempt": 2,
+                    "stage": "extraction",
+                    "error_category": "SOURCE_ACCESS_BLOCKED",
+                    "error_message": "Cloudflare captcha challenged",
+                },
+            ],
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        zip_path = generate_job_diagnostics_zip(db_session, job)
+        assert zip_path is not None and Path(zip_path).exists()
+
+        with zipfile.ZipFile(zip_path, "r") as z:
+            assert "failure-diagnostics.json" in z.namelist()
+            content_str = z.read("failure-diagnostics.json").decode("utf-8")
+            content = json.loads(content_str)
+
+        # Must be a list, NOT an empty dict {}
+        assert isinstance(content, list), f"Expected list root, got {type(content)}: {content_str}"
+        assert len(content) == 2
+        assert content[0]["attempt"] == 1
+        assert content[0]["network_probe"]["dns_ok"] is True
+        # Secret must be redacted
+        assert content[0]["api_key"] != "sk-secret-do-not-leak"
+
+    def test_legacy_diagnostics_zip_repair(self, db_session, tmp_path, monkeypatch):
+        """Pre-existing ZIP with legacy failure-diagnostics.json: {} is atomically repaired."""
+        import zipfile
+
+        from herald.services.diagnostics_export import (
+            ensure_terminal_diagnostics_archive,
+            get_terminal_diagnostics_path,
+        )
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("herald.config.settings.HERALD_LOG_DIR", str(log_dir))
+
+        job = PodcastJob(
+            id=str(uuid.uuid4()),
+            transport="telegram",
+            request_mode="standard",
+            source_hash="hash-diag-repair",
+            source_text="Test source text for repair.",
+            status=JobState.FAILED_FINAL.value,
+            error_code="SOURCE_ACCESS_BLOCKED",
+            error_detail="Cloudflare 403 Forbidden",
+            auto_diagnostics_json=[
+                {
+                    "attempt": 1,
+                    "stage": "extraction",
+                    "error_category": "SOURCE_ACCESS_BLOCKED",
+                    "api_key": "sk-secret-do-not-leak",
+                }
+            ],
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        archive_path = get_terminal_diagnostics_path(job.id, job.status)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "w") as z:
+            z.writestr("failure-diagnostics.json", "{}\n")
+            z.writestr("job.json", "{}\n")
+
+        with zipfile.ZipFile(archive_path, "r") as z:
+            initial_content = json.loads(z.read("failure-diagnostics.json").decode("utf-8"))
+            assert isinstance(initial_content, dict)
+
+        repaired_path = ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+        assert repaired_path is not None and Path(repaired_path).exists()
+
+        with zipfile.ZipFile(repaired_path, "r") as z:
+            repaired_content = json.loads(z.read("failure-diagnostics.json").decode("utf-8"))
+            assert isinstance(repaired_content, list), "Repaired ZIP must have list root"
+            assert len(repaired_content) == 1
+            assert repaired_content[0]["attempt"] == 1
+            assert repaired_content[0]["api_key"] != "sk-secret-do-not-leak"
+
+
+def test_accurate_ai_model_and_operation_in_failure_diagnostics():
+    """
+    Verify:
+    - Grounded research records provider='gemini', configured_model=settings.GEMINI_RESEARCH_MODEL, operation='grounded_research'.
+    - Alternative provider records exact provider name and model.
+    - Literal mode records no AI diagnostics.
+    """
+    res_research = collect_failure_diagnostics(
+        stage="research",
+        error=Exception("Google Search grounding quota exceeded"),
+        provider="gemini",
+        model=getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash"),
+        operation="grounded_research",
+    )
+    ai_diag = res_research.get("ai_diagnostics")
+    assert ai_diag is not None
+    assert ai_diag["provider"] == "gemini"
+    assert ai_diag["configured_model"] == getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
+    assert ai_diag["operation"] == "grounded_research"
+
+    res_alt = collect_failure_diagnostics(
+        stage="scripting",
+        error=Exception("Provider rate limited"),
+        provider="openrouter",
+        model="anthropic/claude-3.5-sonnet",
+        operation="standard_script",
+    )
+    ai_diag_alt = res_alt.get("ai_diagnostics")
+    assert ai_diag_alt is not None
+    assert ai_diag_alt["provider"] == "openrouter"
+    assert ai_diag_alt["configured_model"] == "anthropic/claude-3.5-sonnet"
+    assert ai_diag_alt["operation"] == "standard_script"
+
+    res_literal = collect_failure_diagnostics(
+        stage="scripting",
+        error=Exception("Text normalization error"),
+        operation="literal_script",
+    )
+    assert res_literal.get("ai_diagnostics") is None
+
+
+def test_case_d_rerun_approval_failure_card():
+    """
+    Verify format_generation_failure_card renders:
+    - Status: FAILED_FINAL
+    - Job ID
+    - Concise diagnostic summary
+    - Copyable /diagnostics <job-id>
+    """
+    job = PodcastJob(
+        id="job-cased-fail-12345",
+        status=JobState.FAILED_FINAL.value,
+        error_detail="Script generation LLM call failed",
+        auto_diagnostics_json=[{
+            "stage": "scripting",
+            "error_category": "AI_MODEL_UNAVAILABLE",
+            "summary": "Gemini [gemini-3.5-flash]: Model Unavailable (404)",
+        }],
+    )
+
+    card = format_generation_failure_card(job=job)
+    assert "❌ <b>Podcast Generation Failed</b>" in card
+    assert "• <b>ID:</b> <code>job-case</code>" in card
+    assert f"• <b>Status:</b> <code>{JobState.FAILED_FINAL.value}</code>" in card
+    assert "Script generation LLM call failed" in card
+    assert "• <b>Diagnostic:</b> Gemini [gemini-3.5-flash]: Model Unavailable (404)" in card
+    assert "Use <code>/diagnostics job-case</code> for support details." in card
+
+
+def test_html_escaping_in_format_concise_failure_summary():
+    """
+    Verify format_concise_failure_summary HTML-escapes raw summary, stage, and error_category
+    to prevent Telegram 400 Bad Request entity parsing errors.
+    """
+    diag_record = {
+        "stage": "ai<script>",
+        "error_category": "PARSE_ERROR & ABORT",
+        "summary": "Error in <stdin> line 42: <unmatched tag> & invalid <syntax>",
+    }
+
+    result = format_concise_failure_summary(diag_record)
+    assert "&lt;stdin&gt;" in result
+    assert "&lt;unmatched tag&gt;" in result
+    assert "&amp;" in result
+    assert "<stdin>" not in result
+    assert "<unmatched tag>" not in result
+
+    fallback_record = {
+        "stage": "ai<script>",
+        "error_category": "ERR <TAG> & CRASH",
+        "summary": "",
+    }
+    fb_result = format_concise_failure_summary(fallback_record)
+    assert "&lt;SCRIPT&gt;" in fb_result
+    assert "ERR &lt;TAG&gt; &amp; CRASH" in fb_result
+    assert "<script>" not in fb_result
+

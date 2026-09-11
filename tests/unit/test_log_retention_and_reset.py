@@ -4,6 +4,7 @@ Unit tests for log retention across resets/reinstalls and pairing CLI read-only 
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
 from sqlalchemy.orm import Session
 
 from herald.db.models import TelegramPairingCode, TelegramUser
@@ -66,8 +67,8 @@ def test_pairing_cli_read_only_when_already_paired(db_session: Session, monkeypa
 
 def test_install_script_preserves_logs_directory(tmp_path: Path):
     """Verify git clean -fd -e logs -e logs/* preserves logs/ and existing files."""
-    import subprocess
     import shutil
+    import subprocess
 
     git_bin = shutil.which("git")
     if not git_bin:

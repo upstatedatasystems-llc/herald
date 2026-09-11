@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from herald.ai.catalog import resolve_model_token
 from herald.ai.factory import get_ai_provider
-from herald.ai.registry import is_provider_configured
+from herald.ai.registry import get_descriptor, is_provider_configured
+from herald.ai.resolution import resolve_job_settings
 from herald.audio.ffmpeg_builder import check_free_disk_mb
 from herald.config import settings
 from herald.core.models import HeraldRequest, HeraldResponse
@@ -23,7 +24,7 @@ from herald.db.models import (
     TelegramUpdateFailure,
     TelegramUser,
 )
-from herald.extraction.email_parser import (
+from herald.extraction.url_extractor import (
     URL_REGEX,
 )
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
@@ -326,31 +327,35 @@ def perform_ai_check(
                 f"• <b>{slot_tag}:</b> ❌ Error: <code>{html.escape(str(e))}</code>"
             )
 
-    # Research grounding capability derived from resolved candidate chain
-    # Research grounding check
-    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini").lower().strip()
-    from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
-    desc = get_descriptor(res_provider) if res_provider != "none" else None
+    # Research grounding capability derived strictly from candidates in user's chain
+    research_candidate = None
+    for c in candidates:
+        c_desc = get_descriptor(c.provider_id)
+        if c_desc and c_desc.capabilities and c_desc.capabilities.research_grounding:
+            research_candidate = (c, c_desc)
+            break
 
-    if res_provider == "none" or not desc:
-        research_status = f"⚪ <b>Research Grounding:</b> Disabled (RESEARCH_PROVIDER={res_provider})"
-    elif not is_provider_configured(res_provider):
-        research_status = f"⚪ <b>Research Grounding ({desc.display_name}):</b> Not configured (Missing credentials)"
+    if not research_candidate:
+        research_status = "⚪ <b>Research Grounding:</b> No provider in your chain supports research grounding (requires a provider with research_grounding)"
     else:
-        try:
-            prov = create_provider(res_provider)
-            if hasattr(prov, "check_research_connection"):
-                res_res = prov.check_research_connection(timeout_seconds=5.0, force_refresh=True)
-                res_model = html.escape(res_res.get("model", getattr(prov, "model_name", "default")))
-                if res_res.get("connected"):
-                    research_status = f"✅ <b>Research Grounding ({desc.display_name}):</b> Connected\n• Model: <code>{res_model}</code> (Research Grounding ready)"
+        r_cand, r_desc = research_candidate
+        if not is_provider_configured(r_cand.provider_id):
+            research_status = f"⚪ <b>Research Grounding ({r_desc.display_name}):</b> Not configured (Missing credentials)"
+        else:
+            try:
+                prov = get_ai_provider(provider_name=r_cand.provider_id, model=r_cand.model_id)
+                if prov and hasattr(prov, "check_research_connection"):
+                    res_res = prov.check_research_connection(timeout_seconds=5.0, force_refresh=True)
+                    res_model = html.escape(res_res.get("model", r_cand.model_id))
+                    if res_res.get("connected"):
+                        research_status = f"✅ <b>Research Grounding ({r_desc.display_name}):</b> Connected\n  • Model: <code>{res_model}</code> (Research Grounding ready)"
+                    else:
+                        r_err = html.escape(res_res.get("error") or "Connection failed")
+                        research_status = f"❌ <b>Research Grounding ({r_desc.display_name}):</b> Unavailable\n  • Error: <code>{r_err}</code>"
                 else:
-                    r_err = html.escape(res_res.get("error") or "Unknown error")
-                    research_status = f"❌ <b>Research Grounding ({desc.display_name}):</b> Unavailable\n• Error: <code>{r_err}</code>"
-            else:
-                research_status = f"✅ <b>Research Grounding ({desc.display_name}):</b> Configured"
-        except Exception as re_err:
-            research_status = f"❌ <b>Research Grounding ({desc.display_name}):</b> Error: <code>{html.escape(str(re_err))}</code>"
+                    research_status = f"✅ <b>Research Grounding ({r_desc.display_name}):</b> Configured"
+            except Exception as re_err:
+                research_status = f"❌ <b>Research Grounding ({r_desc.display_name}):</b> Error: <code>{html.escape(str(re_err))}</code>"
 
     chain_block = "\n\n".join(status_lines) if status_lines else "<i>No AI providers in chain.</i>"
     warn_block = ""
@@ -509,16 +514,27 @@ def handle_telegram_command(
         kokoro_res = kokoro_client.health_check()
         kokoro_status = "🟢 Healthy" if kokoro_res.get("healthy") else "🔴 Unreachable"
 
-        # AI Provider cached health check
-        ai_provider = get_ai_provider()
-        if ai_provider and ai_provider.is_configured():
-            ai_res = ai_provider.check_connection(timeout_seconds=3.0, force_refresh=False)
-            if ai_res.get("connected"):
-                ai_status_str = f"🟢 Connected ({html.escape(ai_res.get('model', ''))})"
+        # AI Provider health check (derived from user preference or server default primary candidate)
+        prefs = get_effective_user_preferences(db, user_id) if user_id else None
+        resolved = resolve_job_settings(request_params={}, user_prefs=prefs)
+        primary = resolved.primary_candidate
+        if primary and primary.provider_id != "literal":
+            desc = get_descriptor(primary.provider_id)
+            disp_p = desc.display_name if desc else primary.provider_id.capitalize()
+            if is_provider_configured(primary.provider_id):
+                ai_provider = get_ai_provider(provider_name=primary.provider_id, model=primary.model_id)
+                if ai_provider:
+                    ai_res = ai_provider.check_connection(timeout_seconds=3.0, force_refresh=False)
+                    if ai_res.get("connected"):
+                        ai_status_str = f"🟢 Connected ({html.escape(disp_p)} - {html.escape(ai_res.get('model', primary.model_id))})"
+                    else:
+                        ai_status_str = f"🔴 {html.escape(disp_p)} Error: {html.escape(str(ai_res.get('error') or 'Unreachable'))}"
+                else:
+                    ai_status_str = f"🔴 {html.escape(disp_p)} Error"
             else:
-                ai_status_str = f"🔴 {html.escape(ai_res.get('error') or 'Error')}"
+                ai_status_str = f"⚪ Not configured on server ({html.escape(disp_p)})"
         else:
-            ai_status_str = "⚪ Not configured (Literal mode default)"
+            ai_status_str = "🟢 Ready (Literal mode)"
 
         # Queue counts across all nonterminal active states
         nonterminal_states = [

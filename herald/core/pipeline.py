@@ -7,19 +7,9 @@ from typing import Any
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from herald.ai.base import (
-    audit_research_script,
-    audit_script_fidelity,
-    generate_grounded_research,
-    generate_podcast_script,
-    normalize_research_dossier,
-    repair_research_script,
-    repair_script_fidelity,
-)
 from herald.ai.errors import (
     AIProviderError,
 )
-from herald.ai.factory import get_ai_provider
 from herald.ai.failover import execute_with_failover
 from herald.ai.registry import get_descriptor, is_provider_configured
 from herald.ai.resolution import resolve_job_settings
@@ -263,8 +253,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
             )
     elif is_ai_mode:
-        from unittest.mock import Mock
-        has_configured = isinstance(get_ai_provider, Mock) or any(
+        has_configured = any(
             is_provider_configured(c.provider_id) for c in resolved.ai_candidates if c.provider_id != "literal"
         )
         if not has_configured:
@@ -990,13 +979,6 @@ def execute_script_generation(
                     db=db,
                 )
                 def _do_grounding(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(generate_grounded_research, Mock):
-                        return generate_grounded_research(
-                            source_text=src,
-                            research_depth=job.research_depth or "medium",
-                            job_id=job.id,
-                        )
                     return p.generate_grounded_research(
                         source_text=src,
                         research_depth=job.research_depth or "medium",
@@ -1038,13 +1020,6 @@ def execute_script_generation(
                     db=db,
                 )
                 def _do_norm(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(normalize_research_dossier, Mock):
-                        return normalize_research_dossier(
-                            source_text=src,
-                            grounded_research_data=job.research_grounding_json,
-                            job_id=job.id,
-                        )
                     return p.normalize_research_dossier(
                         source_text=src,
                         grounded_research_data=job.research_grounding_json,
@@ -1058,7 +1033,8 @@ def execute_script_generation(
                     source_text=job.source_text,
                 )
                 job.research_json = dossier.model_dump()
-                job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
+                if not job.research_model:
+                    job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
                 db.commit()
                 record_job_diagnostic_event(
                     job.id,
@@ -1072,15 +1048,6 @@ def execute_script_generation(
             if not job.script_json:
                 active_operation = "research_script"
                 def _do_res_script(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(generate_podcast_script, Mock):
-                        return generate_podcast_script(
-                            source_text=src,
-                            request_mode="research",
-                            research_dossier=job.research_json,
-                            source_title=job.custom_title,
-                            job_id=job.id,
-                        )
                     return p.generate_script(
                         source_text=src,
                         request_mode="research",
@@ -1109,14 +1076,6 @@ def execute_script_generation(
                     db=db,
                 )
                 def _do_res_audit(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(audit_research_script, Mock):
-                        return audit_research_script(
-                            source_text=src,
-                            research_dossier=job.research_json,
-                            script_dict=job.script_json,
-                            job_id=job.id,
-                        )
                     return p.audit_research_script(
                         source_text=src,
                         research_dossier=job.research_json,
@@ -1158,15 +1117,6 @@ def execute_script_generation(
                     db=db,
                 )
                 def _do_res_repair(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(repair_research_script, Mock):
-                        return repair_research_script(
-                            source_text=src,
-                            research_dossier=job.research_json,
-                            script_dict=job.script_json,
-                            audit_result=audit_data,
-                            job_id=job.id,
-                        )
                     return p.repair_research_script(
                         source_text=src,
                         research_dossier=job.research_json,
@@ -1196,62 +1146,31 @@ def execute_script_generation(
             # Brief or Standard AI mode
             active_operation = "standard_script"
             t_script0 = datetime.now(UTC)
-            from unittest.mock import Mock
-            if isinstance(get_ai_provider, Mock):
-                mp = get_ai_provider()
-                if mp:
-                    script_resp = mp.generate_script(
-                        source_text=job.source_text,
-                        request_mode=mode_val,
-                        source_title=job.custom_title,
-                        job_id=job.id,
-                    )
-                    job.script_json = script_resp.model_dump()
-                    eff_m = getattr(mp, "configured_model", None) or getattr(mp, "model_name", None)
-                    if isinstance(eff_m, str):
-                        job.ai_effective_model = eff_m
-                    db.commit()
-                    record_stage_metric(
-                        job_id=job.id,
-                        stage="AI_SCRIPT",
-                        started_at=t_script0,
-                        finished_at=datetime.now(UTC),
-                        status="success",
-                        input_chars=len(job.source_text or ""),
-                    )
-            else:
-                def _do_std_script(p, att, src):
-                    from unittest.mock import Mock
-                    if isinstance(generate_podcast_script, Mock):
-                        return generate_podcast_script(
-                            source_text=src,
-                            request_mode=mode_val,
-                            source_title=job.custom_title,
-                            job_id=job.id,
-                        )
-                    return p.generate_script(
-                        source_text=src,
-                        request_mode=mode_val,
-                        source_title=job.custom_title,
-                        job_id=job.id,
-                    )
-                script_resp = execute_with_failover(
-                    job=job,
-                    operation="script_generation",
-                    execute_fn=_do_std_script,
-                    db=db,
-                    source_text=job.source_text,
-                )
-                job.script_json = script_resp.model_dump()
-                db.commit()
-                record_stage_metric(
+
+            def _do_std_script(p, att, src):
+                return p.generate_script(
+                    source_text=src,
+                    request_mode=mode_val,
+                    source_title=job.custom_title,
                     job_id=job.id,
-                    stage="AI_SCRIPT",
-                    started_at=t_script0,
-                    finished_at=datetime.now(UTC),
-                    status="success",
-                    input_chars=len(job.source_text or ""),
                 )
+            script_resp = execute_with_failover(
+                job=job,
+                operation="script_generation",
+                execute_fn=_do_std_script,
+                db=db,
+                source_text=job.source_text,
+            )
+            job.script_json = script_resp.model_dump()
+            db.commit()
+            record_stage_metric(
+                job_id=job.id,
+                stage="AI_SCRIPT",
+                started_at=t_script0,
+                finished_at=datetime.now(UTC),
+                status="success",
+                input_chars=len(job.source_text or ""),
+            )
 
         # Fidelity verification for non-research modes when verify_final_script=True
         if mode_val != RequestMode.RESEARCH.value and job.verify_final_script:
@@ -1267,13 +1186,6 @@ def execute_script_generation(
                 )
                 try:
                     def _do_v_audit(p, att, src):
-                        from unittest.mock import Mock
-                        if isinstance(audit_script_fidelity, Mock):
-                            return audit_script_fidelity(
-                                source_text=src,
-                                script_dict=job.script_json,
-                                job_id=job.id,
-                            )
                         return p.audit_script_fidelity(
                             source_text=src,
                             script_dict=job.script_json,
@@ -1322,14 +1234,6 @@ def execute_script_generation(
                 )
                 try:
                     def _do_v_repair(p, att, src):
-                        from unittest.mock import Mock
-                        if isinstance(repair_script_fidelity, Mock):
-                            return repair_script_fidelity(
-                                source_text=src,
-                                script_dict=job.script_json,
-                                audit_result=v_data,
-                                job_id=job.id,
-                            )
                         return p.repair_script_fidelity(
                             source_text=src,
                             script_dict=job.script_json,

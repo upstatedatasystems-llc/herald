@@ -16,8 +16,8 @@ Tests:
 """
 
 from unittest.mock import MagicMock, patch
+
 import pytest
-import httpx
 
 from herald.ai.cloudflare_provider import CloudflareProvider, extract_cloudflare_content
 from herald.ai.errors import (
@@ -28,7 +28,6 @@ from herald.ai.errors import (
     AIRequestTooLargeError,
 )
 from herald.ai.groq_provider import GroqProvider
-from herald.config import settings
 
 
 def test_cloudflare_response_extractor_shapes():

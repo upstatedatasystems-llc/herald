@@ -177,3 +177,26 @@ def test_secrets_never_appear_in_telegram_client():
     sanitized = client._sanitize(f"Error connecting to https://api.telegram.org/bot{secret_token}/getMe")
     assert secret_token not in sanitized
     assert "[REDACTED_BOT_TOKEN]" in sanitized
+
+
+def test_telegram_client_get_updates_limit_contract(monkeypatch):
+    """Test that TelegramClient.get_updates accepts limit argument and sends it in payload."""
+    import httpx
+
+    sent_params = {}
+
+    def mock_post(self, url, **kwargs):
+        nonlocal sent_params
+        sent_params = kwargs.get("json", {})
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    client = TelegramClient(token="123456:TEST_TOKEN")
+    updates = client.get_updates(offset=100, limit=50, timeout=10)
+
+    assert updates == []
+    assert sent_params.get("offset") == 100
+    assert sent_params.get("limit") == 50
+    assert sent_params.get("timeout") == 10
+

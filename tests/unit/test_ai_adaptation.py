@@ -8,7 +8,8 @@ Tests:
 - Integration with execute_with_failover: same-provider adaptation first.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
 import pytest
 
 from herald.ai.adaptation import (
@@ -136,3 +137,80 @@ def test_failover_same_provider_adaptation_first():
     assert calls[1] == ("Groq", 2)
     assert job.ai_failover_index == 0
     assert job.ai_effective_provider == "groq"
+
+
+def test_adaptation_leaves_canonical_source_text_unchanged(db_session):
+    """Verify canonical job.source_text is never modified during adaptation."""
+    original_text = "Paragraph 1 is very long. " * 500
+    job = PodcastJob(
+        id="job-adapt-source",
+        transport="telegram",
+        source_hash="h-src",
+        source_text="original",
+        status="RECEIVED",
+        ai_provider="groq",
+        ai_model="llama-3.3-70b-versatile",
+        ai_provider_chain_json=[{"provider": "groq", "model": "llama-3.3-70b-versatile"}],
+        ai_failover_index=0,
+    )
+    job.source_text = original_text
+    db_session.add(job)
+    db_session.commit()
+
+    budget = AdaptationBudget(max_ai_calls=5, max_chunks=10)
+    usage = AdaptationUsage()
+
+    def fake_distill(chunk, idx, total, provider=None, usage=None, budget=None):
+        if usage:
+            usage.ai_calls += 1
+        return "Distilled summary"
+
+    with patch("herald.ai.adaptation.distill_chunk", side_effect=fake_distill):
+        adapted = adapt_source_text(
+            source_text=job.source_text,
+            budget=budget,
+            usage=usage,
+            job_id=job.id,
+            db=db_session,
+        )
+
+    assert job.source_text == original_text
+    assert usage.ai_calls > 0
+    assert len(adapted) < len(original_text)
+
+
+def test_adapted_source_forwarded_to_execute_fn():
+    """Verify execute_with_failover forwards adapted source_text to execute_fn."""
+    chain = [{"provider": "groq", "model": "groq/compound"}]
+    job = PodcastJob(
+        id="test-job-adapt-forward",
+        transport="telegram",
+        status="RECEIVED",
+        ai_provider="groq",
+        ai_model="groq/compound",
+        ai_provider_chain_json=chain,
+        ai_failover_index=0,
+    )
+    job.source_text = "original_large_text"
+    received_sources = []
+
+    def mock_exec(prov, attempt, source_text=None):
+        received_sources.append(source_text)
+        if attempt == 1:
+            raise AIRequestTooLargeError("Source too large")
+        return "adapted-success"
+
+    with patch("herald.ai.failover.is_provider_configured", return_value=True), \
+         patch("herald.ai.failover.adapt_source_text", return_value="adapted_compact_text"):
+        result = execute_with_failover(
+            job,
+            operation="script_generation",
+            execute_fn=mock_exec,
+            source_text=job.source_text,
+            max_same_provider_attempts=2,
+        )
+
+    assert result == "adapted-success"
+    assert received_sources == ["original_large_text", "adapted_compact_text"]
+    assert job.source_text == "original_large_text"
+

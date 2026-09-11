@@ -115,7 +115,7 @@ def upgrade() -> None:
                 if any_inter and any_inter[0]:
                     provider = any_inter[0]
                 elif "llama" in m_low or "gpt" in m_low:
-                    provider = "ambiguous"
+                    provider = None
                 else:
                     # Legacy fallback
                     provider = "gemini"
@@ -123,25 +123,36 @@ def upgrade() -> None:
             provider = "gemini"
             model = "gemini-3.5-flash"
 
-        provider_chain = [{"provider": provider, "model": model or ""}]
-
-        conn.execute(sa.text("""
-            UPDATE podcast_jobs
-            SET ai_provider = :prov,
-                ai_model = :mod,
-                ai_provider_chain_json = :chain,
-                ai_effective_provider = :eff_prov,
-                ai_effective_model = :eff_mod,
-                ai_failover_index = 0
-            WHERE id = :jid
-        """), {
-            "prov": provider,
-            "mod": model or "",
-            "chain": json.dumps(provider_chain),
-            "eff_prov": provider,
-            "eff_mod": model or "",
-            "jid": job_id,
-        })
+        if provider is None:
+            conn.execute(sa.text("""
+                UPDATE podcast_jobs
+                SET ai_provider = NULL,
+                    ai_model = :mod,
+                    ai_provider_chain_json = NULL,
+                    ai_effective_provider = NULL,
+                    ai_effective_model = :mod,
+                    ai_failover_index = 0
+                WHERE id = :jid
+            """), {"jid": job_id, "mod": model})
+        else:
+            provider_chain = [{"provider": provider, "model": model or ""}]
+            conn.execute(sa.text("""
+                UPDATE podcast_jobs
+                SET ai_provider = :prov,
+                    ai_model = :mod,
+                    ai_provider_chain_json = :chain,
+                    ai_effective_provider = :eff_prov,
+                    ai_effective_model = :eff_mod,
+                    ai_failover_index = 0
+                WHERE id = :jid
+            """), {
+                "prov": provider,
+                "mod": model or "",
+                "chain": json.dumps(provider_chain),
+                "eff_prov": provider,
+                "eff_mod": model or "",
+                "jid": job_id,
+            })
 
 
 def downgrade() -> None:

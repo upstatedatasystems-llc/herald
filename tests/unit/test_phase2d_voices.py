@@ -1,5 +1,4 @@
 import shutil
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +14,11 @@ from herald.services.voice_manager import (
     compute_sample_text_hash,
     convert_wav_to_mp3,
     ensure_voice_sample,
+    get_cached_voice_sample,
+    get_voice_sample_path,
     is_valid_sample_audio,
+    load_voice_sample_manifest,
+    prewarm_all_voice_samples,
     save_voice_sample_manifest,
 )
 from herald.telegram.auth import generate_pairing_code, verify_and_claim_pairing_code
@@ -453,3 +456,65 @@ def test_get_cached_voice_sample_rejects_orphans_and_version_mismatch(monkeypatc
         }
     })
     assert get_cached_voice_sample("af_bella") == sample_file
+
+
+def test_voice_cache_rebuild_and_force_semantics(tmp_path, monkeypatch):
+    """
+    Verify:
+    - An orphan/legacy audio file without a current manifest entry is rejected by get_cached_voice_sample.
+    - ensure_voice_sample(force=False) repairs/rebuilds and updates the manifest.
+    - Subsequent call with force=False returns the cached sample without re-synthesizing.
+    - prewarm_all_voice_samples(force=True) forces re-synthesis and updates the manifest.
+    """
+
+    samples_dir = tmp_path / "voice_samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("herald.services.voice_manager.get_voice_samples_dir", lambda: samples_dir)
+    monkeypatch.setattr(settings, "ALLOWED_VOICES", "af_heart")
+
+    orphan_mp3 = get_voice_sample_path("af_heart")
+    orphan_mp3.write_bytes(b"ID3fake_mp3_content_longer_than_32_bytes_header_padding")
+
+    monkeypatch.setattr("herald.services.voice_manager.is_valid_sample_audio", lambda p: True)
+
+    # 1. Manifest is empty -> get_cached_voice_sample must reject orphan file
+    assert get_cached_voice_sample("af_heart") is None
+
+    mock_kokoro = MagicMock()
+    synth_calls = []
+
+    def mock_synthesize_chunk(text, output_path, voice, speed=1.0, timeout=180.0):
+        synth_calls.append(voice)
+        Path(output_path).write_bytes(b"RIFFfake_wav_data_padding_for_audio_test")
+        return {"audio_path": output_path, "duration": 1.5}
+
+    mock_kokoro.synthesize_chunk.side_effect = mock_synthesize_chunk
+
+    def mock_convert(wav, mp3):
+        mp3.write_bytes(b"ID3fake_converted_mp3_bytes_padding_12345")
+        return mp3
+
+    monkeypatch.setattr("herald.services.voice_manager.convert_wav_to_mp3", mock_convert)
+
+    # 2. ensure_voice_sample(force=False) should notice cache miss, synthesize, and write manifest
+    res_path = ensure_voice_sample("af_heart", kokoro_client=mock_kokoro, force=False)
+    assert res_path == orphan_mp3
+    assert len(synth_calls) == 1
+
+    # Manifest should now be populated
+    manifest = load_voice_sample_manifest()
+    assert "af_heart" in manifest
+    assert manifest["af_heart"]["voice_id"] == "af_heart"
+    assert manifest["af_heart"]["format"] == "mp3"
+    assert manifest["af_heart"]["speed"] == 1.0
+
+    # 3. Subsequent ensure_voice_sample(force=False) hits cache; synthesis is NOT called again
+    res_path2 = ensure_voice_sample("af_heart", kokoro_client=mock_kokoro, force=False)
+    assert res_path2 == orphan_mp3
+    assert len(synth_calls) == 1
+
+    # 4. prewarm_all_voice_samples(force=True) forces re-synthesis
+    prewarm_res = prewarm_all_voice_samples(kokoro_client=mock_kokoro, force=True)
+    assert prewarm_res.get("af_heart") is True
+    assert len(synth_calls) == 2
+

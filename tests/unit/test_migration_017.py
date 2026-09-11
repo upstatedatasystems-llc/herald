@@ -10,9 +10,9 @@ Tests:
 """
 
 import json
+
 from alembic import command
 from alembic.config import Config
-import pytest
 from sqlalchemy import create_engine, inspect, text
 
 
@@ -176,11 +176,11 @@ def test_migration_017_upgrade_and_downgrade(tmp_path):
         assert r7[0] == "ollama"
         assert r7[1] == "ollama/llama3.2"
 
-        # Job 8: Ambiguous Llama without provider prefix is marked 'ambiguous' (NOT false attribution)
+        # Job 8: Ambiguous Llama without provider prefix leaves provider NULL (NOT false attribution or invalid executable token)
         r8 = conn.execute(
             text("SELECT ai_provider, ai_model FROM podcast_jobs WHERE id = 'job-ambiguous-llama'")
         ).fetchone()
-        assert r8[0] == "ambiguous"
+        assert r8[0] is None
         assert r8[1] == "llama-3-8b"
 
         # User 1: Empty preferences MUST REMAIN NULL (User Correction 2)

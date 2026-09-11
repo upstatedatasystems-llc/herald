@@ -267,7 +267,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
 
     if is_research:
         lines.extend([
-            f"- **Research Model**: `{job.research_model or getattr(settings, 'GEMINI_RESEARCH_MODEL', 'gemini-3.6-flash')}`",
+            f"- **Research Model**: `{job.research_model or 'None'}`",
             f"- **Search Queries Executed**: {job.research_search_count or 0}",
             f"- **Grounded Sources Count**: {job.research_source_count or 0}",
             f"- **Research Repair Count**: {job.research_repair_count or 0}",

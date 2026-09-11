@@ -1041,7 +1041,7 @@ def test_ref_visibility_across_ref_types(tmp_path):
     subprocess.run(["git", "-C", str(seed_dir), "add", "dummy.txt"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(seed_dir), "commit", "-m", "feature commit", "--no-gpg-sign"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(seed_dir), "push", "origin", "HEAD:feature/my-test"], check=True, capture_output=True)
-    commit_sha = subprocess.run(["git", "-C", str(seed_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    _commit_sha = subprocess.run(["git", "-C", str(seed_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(parents=True)

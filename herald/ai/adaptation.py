@@ -111,42 +111,21 @@ def distill_chunk(
     budget: AdaptationBudget | None = None,
 ) -> str:
     """
-    Distill key narrative facts and information from a source chunk.
+    Distill key narrative facts and information from a source chunk using AI.
     Preserves section context, quotes, numbers, and logical flow.
-    Supports active provider distillation with budget accounting, falling
-    back cleanly to structured fact-preserving heuristic reduction when
-    distillation is not implemented. Typed provider errors are propagated
-    to the retry and failover policy.
+    Requires an AI provider supporting text distillation; does not silently
+    fall back to sentence-selection heuristics. Typed provider errors are
+    propagated to retry and failover policy. Literal remains zero-AI.
     """
-    if provider is not None and hasattr(provider, "distill_text"):
+    if provider is not None and getattr(provider, "provider_name", "").lower() != "literal":
         if usage and budget:
             usage.ai_calls += 1
             usage.check_budget(budget)
-        try:
-            return provider.distill_text(chunk, chunk_index=chunk_index, total_chunks=total_chunks)
-        except NotImplementedError:
-            pass
+        return provider.distill_text(chunk, chunk_index=chunk_index, total_chunks=total_chunks)
 
-    lines = [f"### SECTION {chunk_index + 1}/{total_chunks}"]
-    clean_chunk = chunk.strip()
-    paragraphs = [p.strip() for p in clean_chunk.split("\n") if p.strip()]
+    # Literal / Zero-AI mode: format section without AI modification
+    return f"### SECTION {chunk_index + 1}/{total_chunks}\n{chunk.strip()}"
 
-    for p in paragraphs:
-        if p.startswith("#"):
-            lines.append(p)
-        else:
-            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", p) if s.strip()]
-            if len(sentences) <= 3:
-                lines.append(" ".join(sentences))
-            else:
-                selected = [sentences[0]]
-                for s in sentences[1:-1]:
-                    if re.search(r'(\d+|"|\'|\$|[A-Z][a-z]+)', s):
-                        selected.append(s)
-                selected.append(sentences[-1])
-                lines.append(" ".join(selected[:5]))
-
-    return "\n".join(lines)
 
 
 def merge_dossier(distilled_chunks: list[str], title: str | None = None) -> str:

@@ -4,9 +4,9 @@ Tests upgrade from 014 -> 015, column structure, indexes, survival of existing d
 transport uniqueness preservation, and clean downgrade.
 """
 
+import pytest
 from alembic import command
 from alembic.config import Config
-import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 

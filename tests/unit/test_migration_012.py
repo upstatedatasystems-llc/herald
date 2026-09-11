@@ -4,10 +4,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import sessionmaker
 
 from herald.config import settings
-from herald.db.models import PodcastJob
 
 
 @pytest.fixture

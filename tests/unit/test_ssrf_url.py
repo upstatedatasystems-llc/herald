@@ -54,6 +54,7 @@ def test_validate_url_host_blocks_credentials_and_ports():
 def test_validate_url_host_dns_resolution_error_classification(monkeypatch):
     import socket
     from unittest.mock import patch
+
     from herald.extraction.url_extractor import DNSResolutionError
 
     def mock_gai_fail(host, port, family=0, type=0, proto=0, flags=0):

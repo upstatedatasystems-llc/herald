@@ -144,49 +144,12 @@ class AIProvider(ABC):
         Preserves names, dates, numbers, attribution, qualifiers, uncertainty, and order.
         Subclasses override if supported. Default raises NotImplementedError to trigger fallback.
         """
-        raise NotImplementedError(f"Provider {self.provider_name} does not implement distill_text")
+        from herald.ai.errors import AIUnsupportedCapabilityError
+
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support text distillation")
 
 
-# Module-level provider-neutral operation delegates
-def generate_grounded_research(*args, **kwargs):
-    from herald.ai.factory import get_research_provider
-    p = get_research_provider()
-    return p.generate_grounded_research(*args, **kwargs)
+# Isolated legacy compatibility delegates (DEPRECATED: use execute_with_failover directly)
 
-
-def normalize_research_dossier(*args, **kwargs):
-    from herald.ai.factory import get_research_provider
-    p = get_research_provider()
-    return p.normalize_research_dossier(*args, **kwargs)
-
-
-def audit_research_script(*args, **kwargs):
-    from herald.ai.factory import get_research_provider
-    p = get_research_provider()
-    return p.audit_research_script(*args, **kwargs)
-
-
-def repair_research_script(*args, **kwargs):
-    from herald.ai.factory import get_research_provider
-    p = get_research_provider()
-    return p.repair_research_script(*args, **kwargs)
-
-
-def audit_script_fidelity(*args, **kwargs):
-    from herald.ai.factory import get_ai_provider
-    p = get_ai_provider()
-    return p.audit_script_fidelity(*args, **kwargs)
-
-
-def repair_script_fidelity(*args, **kwargs):
-    from herald.ai.factory import get_ai_provider
-    p = get_ai_provider()
-    return p.repair_script_fidelity(*args, **kwargs)
-
-
-def generate_podcast_script(*args, **kwargs):
-    from herald.ai.factory import get_ai_provider
-    p = get_ai_provider()
-    return p.generate_script(*args, **kwargs)
 
 

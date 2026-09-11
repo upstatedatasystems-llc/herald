@@ -1,10 +1,11 @@
 from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.core.pipeline import find_prior_content_candidate
-from herald.db.models import Base, JobState, PodcastJob, RequestMode, SourceType
+from herald.db.models import Base, JobState, PodcastJob
 
 
 @pytest.fixture

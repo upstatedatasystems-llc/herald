@@ -1,30 +1,15 @@
-import html
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.ai.catalog import get_model_token
-from herald.config import settings
 from herald.db.models import Base, TelegramUser
 from herald.telegram.auth import (
     generate_pairing_code,
-    get_effective_user_preferences,
-    set_user_ai_model_for_provider,
-    set_user_ai_provider_chain,
     verify_and_claim_pairing_code,
 )
 from herald.telegram.bot import handle_telegram_callback_query, handle_telegram_command
-from herald.telegram.formatters import (
-    format_ai_models_menu,
-    format_ai_providers_menu,
-    format_mode_menu,
-    format_models_catalog,
-    format_provider_models_select,
-    format_provider_slot_select,
-    format_settings,
-    format_speed_menu,
-)
 
 
 def _setup_test_db():

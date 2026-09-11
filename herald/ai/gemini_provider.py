@@ -59,8 +59,15 @@ def extract_article_via_url_context(*args, **kwargs):
 class GeminiProvider(AIProvider):
     """Gemini AI Provider implementation with response caching and secure header auth."""
 
-    def __init__(self, model: str | None = None, model_name: str | None = None, cache_ttl_seconds: float = 300.0) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        model_name: str | None = None,
+        research_model: str | None = None,
+        cache_ttl_seconds: float = 300.0,
+    ) -> None:
         self._model = model or model_name or settings.GEMINI_MODEL
+        self._research_model = research_model
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cached_health: dict[str, Any] | None = None
         self._cache_timestamp: float = 0.0
@@ -75,7 +82,7 @@ class GeminiProvider(AIProvider):
 
     @property
     def research_model(self) -> str:
-        return settings.GEMINI_RESEARCH_MODEL
+        return self._research_model or settings.GEMINI_RESEARCH_MODEL
 
     @property
     def capabilities(self) -> ProviderCapabilities:
