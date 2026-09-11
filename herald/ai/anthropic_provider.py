@@ -168,7 +168,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 }
 
                 from herald.concurrency import get_semaphores
-                with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                     resp = client.post(ANTHROPIC_API_URL, json=payload, headers=headers)
 
                 if resp.status_code != 200:

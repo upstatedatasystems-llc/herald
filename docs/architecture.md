@@ -2,41 +2,75 @@
 
 ## System Overview
 
-Herald is an email-to-podcast automation system optimized for single-core ARM64 cloud deployments (specifically OCI VM.Standard.A1.Flex with 1 OCPU and 6 GB RAM).
+Herald is a podcast automation system optimized for single-core cloud deployments and edge servers. It turns articles, newsletters, notes, and documents into high-quality spoken audio delivered through Telegram (with optional legacy email/n8n support).
 
-The system converts emails (plain text, HTML, forwarded newsletters, or article URLs) into structured podcast scripts via Gemini AI, synthesizes spoken-word audio using a local Kokoro TTS engine on ARM64 CPU, normalizes and encodes mono MP3 audio via FFmpeg, uploads episodes to Google Drive, and delivers email notifications to authorized users.
+Herald operates on a **strictly vendor-neutral AI architecture** supporting 9 providers:
+- **Google Gemini** (Full support: Brief, Standard, Google Search Grounded Research, URL Context)
+- **Groq Cloud** (Fast Llama 3.3 inference)
+- **Cloudflare Workers AI** (Serverless inference with Qwen & Gemma tuning)
+- **OpenAI** (GPT-4o, GPT-4o-mini)
+- **OpenRouter** (Unified multi-vendor routing)
+- **Mistral AI** (Mistral Large & Small)
+- **Anthropic** (Claude 3.5 Sonnet)
+- **Ollama** (Self-hosted local LLMs)
+- **Literal Mode** (Deterministic text cleaning & direct narration with **zero** external AI calls)
 
-## Logical Architecture & Service Boundaries
+---
+
+## Logical Architecture & Multi-Provider Failover
 
 ```text
-[ Gmail Inbox ]
-       │ (Polling trigger)
-       ▼
-    [ n8n ] ──────► [ Herald API ] ──────► [ PostgreSQL ]
-                         │                     ▲
-                         ▼                     │
-                  [ Gemini API ]               │ (Claim job)
-                                               │
-                                       [ Herald Worker ]
-                                               │
-                                               ▼
-                                      [ Kokoro TTS API ]
-                                               │
-                                               ▼
-                                      [ FFmpeg Builder ]
+[ Telegram User / Intake ]
+         │ (Send URL, text, /settings, /models)
+         ▼
+  [ Telegram Bot ] ──────► [ PostgreSQL 16 ]
+         │                     ▲ (Snapshots immutable provider chain:
+         │                     │  Primary -> Secondary -> Tertiary)
+         ▼                     │
+ [ Job State Engine ] ─────────┤
+         │                     │
+         ▼                     │
+[ Deterministic Failover ] ────┤ (Sticky cursor advancement: ai_failover_index)
+  ├─ Provider Primary          │
+  ├─ Same-Provider Retry/Adapt │
+  ├─ Provider Secondary        │
+  └─ Provider Tertiary         │
+         │                     ▼
+         ▼              [ Herald Worker ]
+  [ Podcast Script ]           │ (Claims QUEUED_TTS via SELECT FOR UPDATE SKIP LOCKED)
+                               ▼
+                      [ Kokoro TTS Engine ]
+                               ▼
+                      [ FFmpeg Normalizer ]
+                               ▼
+                      [ Telegram Delivery ]
 ```
 
-## Component Responsibilities
+---
 
-1. **PostgreSQL 16**: System of record for incoming messages, normalized source content, durable job queue, state transitions, generated scripts, audio metadata, Google Drive links, and error history.
-2. **n8n Orchestrator**: Handles Gmail polling intake, allowlist checks, calling Herald API endpoints, uploading finished MP3s to Google Drive, sending completion emails, and retrying failed stages.
-3. **Herald API (FastAPI)**: Handles intake validation, email text parsing, SSRF-protected article extraction, Gemini API scripting requests, script schema validation, job status queries, and delivery metadata updates.
-4. **Herald Worker**: Daemon process claiming one `QUEUED` job at a time using `SELECT ... FOR UPDATE SKIP LOCKED`, chunking text on sentence boundaries, calling Kokoro TTS per segment with crash recovery, and assembling output MP3s via FFmpeg.
-5. **Kokoro TTS (Kokoro-FastAPI)**: Containerized local ONNX speech synthesis service running on CPU ARM64. Exposes an OpenAI-compatible `/v1/audio/speech` endpoint over the private internal Docker network.
-6. **FFmpeg Audio Pipeline**: Concatenates audio segments, applies integrated spoken-word loudness normalization (`loudnorm` filter), encodes 64k mono MP3, embeds ID3 tags, and computes SHA-256 checksums.
+## Core Invariants & Architecture Design
 
-## Network Security & Isolation
+### 1. Immutable Chain Snapshotting & Sticky Failover
+- When a job is ingested at `RECEIVED`/`EXTRACTING`, the user's ordered provider chain (Primary, Secondary, Tertiary) and configured models are resolved and frozen into `podcast_jobs.ai_provider_chain_json`.
+- Before the first AI call, preflight limits are verified safely without logging sensitive source text or API keys.
+- If a provider encounters a transient failure (429 rate limit, 5xx server error, timeout), bounded same-provider retry occurs.
+- If a provider encounters a fatal or exhausted error (401 invalid credentials, 403 forbidden, model unavailable, unresolvable 413), execution fails over deterministically to the next snapshotted candidate.
+- Failover is **sticky**: the winning candidate becomes `ai_effective_provider` / `ai_effective_model` and the durable cursor `ai_failover_index` advances in PostgreSQL, persisting across process restarts and worker recoveries.
 
-- **Private Docker Network**: PostgreSQL, Herald Worker, Herald API, and Kokoro TTS communicate over an internal bridge network (`herald-backend`).
-- **No Public Ports**: Neither PostgreSQL nor Kokoro ports are published to the public host interface.
-- **n8n Editor Access**: n8n editor port (`5678`) and Herald API port (`8000`) are bound strictly to `127.0.0.1` and accessed via SSH tunneling or Tailscale.
+### 2. Large-Source Bounded Adaptation Engine
+- When incoming text exceeds model context windows or provider payload limits (HTTP 413 / `AIContextLimitExceededError`), Herald triggers same-provider adaptation before cursor failover.
+- Uses semantic chunking along paragraph and sentence boundaries.
+- Produces structured fact-preserving distillations and compiles a coherent research dossier.
+- Hierarchical reduction passes are bounded by `AdaptationBudget` (`max_chunks`, `max_reduction_depth`, `max_ai_calls`, `max_elapsed_seconds`).
+- Work consumed persists across provider failover without resetting.
+- **Literal Mode Guarantee**: Literal mode performs zero external AI calls and zero adaptation mutation.
+
+### 3. Telegram Settings & Restart-Safe Tokens
+- `/settings` presents interactive slot menus for Voice, Default Speed, Default Mode, AI Providers, and AI Models.
+- Setting a Primary provider automatically compacts empty slots and eliminates duplicates.
+- All inline keyboard callbacks use compact, deterministic SHA-256 tokens (`token = sha256(provider_id + "\0" + model_id)[:10]`), remaining under Telegram's 64-byte callback limit and surviving process restarts.
+
+### 4. Vendor-Neutral Core Orchestration
+- Core business logic (`herald/core/pipeline.py`, `apps/api/main.py`) contains **zero** direct imports of vendor-specific SDKs or provider modules.
+- All interactions flow through normalized interfaces: `execute_with_failover`, `resolve_job_settings`, and typed `AIProviderError` exceptions.
+

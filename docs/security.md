@@ -34,3 +34,22 @@ All untrusted user content (emails and web articles) is strictly isolated inside
 - Internal PostgreSQL, Herald Worker, and Kokoro TTS containers run on an unexposed internal bridge network (`herald-backend`).
 - Public ports for database and speech synthesis are closed.
 - Admin interfaces (n8n editor) are bound to `127.0.0.1` and accessed via Tailscale or SSH tunnels.
+
+## 5. AI Preflight Telemetry & Diagnostic Redaction
+
+- **Zero Secret & Source Text Leaks**: The AI preflight layer (`record_ai_preflight`) captures metadata (provider, model, token estimates, limits, attempt number, failover index) but **strictly excludes** raw source text, prompt contents, or provider API keys.
+- **Diagnostic Bundles**: Terminal failure diagnostics archives redact all internal API credentials and truncate large error responses to avoid leaking infrastructure tokens.
+
+## 6. Telegram Callback Validation & Length Limits
+
+- Telegram inline keyboards enforce a strict 64-byte payload limit.
+- Herald uses deterministic 10-character SHA-256 tokens (`sha256(provider_id + "\0" + model_id)[:10]`) instead of passing raw model names or parameters in callbacks.
+- Incoming callback queries are validated against the authoritative provider registry and user authorization state before processing.
+
+## 7. Bounded Failover Chains & Quota Protection
+
+- Jobs snapshot an explicit, immutable candidate chain (Primary, Secondary, Tertiary).
+- **Hard Chain Ceiling**: Failover **never** escapes the snapshotted chain and **never** dynamically invokes unconfigured or arbitrary external models.
+- Telegram settings clearly disclose cost, quota, and latency characteristics when selecting commercial vs. free/local providers.
+- Bounded retries (3 attempts max) and adaptation budgets prevent runaway billing or endless loops.
+

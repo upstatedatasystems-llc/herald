@@ -49,8 +49,32 @@ class Settings(BaseSettings):
     GEMINI_RESEARCH_NORMALIZATION_MAX_OUTPUT_TOKENS: int = 16384
     GEMINI_URL_CONTEXT_INITIAL_OUTPUT_TOKENS: int = 8192
     GEMINI_URL_CONTEXT_MAX_OUTPUT_TOKENS: int = 16384
-    GEMINI_TIMEOUT_SECONDS: int = 60
+    AI_PROVIDER_TIMEOUT_SECONDS: int | None = None
+    GEMINI_TIMEOUT_SECONDS: int | None = None
+    AI_REQUEST_MAX_ATTEMPTS: int = 3
     GEMINI_RETRY_COUNT: int = 3
+
+    # Large-Source Adaptation Settings
+    ADAPTATION_MAX_CHUNKS: int = 12
+    ADAPTATION_MAX_DEPTH: int = 2
+    ADAPTATION_MAX_AI_CALLS: int = 15
+    ADAPTATION_MAX_RETRY_CALLS: int = 3
+    ADAPTATION_MAX_ESTIMATED_WORK: int = 500_000
+    ADAPTATION_MAX_ELAPSED_SECONDS: float = 600.0
+    ADAPTATION_CHUNK_MAX_CHARS: int = 4000
+
+
+    @property
+    def effective_ai_timeout_seconds(self) -> int:
+        """
+        Timeout precedence:
+        AI_PROVIDER_TIMEOUT_SECONDS > legacy GEMINI_TIMEOUT_SECONDS > 300 seconds default.
+        """
+        if self.AI_PROVIDER_TIMEOUT_SECONDS is not None:
+            return self.AI_PROVIDER_TIMEOUT_SECONDS
+        if self.GEMINI_TIMEOUT_SECONDS is not None:
+            return self.GEMINI_TIMEOUT_SECONDS
+        return 300
 
     # Kokoro TTS
     KOKORO_BASE_URL: str = "http://kokoro:8880/v1"
@@ -103,7 +127,18 @@ class Settings(BaseSettings):
     TELEGRAM_MAX_AUDIO_BYTES: int = 50 * 1024 * 1024  # 50MB Bot API upload limit
     # AI Providers Configuration
     AI_PROVIDER: str = "gemini"  # "gemini", "groq", "openrouter", "mistral", "cloudflare", "none", "anthropic", "openai", "ollama"
-    RESEARCH_PROVIDER: str = "gemini"  # Dedicated research provider
+    AI_SECONDARY_PROVIDER: str | None = None
+    AI_TERTIARY_PROVIDER: str | None = None
+    RESEARCH_PROVIDER: str = "gemini"  # Dedicated research provider (legacy fallback)
+
+    # Large-Source Adaptation Bounds
+    ADAPTATION_MAX_CHUNKS: int = 12
+    ADAPTATION_MAX_DEPTH: int = 2
+    ADAPTATION_MAX_AI_CALLS: int = 15
+    ADAPTATION_MAX_RETRY_CALLS: int = 3
+    ADAPTATION_MAX_ESTIMATED_WORK: int = 500_000
+    ADAPTATION_MAX_ELAPSED_SECONDS: float = 600.0
+
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     OPENROUTER_API_KEY: str = ""

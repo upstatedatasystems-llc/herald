@@ -123,19 +123,38 @@ def format_help() -> str:
 
 def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple[str, dict]:
     """
-    Format settings message and generate inline keyboard markup for voice selection and confirmation toggle.
+    Format settings message and generate inline keyboard markup for voice selection,
+    confirmation toggle, AI provider slots, AI models, speed, and mode.
     Returns:
         (text, reply_markup_dict)
     """
+    from herald.ai.registry import get_descriptor, is_provider_configured
+    from herald.ai.resolution import resolve_job_settings
+
     confirm_on = bool(user_prefs.get("confirm_before_tts", False))
     default_voice = html.escape(str(user_prefs.get("default_voice", "af_heart")))
     default_speed = float(user_prefs.get("default_speed", 1.0))
     default_mode = html.escape(str(user_prefs.get("default_mode", "standard")).capitalize())
-    ai_provider = html.escape(str(user_prefs.get("ai_provider", "None (Literal only)")))
 
     confirm_str = "🟢 On" if confirm_on else "⚪ Off"
     button_text = "🔕 Disable Confirm Before TTS" if confirm_on else "🔔 Enable Confirm Before TTS"
     button_callback = "h2:settings:confirm:off" if confirm_on else "h2:settings:confirm:on"
+
+    resolved = resolve_job_settings(request_params={}, user_prefs=user_prefs)
+    candidates = resolved.ai_candidates
+
+    chain_lines = []
+    slot_names = ["Primary", "Secondary", "Tertiary"]
+    for i, slot_name in enumerate(slot_names):
+        if i < len(candidates):
+            c = candidates[i]
+            desc = get_descriptor(c.provider_id)
+            p_name = desc.display_name if desc else c.provider_id.capitalize()
+            cfg_warn = "" if (c.provider_id == "literal" or is_provider_configured(c.provider_id)) else " ⚠️ <i>(Unconfigured)</i>"
+            chain_lines.append(f"  {i+1}. {slot_name}: <b>{html.escape(p_name)}</b> (<code>{html.escape(c.model_id)}</code>){cfg_warn}")
+        else:
+            chain_lines.append(f"  {i+1}. {slot_name}: <i>None</i>")
+    chain_str = "\n".join(chain_lines)
 
     text = (
         "⚙️ <b>Herald Preferences & Settings</b>\n\n"
@@ -143,8 +162,8 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
         f"• <b>Default Voice:</b> <code>{default_voice}</code>\n"
         f"• <b>Default Speed:</b> <code>{default_speed:.1f}x</code>\n"
         f"• <b>Confirm Before TTS:</b> {confirm_str}\n"
-        f"• <b>AI Provider:</b> <code>{ai_provider}</code>\n\n"
-        "<i>Tap below to customize your default voice or toggle pre-TTS approval confirmation:</i>"
+        f"• <b>AI Provider Chain:</b>\n{chain_str}\n\n"
+        "<i>Tap below to customize your preferences:</i>"
     )
 
     reply_markup = {
@@ -161,10 +180,290 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
                     "callback_data": button_callback,
                 }
             ],
+            [
+                {
+                    "text": "🤖 AI Providers",
+                    "callback_data": "h3:settings:providers",
+                },
+                {
+                    "text": "🧩 AI Models",
+                    "callback_data": "h3:settings:models",
+                },
+            ],
+            [
+                {
+                    "text": "⚡ Speed",
+                    "callback_data": "h3:settings:speed",
+                },
+                {
+                    "text": "🧭 Mode",
+                    "callback_data": "h3:settings:mode",
+                },
+            ],
+            [
+                {
+                    "text": "🔍 Check AI Connections",
+                    "callback_data": "h3:settings:aicheck",
+                }
+            ],
         ]
     }
 
     return text, reply_markup
+
+
+def format_ai_providers_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format AI providers chain management menu."""
+    from herald.ai.registry import get_descriptor, is_provider_configured
+    from herald.ai.resolution import resolve_job_settings
+
+    resolved = resolve_job_settings(request_params={}, user_prefs=user_prefs)
+    candidates = resolved.ai_candidates
+    slot_names = ["Primary", "Secondary", "Tertiary"]
+
+    lines = [
+        "🤖 <b>AI Provider Chain Configuration</b>\n",
+        "Herald failover moves down your provider chain in order if errors occur.\n",
+    ]
+
+    for i, name in enumerate(slot_names):
+        if i < len(candidates):
+            c = candidates[i]
+            desc = get_descriptor(c.provider_id)
+            p_name = desc.display_name if desc else c.provider_id.capitalize()
+            cfg_note = "" if (c.provider_id == "literal" or is_provider_configured(c.provider_id)) else " ⚠️ <i>(API key missing)</i>"
+            lines.append(f"• <b>{name} (Slot {i+1}):</b> <b>{html.escape(p_name)}</b> (<code>{html.escape(c.model_id)}</code>){cfg_note}")
+        else:
+            lines.append(f"• <b>{name} (Slot {i+1}):</b> <i>None</i>")
+
+    lines.append("\n<i>Tap a slot below to set or replace its provider:</i>")
+    text = "\n".join(lines)
+
+    keyboard = [
+        [
+            {"text": "1️⃣ Set Primary", "callback_data": "h3:p:slot:0"},
+            {"text": "2️⃣ Set Secondary", "callback_data": "h3:p:slot:1"},
+        ],
+        [
+            {"text": "3️⃣ Set Tertiary", "callback_data": "h3:p:slot:2"},
+            {"text": "🗑 Clear Secondary & Tertiary", "callback_data": "h3:p:clear_subs"},
+        ],
+        [
+            {"text": "← Back to Settings", "callback_data": "h2:settings:main"},
+        ],
+    ]
+
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_provider_slot_select(user_prefs: dict, slot_index: int) -> tuple[str, dict[str, Any]]:
+    """Format provider selection for a specific slot."""
+    from herald.ai.registry import is_provider_configured, list_registered_providers
+    from herald.ai.resolution import resolve_job_settings
+
+    resolved = resolve_job_settings(request_params={}, user_prefs=user_prefs)
+    candidates = resolved.ai_candidates
+    slot_names = ["Primary", "Secondary", "Tertiary"]
+    slot_label = slot_names[slot_index] if slot_index < len(slot_names) else f"Slot {slot_index+1}"
+
+    curr_provider_id = candidates[slot_index].provider_id if slot_index < len(candidates) else None
+
+    text = (
+        f"🎯 <b>Select {slot_label} Provider (Slot {slot_index+1})</b>\n\n"
+        f"Currently assigned: <b>{html.escape(curr_provider_id.capitalize() if curr_provider_id else 'None')}</b>\n\n"
+        f"Choose an AI provider below:\n"
+        f"<i>⚠️ indicates provider API key is not configured on this server.</i>"
+    )
+
+    all_providers = list_registered_providers()
+    preferred_order = ["gemini", "groq", "cloudflare", "openai", "openrouter", "mistral", "anthropic", "ollama", "literal"]
+    ordered_providers = [p for p in preferred_order if p in all_providers] + [p for p in all_providers if p not in preferred_order]
+
+    keyboard = []
+    row = []
+    for p_id in ordered_providers:
+        desc = all_providers[p_id]
+        is_selected = (curr_provider_id == p_id)
+        is_cfg = is_provider_configured(p_id) or p_id == "literal"
+
+        badge = "✅ " if is_selected else ("⚠️ " if not is_cfg else "")
+        btn_text = f"{badge}{desc.display_name}"
+        cb_data = f"h3:p:set:{slot_index}:{p_id}"
+
+        row.append({"text": btn_text, "callback_data": cb_data})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    if slot_index > 0:
+        keyboard.append([{"text": "❌ Clear Slot (Set to None)", "callback_data": f"h3:p:set:{slot_index}:none"}])
+
+    keyboard.append([{"text": "← Back to AI Providers", "callback_data": "h3:settings:providers"}])
+
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_ai_models_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format AI models provider selection menu."""
+    from herald.ai.registry import list_registered_providers
+    from herald.ai.resolution import resolve_job_settings
+
+    resolved = resolve_job_settings(request_params={}, user_prefs=user_prefs)
+    candidates = resolved.ai_candidates
+
+    all_provs = list_registered_providers()
+    lines = [
+        "🧩 <b>Preferred AI Models</b>\n",
+        "Select a provider below to choose your preferred model:\n",
+    ]
+
+    for c in candidates:
+        if c.provider_id == "literal":
+            continue
+        desc = all_provs.get(c.provider_id)
+        p_name = desc.display_name if desc else c.provider_id.capitalize()
+        lines.append(f"• <b>{html.escape(p_name)}:</b> <code>{html.escape(c.model_id)}</code>")
+
+    text = "\n".join(lines)
+
+    selectable_provs = ["gemini", "groq", "cloudflare", "openai", "openrouter", "mistral", "anthropic", "ollama"]
+    keyboard = []
+    row = []
+    for pid in selectable_provs:
+        if pid in all_provs:
+            d = all_provs[pid]
+            row.append({"text": d.display_name, "callback_data": f"h3:m:prov:{pid}"})
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
+
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_provider_models_select(user_prefs: dict, provider_id: str) -> tuple[str, dict[str, Any]]:
+    """Format model selection for a specific provider."""
+    from herald.ai.catalog import get_model_token, get_models_for_provider
+    from herald.ai.registry import get_descriptor
+    from herald.ai.resolution import resolve_job_settings
+
+    desc = get_descriptor(provider_id)
+    p_name = desc.display_name if desc else provider_id.capitalize()
+
+    resolved = resolve_job_settings(request_params={}, user_prefs=user_prefs)
+    current_model = None
+    for c in resolved.ai_candidates:
+        if c.provider_id == provider_id:
+            current_model = c.model_id
+            break
+    if not current_model and desc:
+        current_model = desc.default_model
+
+    models = get_models_for_provider(provider_id)
+
+    lines = [
+        f"🧩 <b>Models for {html.escape(p_name)}</b>\n",
+        f"Active model: <code>{html.escape(current_model or 'Default')}</code>\n",
+        "Select a model below:\n",
+    ]
+
+    keyboard = []
+    for m in models:
+        is_active = (m.model_id == current_model)
+        mark = "✅ " if is_active else ""
+        token = get_model_token(provider_id, m.model_id)
+        keyboard.append([{
+            "text": f"{mark}{m.display_name}",
+            "callback_data": f"h3:m:set:{token}",
+        }])
+
+    keyboard.append([{"text": "← Back to AI Models", "callback_data": "h3:settings:models"}])
+    return "\n".join(lines), {"inline_keyboard": keyboard}
+
+
+def format_speed_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format speed selection submenu."""
+    curr_spd = float(user_prefs.get("default_speed", 1.0))
+    text = (
+        "⚡ <b>Default Audio Speed</b>\n\n"
+        f"Current speed: <code>{curr_spd:.1f}x</code>\n\n"
+        "Select preferred playback speed for generated podcasts:"
+    )
+    speeds = [0.8, 0.9, 1.0, 1.1, 1.2]
+    buttons = []
+    for s in speeds:
+        mark = "✅ " if abs(curr_spd - s) < 0.01 else ""
+        buttons.append({"text": f"{mark}{s:.1f}x", "callback_data": f"h3:speed:set:{s:.1f}"})
+
+    keyboard = [buttons, [{"text": "← Back to Settings", "callback_data": "h2:settings:main"}]]
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_mode_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format mode selection submenu."""
+    curr_mode = str(user_prefs.get("default_mode", "standard")).lower()
+    text = (
+        "🧭 <b>Default Generation Mode</b>\n\n"
+        f"Current mode: <code>{html.escape(curr_mode.capitalize())}</code>\n\n"
+        "Select your default mode for new podcasts:\n"
+        "• <b>Standard:</b> Full podcast script & dialogue\n"
+        "• <b>Brief:</b> Condensed summary episode\n"
+        "• <b>Research:</b> External web grounding & verified facts\n"
+        "• <b>Literal:</b> Zero AI, verbatim text-to-speech\n"
+    )
+    modes = [("standard", "Standard"), ("brief", "Brief"), ("research", "Research"), ("literal", "Literal")]
+    keyboard = []
+    row = []
+    for m_id, m_label in modes:
+        mark = "✅ " if curr_mode == m_id else ""
+        row.append({"text": f"{mark}{m_label}", "callback_data": f"h3:mode:set:{m_id}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_models_catalog() -> str:
+    """Format the full AI models catalog for /models command."""
+    from herald.ai.catalog import get_models_for_provider
+    from herald.ai.registry import is_provider_configured, list_registered_providers
+
+    providers = list_registered_providers()
+    lines = [
+        "📚 <b>Herald AI Models Catalog</b>\n",
+        "Supported AI providers and their declared model capabilities:\n",
+    ]
+
+    preferred_order = ["gemini", "groq", "cloudflare", "openai", "openrouter", "mistral", "anthropic", "ollama", "literal"]
+    ordered_providers = [p for p in preferred_order if p in providers] + [p for p in providers if p not in preferred_order]
+
+    for p_id in ordered_providers:
+        desc = providers[p_id]
+        is_cfg = is_provider_configured(p_id) or p_id == "literal"
+        cfg_icon = "🟢 Configured" if is_cfg else "⚪ Not configured (API key missing)"
+        lines.append(f"<b>{html.escape(desc.display_name)}</b> (<code>{p_id}</code>) — {cfg_icon}")
+        lines.append(f"• Default: <code>{html.escape(desc.default_model)}</code>")
+
+        models = get_models_for_provider(p_id)
+        if models:
+            m_strs = []
+            for m in models:
+                ctx_k = f" ({m.context_window // 1000}k ctx)" if m.context_window else ""
+                m_strs.append(f"<code>{html.escape(m.model_id)}</code>{ctx_k}")
+            lines.append(f"• Models: {', '.join(m_strs)}")
+        lines.append("")
+
+    lines.append("<i>Use /settings ➔ 🧩 AI Models to choose your preferred model per provider.</i>")
+    return "\n".join(lines)
 
 
 def get_job_display_title(job: PodcastJob) -> str:

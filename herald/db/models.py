@@ -16,7 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 
 from herald.db.connection import Base
 
@@ -126,7 +126,13 @@ class PodcastJob(Base):
     audio_ready_at = Column(DateTime(timezone=True), nullable=True)
     kokoro_voice = Column(String(50), nullable=True)
     kokoro_speed = Column(Float, nullable=True)
-    gemini_model = Column(String(50), nullable=True)
+    gemini_model = Column(String(50), nullable=True)  # Legacy column retained for DB schema compatibility
+    ai_provider = Column(String(50), nullable=True)
+    ai_model = Column(String(255), nullable=True)
+    ai_provider_chain_json = Column(JSON, nullable=True)
+    ai_effective_provider = Column(String(50), nullable=True)
+    ai_effective_model = Column(String(255), nullable=True)
+    ai_failover_index = Column(Integer, nullable=False, default=0)
     tts_resource_metrics_json = Column(JSON, nullable=True)
 
     # Delivery & Google Drive metadata
@@ -267,6 +273,8 @@ class TelegramUser(Base):
     default_voice = Column(String(50), nullable=True)
     default_speed = Column(Float, nullable=True)
     default_mode = Column(String(20), nullable=True)
+    ai_provider_chain_json = deferred(Column(JSON, nullable=True))
+    ai_models_by_provider_json = deferred(Column(JSON, nullable=True))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(
         DateTime(timezone=True),

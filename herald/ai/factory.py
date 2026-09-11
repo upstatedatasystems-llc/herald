@@ -1,126 +1,63 @@
 """
 AI Provider Factory for Herald.
-Instantiates and caches configured AIProvider instances with full provider coverage,
-capability-aware dispatch, and dedicated research provider resolution.
+Provides backward-compatible helper functions delegating to authoritative herald.ai.registry.
+Note: Pipeline job execution must NOT use get_ai_provider() directly;
+instead use execute_with_failover() deriving from the job's snapshotted provider chain.
 """
 
-from herald.ai.anthropic_provider import AnthropicProvider
+from typing import Any
+
 from herald.ai.base import AIProvider
-from herald.ai.cloudflare_provider import CloudflareProvider
-from herald.ai.gemini_provider import GeminiProvider
-from herald.ai.groq_provider import GroqProvider
-from herald.ai.literal_provider import LiteralProvider
-from herald.ai.mistral_provider import MistralProvider
-from herald.ai.ollama_provider import OllamaProvider
-from herald.ai.openai_provider import OpenAIProvider
-from herald.ai.openrouter_provider import OpenRouterProvider
+from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
 from herald.config import settings
 
-_provider_instance: AIProvider | None = None
-_last_provider_config: tuple | None = None
 
-_research_provider_instance: AIProvider | None = None
-_last_research_config: tuple | None = None
+_global_provider: AIProvider | None = None
 
 
-def create_ai_provider(provider_name: str | None = None) -> AIProvider | None:
+def create_ai_provider(provider_name: str | None = None, model: str | None = None) -> AIProvider | None:
     """Create a new AIProvider instance by name."""
+    prov_name = (provider_name or settings.AI_PROVIDER or "literal").lower().strip()
+    if prov_name in ("none", "literal", ""):
+        from herald.ai.literal_provider import LiteralProvider
+        return LiteralProvider()
+    return create_provider(prov_name, model_id=model)
+
+
+def get_ai_provider(provider_name: str | None = None, model: str | None = None) -> AIProvider | None:
+    """
+    Return an AIProvider instance for diagnostics, status checks, or legacy callers.
+    Job execution must NOT use this global helper; use the job's snapshotted provider chain instead.
+    """
+    global _global_provider
     prov_name = (provider_name or settings.AI_PROVIDER or "").lower().strip()
     if prov_name in ("none", "literal", ""):
-        return LiteralProvider()
-    if prov_name == "gemini":
-        return GeminiProvider()
-    if prov_name == "groq":
-        return GroqProvider()
-    if prov_name == "openrouter":
-        return OpenRouterProvider()
-    if prov_name == "mistral":
-        return MistralProvider()
-    if prov_name in ("cloudflare", "cloudflare_workers_ai"):
-        return CloudflareProvider()
-    if prov_name == "anthropic":
-        return AnthropicProvider()
-    if prov_name == "openai":
-        return OpenAIProvider()
-    if prov_name == "ollama":
-        return OllamaProvider()
-    return None
-
-
-def get_ai_provider() -> AIProvider | None:
-    """
-    Return configured primary AIProvider instance, or None if no AI provider is configured.
-    Maintains a persistent provider instance so health caching is preserved across calls.
-    """
-    global _provider_instance, _last_provider_config
-    prov_name = (settings.AI_PROVIDER or "").lower().strip()
-    if prov_name in ("none", "literal", ""):
         return None
-
-    current_config = (
-        prov_name,
-        getattr(settings, "GEMINI_API_KEY", ""),
-        getattr(settings, "GEMINI_MODEL", ""),
-        getattr(settings, "GROQ_API_KEY", ""),
-        getattr(settings, "GROQ_MODEL", ""),
-        getattr(settings, "OPENROUTER_API_KEY", ""),
-        getattr(settings, "OPENROUTER_MODEL", ""),
-        getattr(settings, "MISTRAL_API_KEY", ""),
-        getattr(settings, "MISTRAL_MODEL", ""),
-        getattr(settings, "CLOUDFLARE_API_TOKEN", ""),
-        getattr(settings, "CLOUDFLARE_ACCOUNT_ID", ""),
-        getattr(settings, "CLOUDFLARE_AI_MODEL", ""),
-        getattr(settings, "CLOUDFLARE_MODEL", ""),
-        getattr(settings, "ANTHROPIC_API_KEY", ""),
-        getattr(settings, "ANTHROPIC_MODEL", ""),
-        getattr(settings, "OPENAI_API_KEY", ""),
-        getattr(settings, "OPENAI_MODEL", ""),
-        getattr(settings, "OPENAI_API_BASE", ""),
-        getattr(settings, "OLLAMA_BASE_URL", ""),
-        getattr(settings, "OLLAMA_MODEL", ""),
-    )
-
-    if _provider_instance is not None and _last_provider_config == current_config:
-        return _provider_instance
-
-    _provider_instance = create_ai_provider(prov_name)
-    _last_provider_config = current_config
-    return _provider_instance
+    if provider_name is None and model is None:
+        if _global_provider is not None and getattr(_global_provider, "provider_name", "").lower() == prov_name:
+            return _global_provider
+        _global_provider = create_provider(prov_name, model_id=model)
+        return _global_provider
+    return create_provider(prov_name, model_id=model)
 
 
-def get_research_provider() -> AIProvider | None:
+def get_research_provider(provider_name: str | None = None, model: str | None = None) -> AIProvider | None:
     """
-    Return configured research provider capable of Google Search Grounding.
+    Return a research provider capable of Google Search Grounding for legacy callers.
     Defaults to RESEARCH_PROVIDER setting (default 'gemini').
     """
-    global _research_provider_instance, _last_research_config
-    r_prov = (getattr(settings, "RESEARCH_PROVIDER", "gemini") or "").lower().strip()
+    r_prov = (provider_name or getattr(settings, "RESEARCH_PROVIDER", "gemini") or "").lower().strip()
     if r_prov in ("", "none", "literal"):
         return None
 
-    current_config = (
-        r_prov,
-        getattr(settings, "GEMINI_API_KEY", ""),
-        getattr(settings, "GEMINI_RESEARCH_MODEL", ""),
-    )
-
-    if _research_provider_instance is not None and _last_research_config == current_config:
-        return _research_provider_instance
-
-    prov = create_ai_provider(r_prov)
+    prov = create_provider(r_prov, model_id=model)
     if prov and prov.capabilities.research_grounding:
-        _research_provider_instance = prov
-    else:
-        _research_provider_instance = None
-
-    _last_research_config = current_config
-    return _research_provider_instance
+        return prov
+    return None
 
 
 def reset_ai_provider() -> None:
-    """Reset cached provider singletons (used for testing or dynamic config changes)."""
-    global _provider_instance, _last_provider_config, _research_provider_instance, _last_research_config
-    _provider_instance = None
-    _last_provider_config = None
-    _research_provider_instance = None
-    _last_research_config = None
+    """Reset the cached global AI provider instance."""
+    global _global_provider
+    _global_provider = None
+

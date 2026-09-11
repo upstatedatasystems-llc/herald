@@ -14,6 +14,18 @@ from typing import Any
 import httpx
 
 from herald.ai.base import AIProvider, ProviderCapabilities, load_system_prompt
+from herald.ai.errors import (
+    AIAuthFailedError,
+    AIAuthenticationError,
+    AIContextExceededError,
+    AIContextLimitExceededError,
+    AIPermissionDeniedError,
+    AIProviderError,
+    AIProviderUnavailableError,
+    AIRateLimitedError,
+    AIRateLimitError,
+    AIRequestTooLargeError,
+)
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
@@ -144,6 +156,96 @@ class OpenAIProvider(AIProvider):
                 "error": f"network error: {safe_err}",
             }
 
+    def _classify_http_error(
+        self,
+        resp: httpx.Response,
+        attempt: int,
+        max_attempts: int,
+        operation: str = "script_generation",
+    ) -> float | None:
+        """
+        Classify HTTP error status into standard AIProviderError hierarchy.
+        Extracts Retry-After header for 429 backoff.
+        Raises immediate unretryable errors (401, 403, 413, context exceeded).
+        On terminal attempt, raises appropriate typed AIProviderError.
+        Returns retry delay in seconds if 429 and retryable, else None.
+        """
+        status = resp.status_code
+        text_preview = resp.text[:300] if resp.text else ""
+        text_lower = text_preview.lower()
+
+        # Immediate unretryable errors
+        if status == 401:
+            raise AIAuthFailedError(
+                f"{self.provider_name} API authentication failed: HTTP 401 ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=401,
+                operation=operation,
+            )
+        if status == 403:
+            raise AIPermissionDeniedError(
+                f"{self.provider_name} API permission denied: HTTP 403 ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=403,
+                operation=operation,
+            )
+        if status == 413:
+            raise AIRequestTooLargeError(
+                f"{self.provider_name} API payload too large: HTTP 413 ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=413,
+                operation=operation,
+            )
+        if status in (400, 422) and any(kw in text_lower for kw in ("context_length_exceeded", "maximum context length", "too many tokens", "context window")):
+            raise AIContextExceededError(
+                f"{self.provider_name} context limit exceeded: HTTP {status} ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=status,
+                operation=operation,
+            )
+
+        # Retry-After extraction for 429
+        retry_delay = None
+        if status == 429:
+            retry_header = resp.headers.get("retry-after")
+            if retry_header:
+                try:
+                    retry_delay = float(retry_header)
+                except ValueError:
+                    pass
+
+        if attempt == max_attempts:
+            if status == 429:
+                raise AIRateLimitedError(
+                    f"{self.provider_name} API rate limit exceeded: HTTP 429 ({text_preview})",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    http_status=429,
+                    retry_after_seconds=retry_delay,
+                    operation=operation,
+                )
+            if status >= 500:
+                raise AIProviderUnavailableError(
+                    f"{self.provider_name} API returned HTTP {status}",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    http_status=status,
+                    operation=operation,
+                )
+            raise AIProviderError(
+                f"{self.provider_name} API returned HTTP {status}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=status,
+                operation=operation,
+            )
+
+        return retry_delay
+
     def generate_script(
         self,
         source_text: str,
@@ -205,7 +307,7 @@ Generate the podcast script JSON response now.
 
             try:
                 from herald.concurrency import get_semaphores
-                with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                     resp = client.post(url, json=payload, headers=headers)
             except Exception as net_err:
                 record_ai_interaction(
@@ -223,7 +325,7 @@ Generate the podcast script JSON response now.
                 )
                 if attempt == max_attempts:
                     _, safe_net_err = sanitize_error(net_err)
-                    raise RuntimeError(f"{self.provider_name} network failure: {safe_net_err}")
+                    raise AIProviderError(f"{self.provider_name} network failure: {safe_net_err}", provider=self.provider_name.lower(), model=self._model)
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
@@ -247,10 +349,12 @@ Generate the podcast script JSON response now.
                     response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
                     metadata={"attempt": attempt, "mode": mode_clean},
                 )
-                if attempt == max_attempts:
-                    raise RuntimeError(f"{self.provider_name} API returned HTTP {resp.status_code}")
-                time.sleep(backoff)
-                backoff *= 2.0
+                retry_delay = self._classify_http_error(resp, attempt, max_attempts, operation="script_generation")
+                if retry_delay is not None and retry_delay > 0:
+                    time.sleep(retry_delay)
+                else:
+                    time.sleep(backoff)
+                    backoff *= 2.0
                 continue
 
             result_json = resp.json()
@@ -352,7 +456,7 @@ Generate the podcast script JSON response now.
 
                 try:
                     from herald.concurrency import get_semaphores
-                    with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                    with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                         repair_resp = client.post(url, json=repair_payload, headers=headers)
                 except Exception as rep_net_err:
                     record_ai_interaction(
@@ -370,7 +474,7 @@ Generate the podcast script JSON response now.
                     )
                     if attempt == max_attempts:
                         _, safe_rep_err = sanitize_error(rep_net_err)
-                        raise RuntimeError(f"{self.provider_name} repair network failure: {safe_rep_err}")
+                        raise AIProviderError(f"{self.provider_name} repair network failure: {safe_rep_err}", provider=self.provider_name.lower(), model=self._model)
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -394,10 +498,12 @@ Generate the podcast script JSON response now.
                         response_json={"http_status": repair_resp.status_code, "response_character_count": len(repair_resp.text)},
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_http_failure"},
                     )
-                    if attempt == max_attempts:
-                        raise RuntimeError(f"{self.provider_name} repair returned HTTP {repair_resp.status_code}")
-                    time.sleep(backoff)
-                    backoff *= 2.0
+                    rep_retry_delay = self._classify_http_error(repair_resp, attempt, max_attempts, operation="script_repair")
+                    if rep_retry_delay is not None and rep_retry_delay > 0:
+                        time.sleep(rep_retry_delay)
+                    else:
+                        time.sleep(backoff)
+                        backoff *= 2.0
                     continue
 
                 repair_result_json = repair_resp.json()
@@ -428,9 +534,6 @@ Generate the podcast script JSON response now.
                         started_at=t_repair,
                         completed_at=datetime.now(UTC),
                         success=True,
-                        prompt_tokens=rep_usage.get("prompt_tokens"),
-                        completion_tokens=rep_usage.get("completion_tokens"),
-                        total_tokens=rep_usage.get("total_tokens"),
                         request_json=rep_evidence,
                         response_json=rep_resp_evidence,
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_success"},
@@ -457,9 +560,9 @@ Generate the podcast script JSON response now.
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_parse_failure"},
                     )
                     if attempt == max_attempts:
-                        raise RuntimeError(f"{self.provider_name} schema validation and repair failed: {rep_parse_err}")
+                        raise AIProviderError(f"{self.provider_name} schema validation and repair failed: {rep_parse_err}", provider=self.provider_name.lower(), model=self._model)
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
 
-        raise RuntimeError(f"Failed to generate podcast script from {self.provider_name} after retries.")
+        raise AIProviderError(f"Failed to generate podcast script from {self.provider_name} after retries.", provider=self.provider_name.lower(), model=self._model)

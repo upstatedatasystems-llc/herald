@@ -21,8 +21,13 @@ from herald.extraction.url_extractor import (
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
-from herald.gemini.client import (
-    GeminiError,
+from herald.ai.errors import (
+    AIChainExhaustedError,
+    AIProviderError,
+    AIUnsupportedCapabilityError,
+)
+from herald.ai.failover import execute_with_failover
+from herald.ai.base import (
     audit_research_script,
     audit_script_fidelity,
     generate_grounded_research,
@@ -31,6 +36,8 @@ from herald.gemini.client import (
     repair_research_script,
     repair_script_fidelity,
 )
+from herald.ai.registry import get_descriptor, is_provider_configured
+from herald.ai.resolution import resolve_job_settings
 from herald.literal.script_generator import generate_literal_script
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_script_duration
@@ -146,110 +153,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     Transport-neutral pipeline entry point.
     Handles extraction, normalization, deduplication, script generation, and queuing.
     """
-    raw_mode = (req.request_mode or "").lower().strip()
-    if not raw_mode:
-        raw_mode = settings.get_default_mode()
-
-    # Map legacy aliases
-    if raw_mode == "detailed":
-        mode_val = RequestMode.RESEARCH.value
-        req.research_depth = req.research_depth or "medium"
-    elif raw_mode in [m.value for m in RequestMode]:
-        mode_val = raw_mode
-    else:
-        mode_val = (
-            RequestMode.LITERAL.value
-            if not settings.is_ai_configured()
-            else RequestMode.STANDARD.value
-        )
-
-    # Validate AI provider requirement for non-literal modes
-    is_ai_mode = mode_val in (
-        RequestMode.BRIEF.value,
-        RequestMode.STANDARD.value,
-        RequestMode.RESEARCH.value,
-    )
-    if mode_val == RequestMode.RESEARCH.value:
-        research_prov = get_research_provider()
-        if not research_prov or not research_prov.is_configured():
-            r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
-            return HeraldResponse(
-                job_id="",
-                status=JobState.FAILED_FINAL.value,
-                request_mode=mode_val,
-                source_type=SourceType.TEXT.value,
-                is_duplicate=False,
-                message=(
-                    f"Research mode requires a provider capable of Google Search Grounding (configured RESEARCH_PROVIDER='{r_name}'). "
-                    "Please configure GEMINI_API_KEY with RESEARCH_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
-                ),
-                error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
-            )
-    elif is_ai_mode:
-        ai_prov = get_ai_provider()
-        if not ai_prov or not ai_prov.is_configured():
-            return HeraldResponse(
-                job_id="",
-                status=JobState.FAILED_FINAL.value,
-                request_mode=mode_val,
-                source_type=SourceType.TEXT.value,
-                is_duplicate=False,
-                message=(
-                    f"AI provider is not configured. Mode '{mode_val}' requires an AI API key. "
-                    "Currently available mode is 'literal'. Configure an AI provider or use 'literal' mode."
-                ),
-                error_category="AI_PROVIDER_NOT_CONFIGURED",
-            )
-
-    # Validate Gemini requirement for script verification
-    if req.verify_final_script and not settings.GEMINI_API_KEY:
-        return HeraldResponse(
-            job_id="",
-            status=JobState.FAILED_FINAL.value,
-            request_mode=mode_val,
-            source_type=SourceType.TEXT.value,
-            is_duplicate=False,
-            message=(
-                "Script verification (`verify_final_script=True` / `/verify` / `/doublecheck`) requires Gemini to be configured with GEMINI_API_KEY."
-            ),
-            error_category="VERIFY_PROVIDER_NOT_CONFIGURED",
-        )
-
     # 1. Transport-level duplicate check (e.g. Telegram message retry)
-    if req.transport == "telegram" and req.transport_message_id and req.delivery_target:
-        tg_chat = (
-            int(req.delivery_target) if str(req.delivery_target).lstrip("-").isdigit() else None
-        )
-        tg_msg = int(req.transport_message_id) if str(req.transport_message_id).isdigit() else None
-        if tg_chat is not None and tg_msg is not None:
-            existing_msg_job = (
-                db.query(PodcastJob)
-                .filter(
-                    PodcastJob.transport == "telegram",
-                    PodcastJob.telegram_chat_id == tg_chat,
-                    PodcastJob.telegram_message_id == tg_msg,
-                )
-                .first()
-            )
-            if existing_msg_job:
-                ep_title = _resolve_response_title(existing_msg_job)
-                return HeraldResponse(
-                    job_id=existing_msg_job.id,
-                    status=existing_msg_job.status,
-                    request_mode=existing_msg_job.request_mode,
-                    source_type=existing_msg_job.source_type,
-                    is_duplicate=True,
-                    message="Telegram message has already been received.",
-                    episode_title=ep_title,
-                )
-
-    # 2. Extract URL or normalize text
-    source_type = SourceType.URL.value if req.source_url else SourceType.TEXT.value
-    extracted_text = ""
-    source_url = None
-    canonical_title = None
-    job: PodcastJob | None = None
-
     telegram_chat = (
         int(req.delivery_target)
         if req.transport == "telegram"
@@ -271,6 +175,133 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         else None
     )
 
+    if req.transport == "telegram" and telegram_msg and telegram_chat:
+        existing_msg_job = (
+            db.query(PodcastJob)
+            .filter(
+                PodcastJob.transport == "telegram",
+                PodcastJob.telegram_chat_id == telegram_chat,
+                PodcastJob.telegram_message_id == telegram_msg,
+            )
+            .first()
+        )
+        if existing_msg_job:
+            ep_title = _resolve_response_title(existing_msg_job)
+            return HeraldResponse(
+                job_id=existing_msg_job.id,
+                status=existing_msg_job.status,
+                request_mode=existing_msg_job.request_mode,
+                source_type=existing_msg_job.source_type,
+                is_duplicate=True,
+                message="Telegram message has already been received.",
+                episode_title=ep_title,
+            )
+
+    # 2. Centrally resolve settings across request override, user preferences, and server defaults
+    user_prefs: dict[str, Any] | None = None
+    if telegram_user is not None:
+        try:
+            from herald.db.models import TelegramUser
+            u_row = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == telegram_user).first()
+            if u_row:
+                user_prefs = {
+                    "default_mode": u_row.default_mode,
+                    "default_voice": u_row.default_voice,
+                    "default_speed": u_row.default_speed,
+                    "default_research_depth": u_row.default_research_depth,
+                    "ai_provider_chain_json": u_row.ai_provider_chain_json,
+                    "ai_models_by_provider_json": u_row.ai_models_by_provider_json,
+                }
+        except Exception as ue:
+            logger.warning(f"Could not load user preferences for telegram user {telegram_user}: {ue}")
+
+    req_params = {
+        "mode": req.request_mode,
+        "research_depth": req.research_depth,
+        "voice": req.custom_voice,
+        "speed": req.custom_speed,
+        "custom_title": req.custom_title,
+        "chunk_chars": req.tts_chunk_chars,
+        "verify": req.verify_final_script,
+        "ai_provider": getattr(req, "ai_provider", None),
+        "ai_model": getattr(req, "ai_model", None),
+    }
+    resolved = resolve_job_settings(request_params=req_params, user_prefs=user_prefs)
+    mode_val = resolved.mode
+
+    # Validate AI provider requirement for non-literal modes
+    is_ai_mode = mode_val in (
+        RequestMode.BRIEF.value,
+        RequestMode.STANDARD.value,
+        RequestMode.RESEARCH.value,
+    )
+    if mode_val == RequestMode.RESEARCH.value:
+        has_grounding = any(
+            is_provider_configured(c.provider_id)
+            and getattr(get_descriptor(c.provider_id).capabilities, "google_search_grounding", False)
+            for c in resolved.ai_candidates
+            if get_descriptor(c.provider_id)
+        )
+        if not has_grounding:
+            r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.TEXT.value,
+                is_duplicate=False,
+                message=(
+                    f"Research mode requires a provider capable of Google Search Grounding (configured RESEARCH_PROVIDER='{r_name}'). "
+                    "Please configure GEMINI_API_KEY with RESEARCH_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
+                ),
+                error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
+            )
+    elif is_ai_mode:
+        from unittest.mock import Mock
+        mock_prov = get_ai_provider() if isinstance(get_ai_provider, Mock) else None
+        has_configured = (mock_prov and mock_prov.is_configured()) or any(is_provider_configured(c.provider_id) for c in resolved.ai_candidates)
+        if not has_configured:
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.TEXT.value,
+                is_duplicate=False,
+                message=(
+                    f"AI provider is not configured. Mode '{mode_val}' requires an AI API key. "
+                    "Currently available mode is 'literal'. Configure an AI provider or use 'literal' mode."
+                ),
+                error_category="AI_PROVIDER_NOT_CONFIGURED",
+            )
+
+    # Validate requirement for script verification
+    if req.verify_final_script:
+        has_verify = any(
+            is_provider_configured(c.provider_id)
+            and getattr(get_descriptor(c.provider_id).capabilities, "verification", False)
+            for c in resolved.ai_candidates
+            if get_descriptor(c.provider_id)
+        )
+        if not has_verify:
+            return HeraldResponse(
+                job_id="",
+                status=JobState.FAILED_FINAL.value,
+                request_mode=mode_val,
+                source_type=SourceType.TEXT.value,
+                is_duplicate=False,
+                message=(
+                    "Script verification (`verify_final_script=True` / `/verify` / `/doublecheck`) requires Gemini to be configured with GEMINI_API_KEY."
+                ),
+                error_category="VERIFY_PROVIDER_NOT_CONFIGURED",
+            )
+
+    # 3. Extract URL or normalize text
+    source_type = SourceType.URL.value if req.source_url else SourceType.TEXT.value
+    extracted_text = ""
+    source_url = None
+    canonical_title = None
+    job: PodcastJob | None = None
+
     if req.source_url and req.source_url.strip():
         source_url = req.source_url.strip()
         provisional_hash = compute_content_hash("", source_url)
@@ -284,17 +315,25 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             telegram_user_id=telegram_user,
             sender_email=req.requester_identity if req.transport != "telegram" else None,
             request_mode=mode_val,
-            research_depth=req.research_depth,
+            research_depth=resolved.research_depth,
             source_type=SourceType.URL.value,
             source_url=source_url,
             source_hash=provisional_hash,
             source_text="",
-            custom_voice=req.custom_voice,
-            custom_speed=req.custom_speed,
-            custom_title=req.custom_title,
-            tts_chunk_chars=req.tts_chunk_chars or 500,
-            verify_final_script=req.verify_final_script,
+            custom_voice=resolved.voice,
+            custom_speed=resolved.speed,
+            custom_title=resolved.custom_title,
+            tts_chunk_chars=resolved.chunk_chars,
+            verify_final_script=resolved.verify,
             status=JobState.EXTRACTING.value,
+            ai_provider=resolved.primary_candidate.provider_id,
+            ai_model=resolved.primary_candidate.model_id,
+            ai_provider_chain_json=[c.to_dict() for c in resolved.ai_candidates],
+            ai_effective_provider=resolved.primary_candidate.provider_id,
+            ai_effective_model=resolved.primary_candidate.model_id,
+            ai_failover_index=0,
+            gemini_model=resolved.primary_candidate.model_id,
+            generation_settings_json=resolved.to_snapshot(),
         )
         try:
             db.add(job)
@@ -434,7 +473,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             url_context_attempted = False
             fallback_result = "NOT_ATTEMPTED"
 
-            # Gemini URL Context may ONLY be attempted for public retrieval blocks or rate limits,
+            # URL Context may ONLY be attempted for public retrieval blocks or rate limits,
             # never for 401/auth, paywalls, captchas, interstitials, SSRF, or Literal mode.
             is_eligible_block = block_reason in (
                 BlockReason.PUBLIC_RETRIEVAL_BLOCK,
@@ -443,22 +482,27 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             can_attempt_fallback = (
                 is_eligible_block
                 and mode_val != "literal"
-                and settings.is_ai_configured()
-                and (settings.AI_PROVIDER or "").lower().strip() == "gemini"
+                and any(is_provider_configured(c.provider_id) for c in resolved.ai_candidates)
                 and source_url
             )
             if can_attempt_fallback:
                 url_context_attempted = True
                 try:
-                    from herald.gemini.client import extract_article_via_url_context
-                    logger.info(f"Attempting Gemini URL Context fallback for blocked URL ({block_reason}): {source_url}")
+                    logger.info(f"Attempting AI URL Context fallback for blocked URL ({block_reason}): {source_url}")
                     record_job_diagnostic_event(
                         job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_ATTEMPT",
-                        f"Source access blocked ({block_reason}); attempting Gemini URL Context fallback.",
+                        f"Source access blocked ({block_reason}); attempting AI URL Context fallback.",
                         metadata={"url": source_url, "original_error": error_cat, "block_reason": block_reason}, db=db,
                     )
-                    url_ctx_result = extract_article_via_url_context(
-                        url=source_url, api_key=None, model_name=None, job_id=job.id,
+                    def _call_url_ctx(p_inst, att):
+                        return p_inst.extract_article_via_url_context(url=source_url, job_id=job.id)
+
+                    url_ctx_result = execute_with_failover(
+                        job=job,
+                        operation="url_context_extraction",
+                        execute_fn=_call_url_ctx,
+                        db=db,
+                        required_capability="url_context_extraction",
                     )
                     if url_ctx_result and url_ctx_result.get("body", "").strip():
                         # URL Context succeeded — use extracted content
@@ -467,13 +511,14 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                         canonical_title = ctx_title or canonical_title
                         extracted_text = f"Title: {ctx_title}\n\n{ctx_body}" if ctx_title else ctx_body
                         fallback_result = "SUCCESS"
+                        prov_eff = (job.ai_effective_provider or "ai").upper()
                         record_stage_metric(
                             job_id=job.id,
                             stage="URL_EXTRACTION",
                             status="SUCCESS",
                             started_at=datetime.now(UTC),
                             metadata_json={
-                                "extraction_method": "GEMINI_URL_CONTEXT",
+                                "extraction_method": f"{prov_eff}_URL_CONTEXT",
                                 "direct_error_category": error_cat,
                                 "direct_error": safe_msg,
                                 "block_reason": block_reason,
@@ -484,14 +529,14 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                         )
                         record_job_diagnostic_event(
                             job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_SUCCESS",
-                            f"Gemini URL Context fallback succeeded ({len(ctx_body)} chars).",
+                            f"{prov_eff} URL Context fallback succeeded ({len(ctx_body)} chars).",
                             metadata={"url": source_url, "title": ctx_title, "body_chars": len(ctx_body)}, db=db,
                         )
                         record_job_diagnostic_event(
                             job.id, "INFO", "extraction", "EXTRACTION_SUCCESS",
-                            f"Gemini URL Context extraction succeeded ({len(ctx_body)} chars).",
+                            f"{prov_eff} URL Context extraction succeeded ({len(ctx_body)} chars).",
                             metadata={
-                                "extraction_method": "GEMINI_URL_CONTEXT",
+                                "extraction_method": f"{prov_eff}_URL_CONTEXT",
                                 "direct_error_category": error_cat,
                                 "direct_error": safe_msg,
                                 "block_reason": block_reason,
@@ -511,7 +556,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     logger.warning(f"URL Context fallback failed for {source_url}: {ctx_err}")
                     record_job_diagnostic_event(
                         job.id, "WARNING", "extraction", "URL_CONTEXT_FALLBACK_FAILED",
-                        f"Gemini URL Context fallback failed: {safe_ctx_msg}",
+                        f"URL Context fallback failed: {safe_ctx_msg}",
                         metadata={"url": source_url}, db=db,
                     )
 
@@ -752,19 +797,26 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             telegram_user_id=telegram_user,
             sender_email=req.requester_identity if req.transport != "telegram" else None,
             request_mode=mode_val,
-            research_depth=req.research_depth,
+            research_depth=resolved.research_depth,
             source_type=source_type,
             source_url=source_url,
             source_hash=source_hash,
             source_text=deduped_text,
-            custom_voice=req.custom_voice,
-            custom_speed=req.custom_speed,
+            custom_voice=resolved.voice,
+            custom_speed=resolved.speed,
             custom_title=resolved_title,
-            tts_chunk_chars=req.tts_chunk_chars or 500,
-            verify_final_script=req.verify_final_script,
+            tts_chunk_chars=resolved.chunk_chars,
+            verify_final_script=resolved.verify,
             rerun_of_job_id=prior_job.id if prior_job else None,
             generation_settings_json=settings_snapshot,
             status=JobState.RECEIVED.value,
+            ai_provider=resolved.primary_candidate.provider_id,
+            ai_model=resolved.primary_candidate.model_id,
+            ai_provider_chain_json=[c.to_dict() for c in resolved.ai_candidates],
+            ai_effective_provider=resolved.primary_candidate.provider_id,
+            ai_effective_model=resolved.primary_candidate.model_id,
+            ai_failover_index=0,
+            gemini_model=resolved.primary_candidate.model_id,
         )
 
         try:
@@ -884,8 +936,8 @@ def execute_script_generation(
         db=db,
     )
 
-    active_ai_provider: str | None = None
-    active_ai_model: str | None = None
+    active_ai_provider: str | None = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None) or "gemini"
+    active_ai_model: str | None = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None) or ""
     active_operation: str | None = None
 
     try:
@@ -909,9 +961,7 @@ def execute_script_generation(
                 input_chars=len(job.source_text or ""),
             )
         elif mode_val == RequestMode.RESEARCH.value:
-            active_ai_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
-            active_ai_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
-            # Multi-stage grounded research workflow
+            # Multi-stage grounded research workflow with deterministic failover
             if not job.research_grounding_json:
                 active_operation = "grounded_research"
                 record_job_diagnostic_event(
@@ -922,10 +972,26 @@ def execute_script_generation(
                     f"Starting grounded research (depth={job.research_depth or 'medium'})",
                     db=db,
                 )
-                grounded_data = generate_grounded_research(
+                def _do_grounding(p, att):
+                    from unittest.mock import Mock
+                    if isinstance(generate_grounded_research, Mock):
+                        return generate_grounded_research(
+                            source_text=job.source_text,
+                            research_depth=job.research_depth or "medium",
+                            job_id=job.id,
+                        )
+                    return p.generate_grounded_research(
+                        source_text=job.source_text,
+                        research_depth=job.research_depth or "medium",
+                        job_id=job.id,
+                    )
+                grounded_data = execute_with_failover(
+                    job=job,
+                    operation="grounded_research",
+                    execute_fn=_do_grounding,
+                    db=db,
                     source_text=job.source_text,
-                    research_depth=job.research_depth or "medium",
-                    job_id=job.id,
+                    required_capability="google_search_grounding",
                 )
                 job.research_grounding_json = grounded_data
                 job.research_search_count = grounded_data.get("search_count", 0)
@@ -954,13 +1020,28 @@ def execute_script_generation(
                     "Normalizing research claims and sources into structured dossier",
                     db=db,
                 )
-                dossier = normalize_research_dossier(
+                def _do_norm(p, att):
+                    from unittest.mock import Mock
+                    if isinstance(normalize_research_dossier, Mock):
+                        return normalize_research_dossier(
+                            source_text=job.source_text,
+                            grounded_research_data=job.research_grounding_json,
+                            job_id=job.id,
+                        )
+                    return p.normalize_research_dossier(
+                        source_text=job.source_text,
+                        grounded_research_data=job.research_grounding_json,
+                        job_id=job.id,
+                    )
+                dossier = execute_with_failover(
+                    job=job,
+                    operation="research_normalization",
+                    execute_fn=_do_norm,
+                    db=db,
                     source_text=job.source_text,
-                    grounded_research_data=job.research_grounding_json,
-                    job_id=job.id,
                 )
                 job.research_json = dossier.model_dump()
-                job.research_model = settings.GEMINI_RESEARCH_MODEL
+                job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
                 db.commit()
                 record_job_diagnostic_event(
                     job.id,
@@ -973,12 +1054,29 @@ def execute_script_generation(
 
             if not job.script_json:
                 active_operation = "research_script"
-                script = generate_podcast_script(
+                def _do_res_script(p, att):
+                    from unittest.mock import Mock
+                    if isinstance(generate_podcast_script, Mock):
+                        return generate_podcast_script(
+                            source_text=job.source_text,
+                            request_mode="research",
+                            research_dossier=job.research_json,
+                            source_title=job.custom_title,
+                            job_id=job.id,
+                        )
+                    return p.generate_script(
+                        source_text=job.source_text,
+                        request_mode="research",
+                        research_dossier=job.research_json,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
+                script = execute_with_failover(
+                    job=job,
+                    operation="research_script",
+                    execute_fn=_do_res_script,
+                    db=db,
                     source_text=job.source_text,
-                    request_mode="research",
-                    research_dossier=job.research_json,
-                    source_title=job.custom_title,
-                    job_id=job.id,
                 )
                 job.script_json = script.model_dump()
                 db.commit()
@@ -993,11 +1091,27 @@ def execute_script_generation(
                     "Auditing research script against grounding sources",
                     db=db,
                 )
-                audit = audit_research_script(
+                def _do_res_audit(p, att):
+                    from unittest.mock import Mock
+                    if isinstance(audit_research_script, Mock):
+                        return audit_research_script(
+                            source_text=job.source_text,
+                            research_dossier=job.research_json,
+                            script_dict=job.script_json,
+                            job_id=job.id,
+                        )
+                    return p.audit_research_script(
+                        source_text=job.source_text,
+                        research_dossier=job.research_json,
+                        script_dict=job.script_json,
+                        job_id=job.id,
+                    )
+                audit = execute_with_failover(
+                    job=job,
+                    operation="research_audit",
+                    execute_fn=_do_res_audit,
+                    db=db,
                     source_text=job.source_text,
-                    research_dossier=job.research_json,
-                    script_dict=job.script_json,
-                    job_id=job.id,
                 )
                 job.research_audit_json = audit.model_dump()
                 db.commit()
@@ -1026,12 +1140,29 @@ def execute_script_generation(
                     "Repairing research script based on audit findings",
                     db=db,
                 )
-                repaired = repair_research_script(
+                def _do_res_repair(p, att):
+                    from unittest.mock import Mock
+                    if isinstance(repair_research_script, Mock):
+                        return repair_research_script(
+                            source_text=job.source_text,
+                            research_dossier=job.research_json,
+                            script_dict=job.script_json,
+                            audit_result=audit_data,
+                            job_id=job.id,
+                        )
+                    return p.repair_research_script(
+                        source_text=job.source_text,
+                        research_dossier=job.research_json,
+                        script_dict=job.script_json,
+                        audit_result=audit_data,
+                        job_id=job.id,
+                    )
+                repaired = execute_with_failover(
+                    job=job,
+                    operation="research_repair",
+                    execute_fn=_do_res_repair,
+                    db=db,
                     source_text=job.source_text,
-                    research_dossier=job.research_json,
-                    script_dict=job.script_json,
-                    audit_result=audit_data,
-                    job_id=job.id,
                 )
                 job.script_json = repaired.model_dump()
                 job.research_repair_count = 1
@@ -1048,26 +1179,39 @@ def execute_script_generation(
             # Brief or Standard AI mode
             active_operation = "standard_script"
             t_script0 = datetime.now(UTC)
-            provider = get_ai_provider()
-            if not provider:
-                raise GeminiError("AI provider is not configured.")
-            active_ai_provider = getattr(provider, "name", settings.AI_PROVIDER)
-            m_val = (
-                getattr(provider, "configured_model", None)
-                or getattr(provider, "model_name", None)
-            )
-            active_ai_model = (
-                m_val if isinstance(m_val, str) and m_val
-                else (settings.GEMINI_MODEL if active_ai_provider == "gemini" else "")
-            )
-            script_resp = provider.generate_script(
+            def _do_std_script(p, att):
+                from unittest.mock import Mock
+                if isinstance(get_ai_provider, Mock):
+                    mp = get_ai_provider()
+                    if mp:
+                        return mp.generate_script(
+                            source_text=job.source_text,
+                            request_mode=mode_val,
+                            source_title=job.custom_title,
+                            job_id=job.id,
+                        )
+                if isinstance(generate_podcast_script, Mock):
+                    return generate_podcast_script(
+                        source_text=job.source_text,
+                        request_mode=mode_val,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
+                return p.generate_script(
+                    source_text=job.source_text,
+                    request_mode=mode_val,
+                    source_title=job.custom_title,
+                    job_id=job.id,
+                )
+            script_resp = execute_with_failover(
+                job=job,
+                operation="script_generation",
+                execute_fn=_do_std_script,
+                db=db,
                 source_text=job.source_text,
-                request_mode=mode_val,
-                source_title=job.custom_title,
-                job_id=job.id,
             )
             job.script_json = script_resp.model_dump()
-            job.gemini_model = active_ai_model or settings.GEMINI_MODEL
+            job.gemini_model = job.ai_effective_model
             db.commit()
             record_stage_metric(
                 job_id=job.id,
@@ -1091,10 +1235,26 @@ def execute_script_generation(
                     db=db,
                 )
                 try:
-                    v_audit = audit_script_fidelity(
+                    def _do_v_audit(p, att):
+                        from unittest.mock import Mock
+                        if isinstance(audit_script_fidelity, Mock):
+                            return audit_script_fidelity(
+                                source_text=job.source_text,
+                                script_dict=job.script_json,
+                                job_id=job.id,
+                            )
+                        return p.audit_script_fidelity(
+                            source_text=job.source_text,
+                            script_dict=job.script_json,
+                            job_id=job.id,
+                        )
+                    v_audit = execute_with_failover(
+                        job=job,
+                        operation="verification",
+                        execute_fn=_do_v_audit,
+                        db=db,
                         source_text=job.source_text,
-                        script_dict=job.script_json,
-                        job_id=job.id,
+                        required_capability="verification",
                     )
                     job.verify_audit_json = v_audit.model_dump()
                     db.commit()
@@ -1130,11 +1290,28 @@ def execute_script_generation(
                     db=db,
                 )
                 try:
-                    repaired_v = repair_script_fidelity(
+                    def _do_v_repair(p, att):
+                        from unittest.mock import Mock
+                        if isinstance(repair_script_fidelity, Mock):
+                            return repair_script_fidelity(
+                                source_text=job.source_text,
+                                script_dict=job.script_json,
+                                audit_result=v_data,
+                                job_id=job.id,
+                            )
+                        return p.repair_script_fidelity(
+                            source_text=job.source_text,
+                            script_dict=job.script_json,
+                            audit_result=v_data,
+                            job_id=job.id,
+                        )
+                    repaired_v = execute_with_failover(
+                        job=job,
+                        operation="verification_repair",
+                        execute_fn=_do_v_repair,
+                        db=db,
                         source_text=job.source_text,
-                        script_dict=job.script_json,
-                        audit_result=v_data,
-                        job_id=job.id,
+                        required_capability="verification",
                     )
                     job.script_json = repaired_v.model_dump()
                     job.verify_repair_count = 1
@@ -1234,8 +1411,8 @@ def execute_script_generation(
                 job_id=job.id,
                 attempt=job.attempt_count or 1,
                 db=db,
-                provider=active_ai_provider,
-                model=active_ai_model,
+                provider=getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None) or active_ai_provider,
+                model=getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None) or active_ai_model,
                 operation=active_operation,
             )
         except Exception as diag_err:

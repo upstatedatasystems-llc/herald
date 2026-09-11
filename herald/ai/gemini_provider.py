@@ -21,10 +21,46 @@ def generate_podcast_script(*args, **kwargs):
     return _gps(*args, **kwargs)
 
 
+def generate_grounded_research(*args, **kwargs):
+    from herald.gemini.client import generate_grounded_research as _ggr
+    return _ggr(*args, **kwargs)
+
+
+def normalize_research_dossier(*args, **kwargs):
+    from herald.gemini.client import normalize_research_dossier as _nrd
+    return _nrd(*args, **kwargs)
+
+
+def audit_research_script(*args, **kwargs):
+    from herald.gemini.client import audit_research_script as _ars
+    return _ars(*args, **kwargs)
+
+
+def repair_research_script(*args, **kwargs):
+    from herald.gemini.client import repair_research_script as _rrs
+    return _rrs(*args, **kwargs)
+
+
+def audit_script_fidelity(*args, **kwargs):
+    from herald.gemini.client import audit_script_fidelity as _asf
+    return _asf(*args, **kwargs)
+
+
+def repair_script_fidelity(*args, **kwargs):
+    from herald.gemini.client import repair_script_fidelity as _rsf
+    return _rsf(*args, **kwargs)
+
+
+def extract_article_via_url_context(*args, **kwargs):
+    from herald.gemini.client import extract_article_via_url_context as _eau
+    return _eau(*args, **kwargs)
+
+
 class GeminiProvider(AIProvider):
     """Gemini AI Provider implementation with response caching and secure header auth."""
 
-    def __init__(self, cache_ttl_seconds: float = 300.0) -> None:
+    def __init__(self, model: str | None = None, model_name: str | None = None, cache_ttl_seconds: float = 300.0) -> None:
+        self._model = model or model_name or settings.GEMINI_MODEL
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cached_health: dict[str, Any] | None = None
         self._cache_timestamp: float = 0.0
@@ -35,7 +71,7 @@ class GeminiProvider(AIProvider):
 
     @property
     def configured_model(self) -> str:
-        return settings.GEMINI_MODEL
+        return self._model
 
     @property
     def research_model(self) -> str:
@@ -67,6 +103,111 @@ class GeminiProvider(AIProvider):
             request_mode=request_mode,
             research_dossier=research_dossier,
             source_title=source_title,
+            job_id=job_id,
+            model_name=self.configured_model,
+        )
+
+    def generate_grounded_research(
+        self,
+        source_text: str,
+        research_depth: str = "medium",
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        from herald.gemini.client import generate_grounded_research as _ggr
+        return _ggr(
+            source_text=source_text,
+            research_depth=research_depth,
+            model_name=self.research_model,
+            job_id=job_id,
+        )
+
+    def normalize_research_dossier(
+        self,
+        source_text: str,
+        grounded_research_data: dict[str, Any] | None = None,
+        job_id: str | None = None,
+    ) -> Any:
+        from herald.gemini.client import normalize_research_dossier as _nrd
+        return _nrd(
+            source_text=source_text,
+            grounded_research_data=grounded_research_data,
+            model_name=self.configured_model,
+            job_id=job_id,
+        )
+
+    def audit_research_script(
+        self,
+        source_text: str,
+        research_dossier: dict[str, Any] | None,
+        script_dict: dict[str, Any] | None,
+        job_id: str | None = None,
+    ) -> Any:
+        from herald.gemini.client import audit_research_script as _ars
+        return _ars(
+            source_text=source_text,
+            research_dossier=research_dossier,
+            script_dict=script_dict,
+            model_name=self.configured_model,
+            job_id=job_id,
+        )
+
+    def repair_research_script(
+        self,
+        source_text: str,
+        research_dossier: dict[str, Any] | None,
+        script_dict: dict[str, Any] | None,
+        audit_result: dict[str, Any] | None,
+        job_id: str | None = None,
+    ) -> Any:
+        from herald.gemini.client import repair_research_script as _rrs
+        return _rrs(
+            source_text=source_text,
+            research_dossier=research_dossier,
+            script_dict=script_dict,
+            audit_result=audit_result,
+            model_name=self.configured_model,
+            job_id=job_id,
+        )
+
+    def audit_script_fidelity(
+        self,
+        source_text: str,
+        script_dict: dict[str, Any] | None,
+        job_id: str | None = None,
+    ) -> Any:
+        from herald.gemini.client import audit_script_fidelity as _asf
+        return _asf(
+            source_text=source_text,
+            script_dict=script_dict,
+            model_name=self.configured_model,
+            job_id=job_id,
+        )
+
+    def repair_script_fidelity(
+        self,
+        source_text: str,
+        script_dict: dict[str, Any] | None,
+        audit_result: dict[str, Any] | None,
+        job_id: str | None = None,
+    ) -> Any:
+        from herald.gemini.client import repair_script_fidelity as _rsf
+        return _rsf(
+            source_text=source_text,
+            script_dict=script_dict,
+            audit_result=audit_result,
+            model_name=self.configured_model,
+            job_id=job_id,
+        )
+
+    def extract_article_via_url_context(
+        self,
+        url: str,
+        job_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        from herald.gemini.client import extract_article_via_url_context as _eavuc
+        return _eavuc(
+            url=url,
+            model_name=self.configured_model,
             job_id=job_id,
         )
 

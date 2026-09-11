@@ -20,6 +20,7 @@ from herald.db.models import (
     PodcastJob,
     TelegramPollState,
     TelegramUpdateFailure,
+    TelegramUser,
 )
 from herald.extraction.email_parser import (
     URL_REGEX,
@@ -33,12 +34,19 @@ from herald.services.voice_manager import (
     get_voice_sample_path,
     is_valid_sample_audio,
 )
+from herald.ai.catalog import resolve_model_token
+from herald.ai.factory import get_ai_provider
+from herald.ai.registry import is_provider_configured
 from herald.telegram.auth import (
     get_effective_user_preferences,
     get_paired_owner,
     has_owner,
     is_user_authorized,
+    set_user_ai_model_for_provider,
+    set_user_ai_provider_chain,
     set_user_confirm_before_tts,
+    set_user_default_mode,
+    set_user_default_speed,
     set_user_default_voice,
     verify_and_claim_pairing_code,
 )
@@ -49,13 +57,20 @@ from herald.telegram.delivery import (
     deliver_pending_telegram_jobs,
 )
 from herald.telegram.formatters import (
+    format_ai_models_menu,
+    format_ai_providers_menu,
     format_approval,
     format_generation_failure_card,
     format_help,
+    format_mode_menu,
+    format_models_catalog,
+    format_provider_models_select,
+    format_provider_slot_select,
     format_queued,
     format_quickstart,
     format_rerun_confirmation,
     format_settings,
+    format_speed_menu,
     format_voices_browser,
     get_job_display_title,
 )
@@ -226,6 +241,129 @@ def parse_telegram_message_directives(text: str) -> dict[str, Any]:
         "chunk_chars": chunk_chars,
         "verify": verify,
     }
+
+
+def perform_ai_check(
+    db: Session,
+    client: TelegramClient,
+    chat_id: int,
+    user_id: int,
+    reply_to_msg_id: int | None = None,
+) -> None:
+    """Run comprehensive diagnostics for user's configured AI provider chain and research capability."""
+    from herald.ai.registry import get_descriptor, is_provider_configured
+    from herald.ai.resolution import resolve_job_settings
+
+    prefs = get_effective_user_preferences(db, user_id)
+    resolved = resolve_job_settings(request_params={}, user_prefs=prefs)
+    candidates = resolved.ai_candidates
+
+    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+    research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+
+    if getattr(settings, "AI_PROVIDER", "gemini") in ("none", "literal") and not research_configured:
+        client.send_message(
+            chat_id=chat_id,
+            text="ℹ️ <b>AI Provider is not configured.</b>\nHerald is running in deterministic <b>Literal</b> mode (no AI API keys required).",
+            reply_to_message_id=reply_to_msg_id,
+            parse_mode="HTML",
+        )
+        return
+
+    client.send_message(
+        chat_id=chat_id,
+        text="🔄 <i>Testing AI provider failover chain connections...</i>",
+        reply_to_message_id=reply_to_msg_id,
+        parse_mode="HTML",
+    )
+
+    slot_names = ["Primary", "Secondary", "Tertiary"]
+    status_lines = []
+    has_any_configured = False
+
+    for i, c in enumerate(candidates):
+        slot_label = slot_names[i] if i < len(slot_names) else f"Slot {i+1}"
+        desc = get_descriptor(c.provider_id)
+        p_name = desc.display_name if desc else c.provider_id.capitalize()
+        slot_tag = f"{slot_label} — {html.escape(p_name)} (Standard)" if i == 0 else f"{slot_label} ({html.escape(p_name)})"
+
+        if c.provider_id == "literal":
+            has_any_configured = True
+            status_lines.append(f"• <b>{slot_tag}:</b> 🟢 Ready (Zero-AI narration)")
+            continue
+
+        if not is_provider_configured(c.provider_id):
+            status_lines.append(
+                f"• <b>{slot_tag}:</b> ⚪ Not configured on server\n"
+                f"  • Model: <code>{html.escape(c.model_id)}</code>"
+            )
+            continue
+
+        has_any_configured = True
+        try:
+            prov = get_ai_provider(provider_name=c.provider_id, model=c.model_id)
+            if prov:
+                res = prov.check_connection(timeout_seconds=5.0, force_refresh=True)
+                if res.get("connected"):
+                    status_lines.append(
+                        f"• <b>{slot_tag}:</b> Connected\n"
+                        f"  • Model: <code>{html.escape(c.model_id)}</code>"
+                    )
+                else:
+                    err = res.get("error") or "Connection failed"
+                    status_lines.append(
+                        f"• <b>{slot_tag}:</b> Failed\n"
+                        f"  • Model: <code>{html.escape(c.model_id)}</code>\n"
+                        f"  • Error: <code>{html.escape(str(err))}</code>"
+                    )
+            else:
+                status_lines.append(
+                    f"• <b>{slot_tag}:</b> ❌ Unable to initialize provider"
+                )
+        except Exception as e:
+            status_lines.append(
+                f"• <b>{slot_tag}:</b> ❌ Error: <code>{html.escape(str(e))}</code>"
+            )
+
+    # Research grounding check
+    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+    research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
+    if res_provider == "none":
+        research_status = "⚪ <b>Gemini Research:</b> Disabled (RESEARCH_PROVIDER=none)"
+    elif research_configured:
+        try:
+            from herald.ai.gemini_provider import GeminiProvider
+            res_res = GeminiProvider().check_research_connection(timeout_seconds=5.0, force_refresh=True)
+            res_model = html.escape(res_res.get("model", settings.GEMINI_RESEARCH_MODEL))
+            if res_res.get("connected"):
+                research_status = f"✅ <b>Gemini Research:</b> Connected\n• Model: <code>{res_model}</code> (Google Search Grounding ready)"
+            else:
+                r_err = html.escape(res_res.get("error") or "Unknown error")
+                research_status = f"❌ <b>Gemini Research:</b> Unavailable\n• Error: <code>{r_err}</code>"
+        except Exception as re_err:
+            research_status = f"❌ <b>Gemini Research:</b> Error: <code>{html.escape(str(re_err))}</code>"
+    else:
+        research_status = "⚪ <b>Gemini Research:</b> Not configured (GEMINI_API_KEY required for Grounded Research)"
+
+    chain_block = "\n\n".join(status_lines) if status_lines else "<i>No AI providers in chain.</i>"
+    warn_block = ""
+    if not has_any_configured:
+        warn_block = "\n\n⚠️ <b>Warning:</b> No configured AI providers in your chain! Herald will run in <b>Literal</b> mode."
+
+    full_check_text = (
+        f"🤖 <b>AI Provider Diagnostics</b>\n\n"
+        f"<b>Your Failover Chain:</b>\n"
+        f"{chain_block}\n\n"
+        f"<b>Research Grounding:</b>\n"
+        f"{research_status}"
+        f"{warn_block}\n\n"
+        f"<i>Literal mode remains 100% operational regardless of AI status.</i>"
+    )
+    client.send_message(
+        chat_id=chat_id,
+        text=full_check_text,
+        parse_mode="HTML",
+    )
 
 
 def handle_telegram_command(
@@ -401,71 +539,21 @@ def handle_telegram_command(
             chat_id=chat_id, text=status_msg, reply_to_message_id=msg_id, parse_mode="HTML"
         )
 
-    elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
-        ai_provider = get_ai_provider()
-        res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
-        research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
-
-        if (not ai_provider or not ai_provider.is_configured()) and not research_configured:
-            client.send_message(
-                chat_id=chat_id,
-                text="ℹ️ <b>AI Provider is not configured.</b>\nHerald is running in deterministic <b>Literal</b> mode (no AI API keys required).",
-                reply_to_message_id=msg_id,
-                parse_mode="HTML",
-            )
-            return
-
+    elif cmd_clean == "models":
         client.send_message(
             chat_id=chat_id,
-            text="🔄 <i>Testing AI provider connections...</i>",
+            text=format_models_catalog(),
             reply_to_message_id=msg_id,
             parse_mode="HTML",
         )
 
-        res_std = (
-            ai_provider.check_connection(timeout_seconds=5.0, force_refresh=True)
-            if ai_provider
-            else {}
-        )
-        prov_name = html.escape(res_std.get("provider", "Standard AI"))
-        std_model = html.escape(res_std.get("model", settings.GEMINI_MODEL))
-
-        if res_std.get("connected"):
-            std_status = f"✅ <b>{prov_name} (Standard):</b> Connected\n• Model: <code>{std_model}</code>"
-        else:
-            std_err = html.escape(res_std.get("error") or "Not configured")
-            std_status = f"❌ <b>{prov_name} (Standard):</b> Failed\n• Error: <code>{std_err}</code>"
-
-        # Independent research check
-        if res_provider == "none":
-            research_status = "⚪ <b>Gemini Research:</b> Disabled (RESEARCH_PROVIDER=none)"
-        elif research_configured:
-            from herald.ai.gemini_provider import GeminiProvider
-
-            res_res = GeminiProvider().check_research_connection(
-                timeout_seconds=5.0, force_refresh=True
-            )
-            res_model = html.escape(res_res.get("model", settings.GEMINI_RESEARCH_MODEL))
-            if res_res.get("connected"):
-                research_status = f"✅ <b>Gemini Research:</b> Connected\n• Model: <code>{res_model}</code> (Google Search Grounding ready)"
-            else:
-                r_err = html.escape(res_res.get("error") or "Unknown error")
-                research_status = (
-                    f"❌ <b>Gemini Research:</b> Unavailable\n• Error: <code>{r_err}</code>"
-                )
-        else:
-            research_status = "⚪ <b>Gemini Research:</b> Not configured (GEMINI_API_KEY required for Grounded Research)"
-
-        full_check_text = (
-            f"🤖 <b>AI Provider Diagnostics</b>\n\n"
-            f"{std_status}\n\n"
-            f"{research_status}\n\n"
-            f"<i>Literal mode remains 100% operational regardless of AI status.</i>"
-        )
-        client.send_message(
+    elif cmd_clean in ("ai_check", "ai-check", "aicheck"):
+        perform_ai_check(
+            db=db,
+            client=client,
             chat_id=chat_id,
-            text=full_check_text,
-            parse_mode="HTML",
+            user_id=user_id,
+            reply_to_msg_id=msg_id,
         )
 
     elif cmd_clean == "queue":
@@ -1076,7 +1164,7 @@ def handle_telegram_callback_query(
                 logger.warning(f"Failed to show voices browser: {e}")
         return
 
-    elif raw_data in ("h2:settings:main", "h2:voice:back_to_settings"):
+    elif raw_data in ("h2:settings:main", "h3:settings:main", "h2:voice:back_to_settings"):
         client.answer_callback_query(cb_id)
         prefs = get_effective_user_preferences(db, user_id)
         settings_text, reply_markup = format_settings(prefs, settings)
@@ -1093,6 +1181,257 @@ def handle_telegram_callback_query(
                 logger.debug(f"editMessageText idempotent notice: {e}")
             else:
                 logger.warning(f"Failed to return to settings message markup: {e}")
+        return
+
+    elif raw_data == "h3:settings:providers":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_ai_providers_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show AI providers menu: {e}")
+        return
+
+    elif raw_data.startswith("h3:p:slot:"):
+        client.answer_callback_query(cb_id)
+        slot_idx = int(raw_data.split(":")[-1])
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_provider_slot_select(prefs, slot_index=slot_idx)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show provider slot select: {e}")
+        return
+
+    elif raw_data.startswith("h3:p:set:"):
+        parts = raw_data.split(":")
+        slot_idx = int(parts[3])
+        target_p = parts[4].lower().strip()
+
+        prefs = get_effective_user_preferences(db, user_id)
+        user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == user_id).first()
+        if user and user.ai_provider_chain_json:
+            chain = list(user.ai_provider_chain_json)
+        else:
+            from herald.ai.resolution import resolve_job_settings
+            resolved = resolve_job_settings(request_params={}, user_prefs=prefs)
+            chain = [c.provider_id for c in resolved.ai_candidates if c.provider_id != "literal"]
+            if not chain:
+                chain = ["gemini"]
+        while len(chain) < 3:
+            chain.append(None)
+
+        if target_p == "none":
+            chain[slot_idx] = None
+            client.answer_callback_query(cb_id, text=f"Cleared slot {slot_idx+1}.")
+        else:
+            for idx, p in enumerate(chain):
+                if p == target_p and idx != slot_idx:
+                    chain[idx] = None
+            chain[slot_idx] = target_p
+
+            if not is_provider_configured(target_p) and target_p != "literal":
+                client.answer_callback_query(
+                    cb_id,
+                    text=f"⚠️ {target_p.capitalize()} API key is missing on server. Provider will be skipped during failover unless configured.",
+                    show_alert=True,
+                )
+            else:
+                client.answer_callback_query(cb_id, text=f"Slot {slot_idx+1} set to {target_p.capitalize()}.")
+
+        compacted = []
+        for p in chain:
+            if p and p not in compacted:
+                compacted.append(p)
+        if not compacted:
+            compacted = ["literal"]
+
+        set_user_ai_provider_chain(db, user_id=user_id, chain=compacted, chat_id=chat_id)
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_ai_providers_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update provider slot: {e}")
+        return
+
+    elif raw_data == "h3:p:clear_subs":
+        client.answer_callback_query(cb_id, text="Cleared secondary and tertiary providers.")
+        user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == user_id).first()
+        curr_chain = list(user.ai_provider_chain_json) if user and user.ai_provider_chain_json else ["gemini"]
+        primary_only = curr_chain[:1]
+        set_user_ai_provider_chain(db, user_id=user_id, chain=primary_only, chat_id=chat_id)
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_ai_providers_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to clear sub providers: {e}")
+        return
+
+    elif raw_data == "h3:settings:models":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_ai_models_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show AI models menu: {e}")
+        return
+
+    elif raw_data.startswith("h3:m:prov:"):
+        client.answer_callback_query(cb_id)
+        p_id = raw_data[len("h3:m:prov:") :]
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_provider_models_select(prefs, provider_id=p_id)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show provider models select: {e}")
+        return
+
+    elif raw_data.startswith("h3:m:set:"):
+        token = raw_data[len("h3:m:set:") :]
+        resolved_info = resolve_model_token(token)
+        if resolved_info:
+            prov_id, model_id = resolved_info
+            set_user_ai_model_for_provider(db, user_id=user_id, provider_id=prov_id, model_id=model_id, chat_id=chat_id)
+            client.answer_callback_query(cb_id, text=f"Model set to {model_id}.")
+            new_prefs = get_effective_user_preferences(db, user_id)
+            text, reply_markup = format_provider_models_select(new_prefs, provider_id=prov_id)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e).lower():
+                    logger.warning(f"Failed to update provider model: {e}")
+        else:
+            client.answer_callback_query(cb_id, text="Model token invalid or expired.", show_alert=True)
+        return
+
+    elif raw_data == "h3:settings:speed":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_speed_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show speed menu: {e}")
+        return
+
+    elif raw_data.startswith("h3:speed:set:"):
+        spd_val = float(raw_data.split(":")[-1])
+        set_user_default_speed(db, user_id=user_id, speed=spd_val, chat_id=chat_id)
+        client.answer_callback_query(cb_id, text=f"Speed set to {spd_val:.1f}x.")
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_speed_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update speed: {e}")
+        return
+
+    elif raw_data == "h3:settings:mode":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_mode_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show mode menu: {e}")
+        return
+
+    elif raw_data.startswith("h3:mode:set:"):
+        mode_val = raw_data.split(":")[-1]
+        set_user_default_mode(db, user_id=user_id, mode=mode_val, chat_id=chat_id)
+        client.answer_callback_query(cb_id, text=f"Default mode set to {mode_val.capitalize()}.")
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_mode_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update mode: {e}")
+        return
+
+    elif raw_data in ("h3:settings:aicheck", "h3:aicheck"):
+        client.answer_callback_query(cb_id, text="Testing AI connections...")
+        perform_ai_check(db=db, client=client, chat_id=chat_id, user_id=user_id)
         return
 
     elif raw_data.startswith("h2:rerun_approve:"):

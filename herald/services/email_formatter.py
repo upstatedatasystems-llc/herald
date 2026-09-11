@@ -168,6 +168,7 @@ def format_completion_email(
     created_at_iso: str = "",
     completed_at_iso: str | None = None,
     gemini_model: str = "gemini-3.5-flash",
+    ai_model: str | None = None,
     kokoro_voice: str = "af_heart",
     kokoro_speed: float = 1.0,
     script_warnings: list[str] | None = None,
@@ -195,7 +196,8 @@ def format_completion_email(
     safe_src_type = html.escape((source_type or "email_body").replace("_", " ").title())
     safe_job_id = html.escape(job_id)
     safe_sha256 = html.escape(sha256 or "N/A")
-    safe_model = html.escape(gemini_model or "gemini-3.5-flash")
+    eff_model = ai_model if ai_model is not None else gemini_model
+    safe_model = html.escape(eff_model or "default")
     safe_voice = html.escape(kokoro_voice or "af_heart")
 
     dur_mins = duration_seconds // 60
@@ -304,7 +306,7 @@ def format_completion_email(
         f"- SHA-256: {sha256}\n"
         f"- TTS Chunks: {chunk_count}\n"
         f"- Retry Attempts: {retry_attempts}\n"
-        f"- Gemini Model: {gemini_model}\n"
+        f"- AI Model: {eff_model}\n"
         f"- Voice / Speed: {kokoro_voice} @ {kokoro_speed}x\n"
         f"- Started: {created_fmt}\n"
         f"{completed_fmt}"
@@ -388,7 +390,7 @@ def format_completion_email(
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">SHA-256</td><td style="padding: 4px 0; font-size: 13px; color: #334155; font-family: monospace; word-break: break-all;">{safe_sha256}</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">TTS Chunks</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{chunk_count}</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Retry Attempts</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{retry_attempts}</td></tr>
-                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Gemini Model</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_model}</td></tr>
+                  <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">AI Model</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_model}</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Voice / Speed</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{safe_voice} @ {kokoro_speed}x</td></tr>
                   <tr><td style="padding: 4px 0; font-size: 13px; color: #64748b;">Started</td><td style="padding: 4px 0; font-size: 13px; color: #334155;">{created_fmt}</td></tr>
                   {completed_html}

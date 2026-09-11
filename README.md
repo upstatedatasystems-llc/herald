@@ -12,8 +12,10 @@ Herald operates behind NATs and firewalls using outbound Telegram long polling w
 ## Key Features
 
 - **Telegram-First Interface**: Send an article URL, pasted text, or forwarded message directly to your private Telegram bot and receive the completed MP3 podcast in response.
-- **Literal Mode (AI is Optional)**: Functions 100% locally on your host with **zero** LLM API calls, performing deterministic text cleaning, heading preservation, sentence-aware chunking, and Kokoro TTS narration.
-- **AI-Powered Modes**: When configured with an AI provider (Google Gemini, Groq Cloud, OpenRouter, Mistral AI, or Cloudflare Workers AI), access `brief`, `standard`, and grounded `research` modes.
+- **Literal Mode (Zero AI)**: Functions 100% locally on your host with **zero** LLM API calls, performing deterministic text cleaning, heading preservation, sentence-aware chunking, and Kokoro TTS narration.
+- **Vendor-Neutral AI & Failover**: Configure Primary, Secondary, and Tertiary AI providers (Google Gemini, Groq Cloud, Cloudflare Workers AI, OpenAI, OpenRouter, Mistral AI, Anthropic Claude, local Ollama, or Literal). If your primary provider experiences an outage or rate limit, Herald deterministically and stickily fails over through your secondary and tertiary choices.
+- **Large-Source Bounded Adaptation**: Long articles and reports that exceed model context windows are automatically and semantically chunked, fact-distilled, and compiled into a structured research dossier within strict configurable budget bounds.
+- **Telegram Settings & Models Browser**: Full interactive configuration via `/settings` (Voice, Speed, Default Mode, Provider Slots) and `/models` (live model catalog browser with restart-safe tokens).
 - **Automated Bootstrap Installer**: Deploy the entire stack on Ubuntu 24.04 with a single command.
 - **Secure Owner Pairing**: Prevents unauthorized access using a single-owner one-time pairing code displayed strictly in server console output / container logs (`/pair <code>`).
 - **Outbound Long Polling**: No inbound ports, webhooks, or public IP addresses required.
@@ -107,9 +109,10 @@ research high
 | `/download [id]` | Download completed podcast MP3 as an audio document |
 | `/diagnostics [id]` | View job diagnostics card and download redacted support bundle ZIP |
 | `/status` | Live runtime health, TTS readiness, AI provider health, queue, disk, and uptime |
-| `/ai_check` | Dedicated AI API configuration and connectivity test |
+| `/ai-check` | Comprehensive AI diagnostics: tests your Primary, Secondary, and Tertiary provider chain |
+| `/models` | Interactive catalog browser for supported models across all registered AI providers |
 | `/queue` | View pending, scripting, and synthesizing podcast jobs |
-| `/settings` | View preferences, default voice selection, and pre-TTS confirmation toggle |
+| `/settings` | Redesigned settings menu: Voice, Speed, Default Mode, Provider Slots, Models, Confirmation |
 | `/readme` | Send the project `README.md` document |
 | `/pair <code>` | Pair your Telegram account as the authorized instance owner |
 

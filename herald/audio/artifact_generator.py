@@ -207,7 +207,7 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         lines.append("- **AI Provider**: `None (Literal / Deterministic Chunker)`")
 
     if is_research and getattr(job, "research_model", None):
-        lines.append(f"- **Gemini Research Model**: `{job.research_model}`")
+        lines.append(f"- **AI Research Model**: `{job.research_model}`")
 
     tts_chunks_count = getattr(job, "completed_chunk_index", 0) or 0
     if db is not None:

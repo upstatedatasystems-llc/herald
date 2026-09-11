@@ -18,15 +18,7 @@ def load_system_prompt() -> str:
     return "Transform the provided source content into a podcast script JSON matching schema."
 
 
-@dataclass(frozen=True)
-class ProviderCapabilities:
-    """Explicit capability matrix for an AI provider."""
-
-    script_brief: bool = True
-    script_standard: bool = True
-    structured_output: bool = True
-    research_grounding: bool = False
-    usage_metrics: bool = True
+from herald.ai.capabilities import ProviderCapabilities
 
 
 class AIProvider(ABC):
@@ -68,3 +60,121 @@ class AIProvider(ABC):
         Check connectivity with the AI provider.
         Returns a dict: {"provider": str, "configured": bool, "connected": bool, "model": str, "error": str | None}
         """
+
+    def generate_grounded_research(
+        self,
+        source_text: str,
+        research_depth: str = "medium",
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate grounded web search research. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support Google Search Grounding")
+
+    def normalize_research_dossier(
+        self,
+        source_text: str,
+        grounded_research_data: dict[str, Any],
+        job_id: str | None = None,
+    ) -> Any:
+        """Normalize research grounding data into structured dossier. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support research dossier normalization")
+
+    def audit_research_script(
+        self,
+        source_text: str,
+        research_dossier: dict[str, Any],
+        script_dict: dict[str, Any],
+        job_id: str | None = None,
+    ) -> Any:
+        """Audit research script against sources. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support research auditing")
+
+    def repair_research_script(
+        self,
+        source_text: str,
+        research_dossier: dict[str, Any],
+        script_dict: dict[str, Any],
+        audit_result: dict[str, Any],
+        job_id: str | None = None,
+    ) -> Any:
+        """Repair research script based on audit findings. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support research script repair")
+
+    def audit_script_fidelity(
+        self,
+        source_text: str,
+        script_dict: dict[str, Any],
+        job_id: str | None = None,
+    ) -> Any:
+        """Audit script fidelity against source text. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support fidelity verification")
+
+    def repair_script_fidelity(
+        self,
+        source_text: str,
+        script_dict: dict[str, Any],
+        audit_result: dict[str, Any],
+        job_id: str | None = None,
+    ) -> Any:
+        """Repair script based on fidelity audit findings. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support fidelity repair")
+
+    def extract_article_via_url_context(
+        self,
+        url: str,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract article via URL context. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support URL context extraction")
+
+
+# Module-level provider-neutral operation delegates
+def generate_grounded_research(*args, **kwargs):
+    from herald.ai.factory import get_research_provider
+    p = get_research_provider()
+    return p.generate_grounded_research(*args, **kwargs)
+
+
+def normalize_research_dossier(*args, **kwargs):
+    from herald.ai.factory import get_research_provider
+    p = get_research_provider()
+    return p.normalize_research_dossier(*args, **kwargs)
+
+
+def audit_research_script(*args, **kwargs):
+    from herald.ai.factory import get_research_provider
+    p = get_research_provider()
+    return p.audit_research_script(*args, **kwargs)
+
+
+def repair_research_script(*args, **kwargs):
+    from herald.ai.factory import get_research_provider
+    p = get_research_provider()
+    return p.repair_research_script(*args, **kwargs)
+
+
+def audit_script_fidelity(*args, **kwargs):
+    from herald.ai.factory import get_ai_provider
+    p = get_ai_provider()
+    return p.audit_script_fidelity(*args, **kwargs)
+
+
+def repair_script_fidelity(*args, **kwargs):
+    from herald.ai.factory import get_ai_provider
+    p = get_ai_provider()
+    return p.repair_script_fidelity(*args, **kwargs)
+
+
+def generate_podcast_script(*args, **kwargs):
+    from herald.ai.factory import get_ai_provider
+    p = get_ai_provider()
+    return p.generate_script(*args, **kwargs)
+
+

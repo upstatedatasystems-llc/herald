@@ -14,12 +14,60 @@ from typing import Any
 import httpx
 
 from herald.ai.base import AIProvider, ProviderCapabilities, load_system_prompt
+from herald.ai.errors import (
+    AIAuthFailedError,
+    AIContextExceededError,
+    AIPermissionDeniedError,
+    AIProviderError,
+    AIProviderUnavailableError,
+    AIRateLimitedError,
+    AIRequestTooLargeError,
+)
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
 from herald.services.redaction import sanitize_error
 
 logger = logging.getLogger("herald.ai.cloudflare")
+
+
+def extract_cloudflare_content(resp_json: dict) -> str:
+    """
+    Extract assistant text content from Cloudflare Workers AI response payload.
+    Handles 4 payload shapes:
+    1. resp_json["result"]["response"]
+    2. resp_json["result"]["text"]
+    3. resp_json["response"]
+    4. resp_json["choices"][0]["message"]["content"] (or choices[0]["text"])
+
+    Raises AIProviderError if content cannot be extracted or payload is invalid.
+    """
+    if isinstance(resp_json, dict):
+        # 1 & 2: result dict
+        result = resp_json.get("result")
+        if isinstance(result, dict):
+            if "response" in result and isinstance(result["response"], str):
+                return result["response"]
+            if "text" in result and isinstance(result["text"], str):
+                return result["text"]
+        elif isinstance(result, str):
+            return result
+
+        # 3: direct response field
+        if "response" in resp_json and isinstance(resp_json["response"], str):
+            return resp_json["response"]
+
+        # 4: choices list (OpenAI-compatible format)
+        choices = resp_json.get("choices")
+        if isinstance(choices, list) and len(choices) > 0 and isinstance(choices[0], dict):
+            msg = choices[0].get("message")
+            if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+                return msg["content"]
+            if "text" in choices[0] and isinstance(choices[0]["text"], str):
+                return choices[0]["text"]
+
+    raise AIProviderError("Unable to extract content from Cloudflare Workers AI response payload", provider="cloudflare")
+
 
 
 def _extract_json_block(text: str) -> dict[str, Any]:
@@ -207,9 +255,30 @@ Generate the podcast script JSON response now.
                 ],
             }
 
+            # Model-specific tuning
+            try:
+                from herald.ai.registry import get_descriptor
+                cf_desc = get_descriptor("cloudflare")
+                if cf_desc:
+                    for m in cf_desc.catalog_models:
+                        if m.model_id == self._model:
+                            payload.update(m.model_specific_defaults)
+                            break
+            except Exception:
+                pass
+
+            model_lower = self._model.lower()
+            if "qwen" in model_lower:
+                if "reasoning_effort" not in payload:
+                    payload["reasoning_effort"] = "low"
+                if "max_completion_tokens" not in payload:
+                    payload["max_completion_tokens"] = 16384
+            if ("gemma-4" in model_lower or "gemma" in model_lower) and "max_completion_tokens" not in payload:
+                payload["max_completion_tokens"] = 16384
+
             try:
                 from herald.concurrency import get_semaphores
-                with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                     resp = client.post(url, json=payload, headers=headers)
             except Exception as net_err:
                 record_ai_interaction(
@@ -227,7 +296,7 @@ Generate the podcast script JSON response now.
                 )
                 if attempt == max_attempts:
                     _, safe_net_err = sanitize_error(net_err)
-                    raise RuntimeError(f"Cloudflare Workers AI network failure: {safe_net_err}")
+                    raise AIProviderError(f"Cloudflare Workers AI network failure: {safe_net_err}", provider="cloudflare", model=self._model)
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
@@ -251,20 +320,55 @@ Generate the podcast script JSON response now.
                     response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
                     metadata={"attempt": attempt, "mode": mode_clean},
                 )
+                if resp.status_code == 401:
+                    raise AIAuthFailedError(f"Cloudflare Workers AI authentication failed: HTTP 401", provider="cloudflare", model=self._model)
+                if resp.status_code == 403:
+                    raise AIPermissionDeniedError(f"Cloudflare Workers AI permission denied: HTTP 403", provider="cloudflare", model=self._model)
+                if resp.status_code == 413:
+                    raise AIRequestTooLargeError(f"Cloudflare Workers AI request payload too large: HTTP 413", provider="cloudflare", model=self._model)
                 if attempt == max_attempts:
-                    raise RuntimeError(f"Cloudflare Workers AI API error ({resp.status_code})")
+                    if resp.status_code == 429:
+                        retry_h = resp.headers.get("retry-after")
+                        retry_s = float(retry_h) if (retry_h and retry_h.isdigit()) else None
+                        raise AIRateLimitedError(f"Cloudflare Workers AI API error ({resp.status_code})", provider="cloudflare", model=self._model, retry_after_seconds=retry_s)
+                    if resp.status_code >= 500:
+                        raise AIProviderUnavailableError(f"Cloudflare Workers AI API error ({resp.status_code})", provider="cloudflare", model=self._model, http_status=resp.status_code)
+                    raise AIProviderError(f"Cloudflare Workers AI API error ({resp.status_code})", provider="cloudflare", model=self._model, http_status=resp.status_code)
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
 
             result_json = resp.json()
-            raw_content = ""
-            if "result" in result_json and isinstance(result_json["result"], dict):
-                raw_content = result_json["result"].get("response", "")
-            elif "response" in result_json:
-                raw_content = result_json.get("response", "")
-            elif "choices" in result_json and result_json["choices"]:
-                raw_content = result_json["choices"][0].get("message", {}).get("content", "")
+            try:
+                raw_content = extract_cloudflare_content(result_json)
+            except AIProviderError as extract_err:
+                resp_evidence = {
+                    "http_status": resp.status_code,
+                    "response_character_count": 0,
+                    "error": str(extract_err),
+                }
+                record_ai_interaction(
+                    job_id=job_id,
+                    provider="cloudflare",
+                    model=self._model,
+                    operation="script_generation",
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    provider_request_id=req_id,
+                    input_chars=len(user_content),
+                    started_at=t0,
+                    completed_at=datetime.now(UTC),
+                    success=False,
+                    error=extract_err,
+                    request_json=req_evidence,
+                    response_json=resp_evidence,
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "content_extraction_failed"},
+                )
+                if attempt == max_attempts:
+                    raise extract_err
+                time.sleep(backoff)
+                backoff *= 2.0
+                continue
 
             resp_evidence = {
                 "http_status": resp.status_code,
@@ -343,10 +447,13 @@ Generate the podcast script JSON response now.
                         },
                     ],
                 }
+                for k in ("reasoning_effort", "max_completion_tokens"):
+                    if k in payload:
+                        repair_payload[k] = payload[k]
 
                 try:
                     from herald.concurrency import get_semaphores
-                    with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                    with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                         repair_resp = client.post(url, json=repair_payload, headers=headers)
                 except Exception as rep_net_err:
                     record_ai_interaction(
@@ -364,7 +471,7 @@ Generate the podcast script JSON response now.
                     )
                     if attempt == max_attempts:
                         _, safe_rep_err = sanitize_error(rep_net_err)
-                        raise RuntimeError(f"Cloudflare Workers AI repair network failure: {safe_rep_err}")
+                        raise AIProviderError(f"Cloudflare Workers AI repair network failure: {safe_rep_err}", provider="cloudflare", model=self._model)
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -388,18 +495,51 @@ Generate the podcast script JSON response now.
                         response_json={"http_status": repair_resp.status_code, "response_character_count": len(repair_resp.text)},
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_http_failure"},
                     )
+                    if repair_resp.status_code == 401:
+                        raise AIAuthFailedError(f"Cloudflare Workers AI authentication failed: HTTP 401", provider="cloudflare", model=self._model)
+                    if repair_resp.status_code == 403:
+                        raise AIPermissionDeniedError(f"Cloudflare Workers AI permission denied: HTTP 403", provider="cloudflare", model=self._model)
+                    if repair_resp.status_code == 413:
+                        raise AIRequestTooLargeError(f"Cloudflare Workers AI request payload too large: HTTP 413", provider="cloudflare", model=self._model)
                     if attempt == max_attempts:
-                        raise RuntimeError(f"Cloudflare Workers AI repair returned HTTP {repair_resp.status_code}")
+                        if repair_resp.status_code >= 500:
+                            raise AIProviderUnavailableError(f"Cloudflare Workers AI repair returned HTTP {repair_resp.status_code}", provider="cloudflare", model=self._model, http_status=repair_resp.status_code)
+                        raise AIProviderError(f"Cloudflare Workers AI repair returned HTTP {repair_resp.status_code}", provider="cloudflare", model=self._model, http_status=repair_resp.status_code)
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
 
                 rep_json = repair_resp.json()
-                rep_raw = ""
-                if "result" in rep_json and isinstance(rep_json["result"], dict):
-                    rep_raw = rep_json["result"].get("response", "")
-                elif "response" in rep_json:
-                    rep_raw = rep_json.get("response", "")
+                try:
+                    rep_raw = extract_cloudflare_content(rep_json)
+                except AIProviderError as rep_extract_err:
+                    rep_resp_evidence = {
+                        "http_status": repair_resp.status_code,
+                        "response_character_count": 0,
+                        "error": str(rep_extract_err),
+                    }
+                    record_ai_interaction(
+                        job_id=job_id,
+                        provider="cloudflare",
+                        model=self._model,
+                        operation="script_repair",
+                        attempt=attempt,
+                        http_status=repair_resp.status_code,
+                        provider_request_id=repair_req_id,
+                        input_chars=len(user_content),
+                        started_at=t_repair,
+                        completed_at=datetime.now(UTC),
+                        success=False,
+                        error=rep_extract_err,
+                        request_json=rep_evidence,
+                        response_json=rep_resp_evidence,
+                        metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_content_extraction_failed"},
+                    )
+                    if attempt == max_attempts:
+                        raise rep_extract_err
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
 
                 rep_resp_evidence = {
                     "http_status": repair_resp.status_code,
@@ -449,9 +589,10 @@ Generate the podcast script JSON response now.
                         metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_parse_failure"},
                     )
                     if attempt == max_attempts:
-                        raise RuntimeError(f"Cloudflare Workers AI schema validation and repair failed: {rep_parse_err}")
+                        raise AIProviderError(f"Cloudflare Workers AI schema validation and repair failed: {rep_parse_err}", provider="cloudflare", model=self._model)
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
 
-        raise RuntimeError("Failed to generate podcast script from Cloudflare Workers AI after retries.")
+        raise AIProviderError("Failed to generate podcast script from Cloudflare Workers AI after retries.", provider="cloudflare", model=self._model)
+

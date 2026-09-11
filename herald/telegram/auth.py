@@ -283,12 +283,26 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
     else:
         mode = cand_mode
 
+    chain_json = None
+    models_json = None
+    if user:
+        try:
+            chain_json = user.ai_provider_chain_json
+        except Exception:
+            chain_json = None
+        try:
+            models_json = user.ai_models_by_provider_json
+        except Exception:
+            models_json = None
+
     return {
         "confirm_before_tts": confirm,
         "default_voice": voice,
         "default_speed": speed,
         "default_mode": mode,
         "ai_provider": getattr(settings, "AI_PROVIDER", None) or "None (Literal only)",
+        "ai_provider_chain_json": chain_json,
+        "ai_models_by_provider_json": models_json,
     }
 
 
@@ -449,3 +463,71 @@ def set_user_default_mode(
     user.updated_at = datetime.now(UTC)
     db.commit()
     return True
+
+
+def set_user_ai_provider_chain(
+    db: Session,
+    user_id: int | str,
+    chain: list[str] | None,
+    chat_id: int | str | None = None,
+) -> bool:
+    """
+    Set ai_provider_chain_json preference for a Telegram user.
+    Enforces deduplication, compaction, and valid provider IDs.
+    """
+    from herald.ai.registry import is_provider_registered
+
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    if chain is not None:
+        compacted: list[str] = []
+        for p in chain:
+            if not p:
+                continue
+            p_clean = str(p).lower().strip()
+            if not is_provider_registered(p_clean):
+                raise ValueError(f"Unknown provider '{p_clean}'")
+            if p_clean not in compacted:
+                compacted.append(p_clean)
+        user.ai_provider_chain_json = compacted if compacted else None
+    else:
+        user.ai_provider_chain_json = None
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    return True
+
+
+def set_user_ai_model_for_provider(
+    db: Session,
+    user_id: int | str,
+    provider_id: str,
+    model_id: str | None,
+    chat_id: int | str | None = None,
+) -> bool:
+    """Set or clear preferred model for a specific provider in ai_models_by_provider_json."""
+    from herald.ai.registry import is_provider_registered
+
+    p_clean = str(provider_id).lower().strip()
+    if not is_provider_registered(p_clean):
+        raise ValueError(f"Unknown provider '{p_clean}'")
+
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    models_map = dict(user.ai_models_by_provider_json or {})
+    if model_id is not None:
+        models_map[p_clean] = str(model_id).strip()
+    else:
+        models_map.pop(p_clean, None)
+
+    user.ai_models_by_provider_json = models_map if models_map else None
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    return True
+
