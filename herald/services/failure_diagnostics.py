@@ -513,16 +513,25 @@ def collect_failure_diagnostics(
     sanitized_record = redact_dict(record)
 
     # Multi-attempt preservation in PodcastJob.auto_diagnostics_json
-    if db and job_id:
+    if job_id:
+        owns_session = False
+        session = db
         try:
-            job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+            if session is None:
+                from herald.db.connection import SessionLocal
+                session = SessionLocal()
+                owns_session = True
+            job = session.query(PodcastJob).filter(PodcastJob.id == job_id).first()
             if job:
                 history = list(job.auto_diagnostics_json or [])
                 history.append(sanitized_record)
                 job.auto_diagnostics_json = history
-                db.commit()
+                session.commit()
         except Exception as db_err:
             logger.warning(f"Failed to save auto_diagnostics_json for job '{job_id}': {db_err}")
+        finally:
+            if owns_session and session:
+                session.close()
 
     return sanitized_record
 

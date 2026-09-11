@@ -727,29 +727,9 @@ def handle_telegram_content_message(
 
                         _, safe_err_detail = sanitize_error(e)
                         prior_state = provisional.status
+                        provisional_id = provisional.id
 
-                        try:
-                            collect_failure_diagnostics(
-                                stage="extraction", error=e,
-                                job_id=provisional.id, db=recovery_db,
-                            )
-                        except Exception:
-                            pass
-
-                        record_job_diagnostic_event(
-                            provisional.id,
-                            "ERROR",
-                            "intake",
-                            "UNEXPECTED_INTAKE_FAILURE",
-                            f"Unexpected intake failure in provisional state: {safe_err_detail}",
-                            metadata={
-                                "prior_state": prior_state,
-                                "failure_stage": "EXTRACTION",
-                                "error_category": "INTAKE_CRASH",
-                            },
-                            db=recovery_db,
-                        )
-
+                        # 1. State transition and metadata inside the row-lock transaction
                         transition_job_state(
                             recovery_db, provisional, JobState.FAILED_FINAL.value,
                             component="telegram-intake",
@@ -761,14 +741,40 @@ def handle_telegram_content_message(
                         provisional.error_code = "INTAKE_CRASH"
                         provisional.error_detail = safe_err_detail
                         recovery_db.commit()
-                        try:
-                            ensure_terminal_diagnostics_archive(provisional.id, JobState.FAILED_FINAL.value)
-                        except Exception:
-                            pass
                         logger.info(
                             "Recovered provisional job '%s' to FAILED_FINAL after intake crash",
-                            provisional.id,
+                            provisional_id,
                         )
+
+                        # 2. ONLY AFTER commit: collect diagnostics, record event, and generate archive
+                        try:
+                            collect_failure_diagnostics(
+                                stage="extraction", error=e,
+                                job_id=provisional_id, db=None,
+                            )
+                        except Exception as diag_err:
+                            logger.warning("Failed collecting failure diagnostics for provisional %s: %s", provisional_id, diag_err)
+
+                        try:
+                            record_job_diagnostic_event(
+                                provisional_id,
+                                "ERROR",
+                                "intake",
+                                "UNEXPECTED_INTAKE_FAILURE",
+                                f"Unexpected intake failure in provisional state: {safe_err_detail}",
+                                metadata={
+                                    "prior_state": prior_state,
+                                    "failure_stage": "EXTRACTION",
+                                    "error_category": "INTAKE_CRASH",
+                                },
+                            )
+                        except Exception as ev_err:
+                            logger.warning("Failed recording UNEXPECTED_INTAKE_FAILURE for provisional %s: %s", provisional_id, ev_err)
+
+                        try:
+                            ensure_terminal_diagnostics_archive(provisional_id, JobState.FAILED_FINAL.value)
+                        except Exception as arc_err:
+                            logger.warning("Failed ensuring terminal diagnostics archive for provisional %s: %s", provisional_id, arc_err)
                 finally:
                     recovery_db.close()
             except Exception as rec_err:

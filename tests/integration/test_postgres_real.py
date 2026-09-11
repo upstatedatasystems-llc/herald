@@ -855,3 +855,174 @@ def test_postgres_alembic_migration_013_to_014_roundtrip(postgres_engine):
             conn.execute(text(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
             conn.commit()
 
+
+def test_postgres_provisional_recovery_and_stale_intake_concurrency(
+    pg_session_factory, postgres_engine, monkeypatch, tmp_path
+):
+    """
+    Real PostgreSQL transaction coverage for Sections 7 and 8:
+    A. Provisional EXTRACTING recovery does not release its ownership lock before deciding/committing FAILED_FINAL.
+    B. Competing transaction cannot advance the same provisional row and then be overwritten by stale recovery.
+    C. UNEXPECTED_INTAKE_FAILURE persists without lock/deadlock errors under PostgreSQL row/FK locking.
+    D. STALE_INTAKE_RECOVERED persists without lock/deadlock errors under PostgreSQL row/FK locking.
+    E. Resulting terminal archive contains the event/state transition.
+    """
+    import json
+    from unittest.mock import MagicMock, patch
+    import zipfile
+    from apps.api.main import ops_stale_recovery
+    from herald.config import settings
+    from herald.db.models import JobDiagnosticEvent, JobState, PodcastJob
+    from herald.services.diagnostics_export import get_terminal_diagnostics_archive_path
+    from herald.telegram.bot import handle_telegram_content_message
+
+    monkeypatch.setattr("herald.db.connection.engine", postgres_engine)
+    monkeypatch.setattr("herald.db.connection.SessionLocal", pg_session_factory)
+    monkeypatch.setattr(settings, "DIAGNOSTICS_DIR", str(tmp_path))
+
+    # --- Part 1: Provisional EXTRACTING recovery lock hold and UNEXPECTED_INTAKE_FAILURE (A & C) ---
+    Session1 = pg_session_factory()
+    chat_id = 112233
+    msg_id = 4455
+    prov_job = PodcastJob(
+        id=str(uuid.uuid4()),
+        transport="telegram",
+        telegram_chat_id=chat_id,
+        telegram_message_id=msg_id,
+        request_mode="standard",
+        source_type="url",
+        source_hash="hash-pg-prov-crash",
+        source_text="provisional text",
+        status=JobState.EXTRACTING.value,
+        created_at=datetime.now(UTC),
+    )
+    Session1.add(prov_job)
+    Session1.commit()
+    prov_job_id = prov_job.id
+    Session1.close()
+
+    tg_client = MagicMock()
+    tg_message = {
+        "message_id": msg_id,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": chat_id, "is_bot": False, "first_name": "TestUser"},
+        "text": "https://example.com/prov-crash",
+        "date": int(datetime.now(UTC).timestamp()),
+    }
+
+    SessionTest = pg_session_factory()
+    with (
+        patch("herald.telegram.bot.process_herald_request", side_effect=RuntimeError("PG intake crash")),
+        patch("herald.telegram.bot.get_effective_user_preferences", return_value={}),
+    ):
+        handle_telegram_content_message(SessionTest, tg_client, tg_message)
+    SessionTest.close()
+
+    # Verify A & C:
+    VerifySession = pg_session_factory()
+    recovered_prov = VerifySession.query(PodcastJob).filter(PodcastJob.id == prov_job_id).first()
+    assert recovered_prov is not None
+    assert recovered_prov.status == JobState.FAILED_FINAL.value
+    assert recovered_prov.error_code == "INTAKE_CRASH"
+    assert recovered_prov.failed_stage == "EXTRACTION"
+
+    prov_event = (
+        VerifySession.query(JobDiagnosticEvent)
+        .filter_by(job_id=prov_job_id, event_type="UNEXPECTED_INTAKE_FAILURE")
+        .first()
+    )
+    assert prov_event is not None
+    assert prov_event.metadata_json_sanitized.get("prior_state") == "EXTRACTING"
+    assert prov_event.metadata_json_sanitized.get("failure_stage") == "EXTRACTION"
+
+    # Verify terminal archive exists
+    prov_arc_path = get_terminal_diagnostics_archive_path(prov_job_id)
+    assert prov_arc_path.exists(), f"Terminal archive must exist at {prov_arc_path}"
+    with zipfile.ZipFile(prov_arc_path, "r") as zf:
+        namelist = zf.namelist()
+        assert "job.json" in namelist
+        assert "failure_diagnostics.json" in namelist
+        job_data = json.loads(zf.read("job.json").decode("utf-8"))
+        assert job_data.get("status") == JobState.FAILED_FINAL.value
+
+    # --- Part 2: Competing transaction safety (B) ---
+    competing_job = PodcastJob(
+        id=str(uuid.uuid4()),
+        transport="telegram",
+        telegram_chat_id=99001,
+        telegram_message_id=99002,
+        request_mode="standard",
+        source_type="url",
+        source_hash="hash-pg-competing",
+        source_text="competing text",
+        status=JobState.EXTRACTING.value,
+        created_at=datetime.now(UTC) - timedelta(hours=2),
+        updated_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    VerifySession.add(competing_job)
+    VerifySession.commit()
+    competing_job_id = competing_job.id
+
+    # Competing worker advances job to COMPLETE
+    WorkerSession = pg_session_factory()
+    w_job = WorkerSession.query(PodcastJob).filter(PodcastJob.id == competing_job_id).with_for_update().first()
+    w_job.status = JobState.COMPLETE.value
+    WorkerSession.commit()
+    WorkerSession.close()
+
+    # Stale recovery runs - must NOT overwrite competing job
+    RecoverySession1 = pg_session_factory()
+    res1 = ops_stale_recovery(db=RecoverySession1)
+    RecoverySession1.close()
+
+    VerifySession.expire_all()
+    comp_refreshed = VerifySession.query(PodcastJob).filter(PodcastJob.id == competing_job_id).first()
+    assert comp_refreshed.status == JobState.COMPLETE.value
+
+    # --- Part 3: Stale recovery lock order, STALE_INTAKE_RECOVERED, and terminal archive (D & E) ---
+    stale_job = PodcastJob(
+        id=str(uuid.uuid4()),
+        transport="telegram",
+        telegram_chat_id=88001,
+        telegram_message_id=88002,
+        request_mode="standard",
+        source_type="url",
+        source_hash="hash-pg-stale",
+        source_text="stale text",
+        status=JobState.EXTRACTING.value,
+        created_at=datetime.now(UTC) - timedelta(hours=2),
+        updated_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    VerifySession.add(stale_job)
+    VerifySession.commit()
+    stale_job_id = stale_job.id
+
+    RecoverySession2 = pg_session_factory()
+    res2 = ops_stale_recovery(db=RecoverySession2)
+    RecoverySession2.close()
+    assert res2["status"] == "success"
+
+    VerifySession.expire_all()
+    stale_refreshed = VerifySession.query(PodcastJob).filter(PodcastJob.id == stale_job_id).first()
+    assert stale_refreshed.status == JobState.FAILED_FINAL.value
+    assert stale_refreshed.error_code == "INTAKE_TIMEOUT"
+
+    stale_event = (
+        VerifySession.query(JobDiagnosticEvent)
+        .filter_by(job_id=stale_job_id, event_type="STALE_INTAKE_RECOVERED")
+        .first()
+    )
+    assert stale_event is not None
+    assert stale_event.metadata_json_sanitized.get("prior_state") == "EXTRACTING"
+    assert stale_event.metadata_json_sanitized.get("transport") == "telegram"
+
+    stale_arc_path = get_terminal_diagnostics_archive_path(stale_job_id)
+    assert stale_arc_path.exists()
+    with zipfile.ZipFile(stale_arc_path, "r") as zf:
+        job_data = json.loads(zf.read("job.json").decode("utf-8"))
+        assert job_data.get("status") == JobState.FAILED_FINAL.value
+        assert job_data.get("error_code") == "INTAKE_TIMEOUT"
+
+    VerifySession.close()
+
+

@@ -659,6 +659,14 @@ class TestURLContextFallbackEligibility:
                             }
                         ]
                     },
+                    "urlContextMetadata": {
+                        "urlMetadata": [
+                            {
+                                "retrievedUrl": "https://example.com/test-ai-interaction",
+                                "urlRetrievalStatus": "URL_RETRIEVAL_STATUS_SUCCESS",
+                            }
+                        ]
+                    },
                 }
             ],
             "usageMetadata": {
@@ -701,7 +709,8 @@ class TestURLContextFallbackEligibility:
         assert interaction is not None
         assert interaction.success is True
         assert interaction.metadata_json.get("finish_reason") == "STOP"
-        assert interaction.metadata_json.get("requested_max_output_tokens") == settings.GEMINI_MAX_OUTPUT_TOKENS
+        assert interaction.metadata_json.get("requested_max_output_tokens") == settings.GEMINI_URL_CONTEXT_INITIAL_OUTPUT_TOKENS
+        assert interaction.metadata_json.get("retrieval_status") == "URL_RETRIEVAL_STATUS_SUCCESS"
 
     def test_url_context_validation_failure_records_failure_telemetry(self, db_session: Session):
         """URL Context returning invalid/empty/short body records success=False and returns None."""
@@ -722,6 +731,14 @@ class TestURLContextFallbackEligibility:
                                     "title": "Short Page",
                                     "body": "Too short body text.",
                                 })
+                            }
+                        ]
+                    },
+                    "urlContextMetadata": {
+                        "urlMetadata": [
+                            {
+                                "retrievedUrl": "https://example.com/test-ai-fail",
+                                "urlRetrievalStatus": "URL_RETRIEVAL_STATUS_SUCCESS",
                             }
                         ]
                     },
@@ -766,6 +783,343 @@ class TestURLContextFallbackEligibility:
         assert interaction is not None
         assert interaction.success is False
         assert "minimum 100 required" in (interaction.error_message or "")
+
+    def test_url_context_metadata_cases_a_through_e(self, db_session: Session):
+        """Test URL Context metadata: ERROR (A), PAYWALL (B), UNSAFE (C), MISSING (D) fail; SUCCESS (E) succeeds."""
+        from herald.db.models import AIInteraction
+        from herald.gemini.client import extract_article_via_url_context
+
+        valid_body = "This is a legitimate article body retrieved by Gemini URL Context that has plenty of text and is well over one hundred characters long."
+
+        cases = [
+            ("URL_RETRIEVAL_STATUS_ERROR", False, "ERROR"),
+            ("URL_RETRIEVAL_STATUS_PAYWALL", False, "PAYWALL"),
+            ("URL_RETRIEVAL_STATUS_UNSAFE", False, "UNSAFE"),
+            ("MISSING", False, "MISSING"),
+            ("URL_RETRIEVAL_STATUS_SUCCESS", True, "SUCCESS"),
+        ]
+
+        for status_val, should_succeed, case_name in cases:
+            job_id = str(uuid.uuid4())
+            job = PodcastJob(
+                id=job_id, transport="api", source_hash=f"hash-{case_name}", source_text="test",
+                request_mode="standard", source_type="url", status=JobState.EXTRACTING.value,
+            )
+            db_session.add(job)
+            db_session.commit()
+
+            mock_cand = {
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [{"text": json.dumps({"title": f"Article {case_name}", "body": valid_body})}]
+                },
+            }
+            if status_val != "MISSING":
+                mock_cand["urlContextMetadata"] = {
+                    "urlMetadata": [
+                        {"retrievedUrl": f"https://example.com/{case_name}", "urlRetrievalStatus": status_val}
+                    ]
+                }
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.headers = {"x-goog-request-id": f"req-{case_name}"}
+            mock_resp.json.return_value = {
+                "candidates": [mock_cand],
+                "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 30, "totalTokenCount": 80},
+            }
+
+            with (
+                patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
+                patch("httpx.Client.post", return_value=mock_resp),
+            ):
+                result = extract_article_via_url_context(
+                    url=f"https://example.com/{case_name}",
+                    job_id=job_id,
+                )
+
+            if should_succeed:
+                assert result is not None, f"Case {case_name} should succeed"
+                assert result["title"] == f"Article {case_name}"
+            else:
+                assert result is None, f"Case {case_name} should fail"
+
+            interaction = db_session.query(AIInteraction).filter_by(job_id=job_id, operation="url_context_extraction").first()
+            assert interaction is not None
+            assert interaction.success is should_succeed
+
+    def test_url_context_helper_rejects_private_url_without_http_calls(self):
+        """Direct call to extract_article_via_url_context() rejects private URL before making any Gemini HTTP call."""
+        from herald.gemini.client import extract_article_via_url_context
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
+            patch("httpx.Client.post") as mock_post,
+        ):
+            res_loopback = extract_article_via_url_context("http://127.0.0.1/private-data")
+            assert res_loopback is None
+            mock_post.assert_not_called()
+
+            res_local = extract_article_via_url_context("http://localhost:8080/secret")
+            assert res_local is None
+            mock_post.assert_not_called()
+
+            res_priv = extract_article_via_url_context("http://192.168.1.100/admin")
+            assert res_priv is None
+            mock_post.assert_not_called()
+
+    def test_url_context_max_tokens_handling_and_adaptive_retry(self, db_session: Session):
+        """MAX_TOKENS must never succeed. Adaptive retry doubles budget; repeated MAX_TOKENS fails cleanly."""
+        from herald.db.models import AIInteraction
+        from herald.gemini.client import extract_article_via_url_context
+
+        job_id_a = str(uuid.uuid4())
+        job_a = PodcastJob(
+            id=job_id_a, transport="api", source_hash="hash-max-a", source_text="test",
+            request_mode="standard", source_type="url", status=JobState.EXTRACTING.value,
+        )
+        db_session.add(job_a)
+        db_session.commit()
+
+        trunc_resp = MagicMock()
+        trunc_resp.status_code = 200
+        trunc_resp.headers = {"x-goog-request-id": "req-trunc"}
+        trunc_resp.json.return_value = {
+            "candidates": [
+                {
+                    "finishReason": "MAX_TOKENS",
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps({
+                                    "title": "Truncated Title",
+                                    "body": "This body happens to be valid JSON and over one hundred characters long, but the model truncated before completion so finishReason is MAX_TOKENS.",
+                                })
+                            }
+                        ]
+                    },
+                    "urlContextMetadata": {
+                        "urlMetadata": [
+                            {"retrievedUrl": "https://example.com/trunc", "urlRetrievalStatus": "URL_RETRIEVAL_STATUS_SUCCESS"}
+                        ]
+                    },
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 30, "totalTokenCount": 80},
+        }
+
+        # Attempt 1 MAX_TOKENS, Attempt 2 STOP with valid content (Case B: succeeds on retry)
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.headers = {"x-goog-request-id": "req-success"}
+        success_resp.json.return_value = {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps({
+                                    "title": "Full Title",
+                                    "body": "This is the full extracted body after the token budget doubled, successfully extracting the full content.",
+                                })
+                            }
+                        ]
+                    },
+                    "urlContextMetadata": {
+                        "urlMetadata": [
+                            {"retrievedUrl": "https://example.com/trunc", "urlRetrievalStatus": "URL_RETRIEVAL_STATUS_SUCCESS"}
+                        ]
+                    },
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 50, "totalTokenCount": 100},
+        }
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
+            patch.object(settings, "GEMINI_URL_CONTEXT_INITIAL_OUTPUT_TOKENS", 4096),
+            patch.object(settings, "GEMINI_URL_CONTEXT_MAX_OUTPUT_TOKENS", 16384),
+            patch("time.sleep"),
+            patch("httpx.Client.post", side_effect=[trunc_resp, success_resp]) as mock_post,
+        ):
+            res_retry = extract_article_via_url_context("https://example.com/trunc", job_id=job_id_a)
+            assert res_retry is not None
+            assert res_retry["title"] == "Full Title"
+            assert mock_post.call_count == 2
+            call2_payload = mock_post.call_args_list[1][1]["json"]
+            assert call2_payload["generationConfig"]["maxOutputTokens"] == 8192
+
+        # Case C: Repeated MAX_TOKENS at hard cap -> controlled failure
+        job_id_c = str(uuid.uuid4())
+        job_c = PodcastJob(
+            id=job_id_c, transport="api", source_hash="hash-max-c", source_text="test",
+            request_mode="standard", source_type="url", status=JobState.EXTRACTING.value,
+        )
+        db_session.add(job_c)
+        db_session.commit()
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
+            patch.object(settings, "GEMINI_RETRY_COUNT", 2),
+            patch("time.sleep"),
+            patch("httpx.Client.post", return_value=trunc_resp),
+        ):
+            res_fail = extract_article_via_url_context("https://example.com/trunc-fail", job_id=job_id_c)
+            assert res_fail is None
+
+        interactions = db_session.query(AIInteraction).filter_by(job_id=job_id_c).all()
+        assert len(interactions) == 2
+        for inter in interactions:
+            assert inter.success is False
+            assert "OUTPUT_TRUNCATED" in (inter.error_message or "")
+            assert inter.metadata_json.get("finish_reason") == "MAX_TOKENS"
+
+    def test_extract_article_403_classification_cases(self):
+        """Prove real extract_article_from_url stream classifies 403 bodies into BlockReason."""
+        from herald.extraction.url_extractor import (
+            BlockReason,
+            SourceAccessBlockedError,
+            extract_article_from_url,
+        )
+
+        test_cases = [
+            (b"<html><body>403 Forbidden: nginx</body></html>", BlockReason.PUBLIC_RETRIEVAL_BLOCK),
+            (b"<html><head><title>Security Check</title></head><body>Please solve captcha to continue.</body></html>", BlockReason.CAPTCHA),
+            (b"<html><head><title>Subscribe to read</title></head><body>This article is behind a paywall.</body></html>", BlockReason.PAYWALL),
+            (b"<html><head><title>Just a moment...</title></head><body>Cloudflare anti-bot verification</body></html>", BlockReason.INTERSTITIAL),
+        ]
+
+        for body_bytes, expected_reason in test_cases:
+            def mock_stream(method, url, **kwargs):
+                mock_r = MagicMock()
+                mock_r.status_code = 403
+                mock_r.is_redirect = False
+                mock_r.iter_bytes.return_value = [body_bytes]
+                mock_r.headers = {"content-type": "text/html"}
+                mock_ctx = MagicMock()
+                mock_ctx.__enter__.return_value = mock_r
+                mock_ctx.__exit__.return_value = None
+                return mock_ctx
+
+            with (
+                patch("herald.extraction.url_extractor.validate_url_host", return_value=("example.com", 443, "93.184.216.34")),
+                patch("httpx.Client.stream", side_effect=mock_stream),
+            ):
+                with pytest.raises(SourceAccessBlockedError) as exc_info:
+                    extract_article_from_url("https://example.com/article")
+                assert exc_info.value.block_reason == expected_reason, f"Expected {expected_reason} for body {body_bytes}"
+
+    def test_extractor_to_pipeline_403_captcha_yields_zero_url_context_calls(self, db_session: Session):
+        """When 403 response contains CAPTCHA marker, pipeline classifies as CAPTCHA and NEVER attempts URL Context."""
+        from herald.core.models import HeraldRequest
+        from herald.core.pipeline import process_herald_request
+
+        captcha_body = b"<html><title>Security Check</title><body>Please complete captcha</body></html>"
+
+        def mock_stream(method, url, **kwargs):
+            mock_r = MagicMock()
+            mock_r.status_code = 403
+            mock_r.is_redirect = False
+            mock_r.iter_bytes.return_value = [captcha_body]
+            mock_r.headers = {"content-type": "text/html"}
+            mock_ctx = MagicMock()
+            mock_ctx.__enter__.return_value = mock_r
+            mock_ctx.__exit__.return_value = None
+            return mock_ctx
+
+        with (
+            patch("herald.extraction.url_extractor.validate_url_host", return_value=("example.com", 443, "93.184.216.34")),
+            patch("httpx.Client.stream", side_effect=mock_stream),
+            patch("herald.gemini.client.extract_article_via_url_context") as mock_url_ctx,
+            patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"),
+        ):
+            req = HeraldRequest(
+                transport="telegram",
+                transport_message_id=555,
+                requester_identity="telegram:555",
+                delivery_target="555",
+                request_mode="standard",
+                source_url="https://example.com/captcha-blocked",
+            )
+            resp = process_herald_request(db=db_session, req=req)
+
+        assert resp.status == JobState.FAILED_FINAL.value
+        mock_url_ctx.assert_not_called()
+
+    def test_sanitize_error_in_pipeline_diagnostics_is_string_not_tuple(self, db_session: Session):
+        """Regression test: diagnostic events and direct_error in metrics must be strings, never tuple representations."""
+        from herald.core.models import HeraldRequest
+        from herald.core.pipeline import process_herald_request
+        from herald.db.models import JobDiagnosticEvent, JobProcessingMetric
+
+        with (
+            patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
+            patch.object(settings, "AI_PROVIDER", "gemini"),
+            patch("herald.core.pipeline.extract_article_from_url", side_effect=ValueError("Test bad URL structure")),
+            patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"),
+        ):
+            req = HeraldRequest(
+                transport="telegram",
+                transport_message_id=666,
+                requester_identity="telegram:666",
+                delivery_target="666",
+                request_mode="standard",
+                source_url="https://example.com/bad-extract",
+            )
+            resp = process_herald_request(db=db_session, req=req)
+
+        assert resp.status == JobState.FAILED_FINAL.value
+        db_session.expire_all()
+        events = db_session.query(JobDiagnosticEvent).filter_by(job_id=resp.job_id).all()
+        assert len(events) > 0
+        for ev in events:
+            assert not ev.message.startswith("('"), f"Event message should be string, got: {ev.message}"
+            if ev.metadata_json_sanitized and "direct_error" in ev.metadata_json_sanitized:
+                de = ev.metadata_json_sanitized["direct_error"]
+                assert not str(de).startswith("('"), f"direct_error should be string, got: {de}"
+
+        metrics = db_session.query(JobProcessingMetric).filter_by(job_id=resp.job_id).all()
+        for m in metrics:
+            if m.metadata_json and "direct_error" in m.metadata_json:
+                de = m.metadata_json["direct_error"]
+                assert not str(de).startswith("('"), f"Metric direct_error should be string, got: {de}"
+
+    def test_performance_metrics_redacts_credentials_in_url_and_errors(self, db_session: Session):
+        """Performance metrics sanitize_metadata redacts credentials from URLs, error messages, and nested dicts."""
+        from herald.services.performance_metrics import record_stage_metric, sanitize_metadata
+
+        raw_meta = {
+            "url": "https://example.com/article?token=secrettoken123&api_key=apikey999",
+            "direct_error": "Failed with Bearer mysecretbearer and x-api-key: supersecret",
+            "extraction_method": "DIRECT_HTTP",
+            "block_reason": "PUBLIC_RETRIEVAL_BLOCK",
+            "prompt_tokens": 150,
+            "success": True,
+            "nested": {
+                "sub_url": "https://api.internal/v1?secret=pass123",
+                "count": 42,
+            },
+            "list_urls": [
+                "https://example.com/a?key=secretkey1",
+                "https://example.com/b?token=secrettoken2",
+            ],
+        }
+
+        sanitized = sanitize_metadata(raw_meta)
+        assert sanitized is not None
+        assert "secrettoken123" not in str(sanitized)
+        assert "apikey999" not in str(sanitized)
+        assert "supersecret" not in str(sanitized)
+        assert "pass123" not in str(sanitized)
+        assert "secretkey1" not in str(sanitized)
+        assert "secrettoken2" not in str(sanitized)
+        # Preserves normal telemetry
+        assert sanitized["extraction_method"] == "DIRECT_HTTP"
+        assert sanitized["block_reason"] == "PUBLIC_RETRIEVAL_BLOCK"
+        assert sanitized["prompt_tokens"] == 150
+        assert sanitized["success"] is True
+        assert sanitized["nested"]["count"] == 42
 
 
 
@@ -1542,5 +1896,69 @@ class TestLongTitleEndToEndBoundary:
         slug = _sanitize_slug(job.custom_title)
         assert len(slug) <= 32
         assert not any(c in slug for c in r'<>:"/\|?*')
+
+    def test_long_title_request_pipeline_regression(self, db_session: Session):
+        """End-to-end regression: HeraldRequest with >255-character custom title through process_herald_request."""
+        from herald.core.models import HeraldRequest
+        from herald.core.pipeline import process_herald_request
+        from herald.services.diagnostics_export import _sanitize_slug
+        from herald.services.drive_service import build_user_facing_drive_filename, sanitize_filename_title
+        from herald.telegram.formatters import format_approval, format_completion, format_queued
+
+        title_300 = ("Comprehensive Deep Dive Into Advanced Neural Architectures and Transformer Optimizations in Production Systems " * 3).strip()
+        assert len(title_300) > 300
+
+        req = HeraldRequest(
+            transport="telegram",
+            transport_message_id=777,
+            requester_identity="telegram:777",
+            delivery_target="777",
+            request_mode="literal",
+            source_text="This is valid source text of sufficient length to generate a complete script and podcast episode for the test.",
+            custom_title=title_300,
+        )
+
+        with patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"):
+            resp = process_herald_request(db=db_session, req=req)
+
+        assert resp.status in (JobState.QUEUED_TTS.value, JobState.COMPLETE.value, JobState.AWAITING_APPROVAL.value)
+        job = db_session.query(PodcastJob).filter(PodcastJob.id == resp.job_id).first()
+        assert job is not None
+        # 1. Complete canonical custom_title persists in DB without truncation
+        assert job.custom_title == title_300
+        assert len(job.custom_title) > 255
+
+        # 2. Session remains fully usable
+        db_session.refresh(job)
+        assert job.status in (JobState.QUEUED_TTS.value, JobState.COMPLETE.value, JobState.AWAITING_APPROVAL.value)
+
+        # 3. Telegram formatters remain safely bounded
+        caption = format_completion(job, actual_chunks_count=1, file_size_bytes=1_000_000)
+        assert len(caption) <= 1024
+        assert "..." in caption
+
+        queued_text = format_queued(job, script_json=job.script_json)
+        assert len(queued_text) <= 4096
+
+        approval_text, _ = format_approval(job, script_json=job.script_json)
+        assert len(approval_text) <= 4096
+
+        # 4. User-facing drive filename is sanitized and bounded (title <= 120 chars)
+        sanitized_title = sanitize_filename_title(title_300)
+        assert len(sanitized_title) <= 120
+        filename = build_user_facing_drive_filename(
+            title=title_300,
+            created_at=job.created_at,
+            mode="Literal",
+            extension="mp3",
+        )
+        assert filename.startswith(sanitized_title)
+        assert filename.endswith(".mp3")
+        assert len(filename) < 200
+
+        # 5. Diagnostic slug remains safe
+        slug = _sanitize_slug(title_300)
+        assert len(slug) <= 32
+
 
 

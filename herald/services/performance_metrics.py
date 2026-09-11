@@ -31,16 +31,39 @@ def sanitize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     if not metadata or not isinstance(metadata, dict):
         return None
 
+    from herald.services.redaction import SAFE_NUMERIC_TELEMETRY_KEYS, redact_text
+
+    def _sanitize_val(v: Any) -> Any:
+        if isinstance(v, dict):
+            return sanitize_metadata(v)
+        elif isinstance(v, list):
+            return [_sanitize_val(item) for item in v]
+        elif isinstance(v, str):
+            return redact_text(v)
+        elif isinstance(v, (int, float, bool, type(None))):
+            return v
+        else:
+            return redact_text(str(v))
+
     cleaned: dict[str, Any] = {}
     for k, v in metadata.items():
-        if any(bad in str(k).lower() for bad in FORBIDDEN_METADATA_KEYS):
-            cleaned[k] = "[REDACTED]"
-        elif isinstance(v, dict):
-            cleaned[k] = sanitize_metadata(v)
-        elif isinstance(v, (str, int, float, bool, type(None))):
-            cleaned[k] = v
+        k_str = str(k)
+        k_lower = k_str.lower()
+        if k_lower in SAFE_NUMERIC_TELEMETRY_KEYS:
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cleaned[k_str] = v
+                continue
+            elif v is None:
+                cleaned[k_str] = None
+                continue
+            else:
+                cleaned[k_str] = "[REDACTED]"
+                continue
+
+        if any(bad in k_lower for bad in FORBIDDEN_METADATA_KEYS):
+            cleaned[k_str] = "[REDACTED]"
         else:
-            cleaned[k] = str(v)
+            cleaned[k_str] = _sanitize_val(v)
     return cleaned
 
 

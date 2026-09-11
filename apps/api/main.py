@@ -2244,6 +2244,7 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
     now = datetime.now(UTC)
     recovered_count = 0
     failed_final_job_ids = []
+    post_commit_diagnostic_events = []
 
     stale_specs = [
         (JobState.EXTRACTING.value, timedelta(minutes=15), JobState.EXTRACTING.value),
@@ -2315,23 +2316,36 @@ def ops_stale_recovery(db: Session = Depends(get_db)):
                             force=True,
                             commit=False,
                         )
-                        record_job_diagnostic_event(
+                        post_commit_diagnostic_events.append((
                             job.id,
                             "WARNING",
                             "intake",
                             "STALE_INTAKE_RECOVERED",
                             "Recovered abandoned Telegram intake EXTRACTING job to FAILED_FINAL",
-                            metadata={
+                            {
                                 "prior_state": "EXTRACTING",
                                 "transport": "telegram",
                                 "baseline_age": baseline.isoformat(),
                             },
-                            db=db,
-                        )
+                        ))
                         failed_final_job_ids.append(job.id)
                         recovered_count += 1
 
     db.commit()
+
+    for job_id, level, stage, event_type, message, meta in post_commit_diagnostic_events:
+        try:
+            record_job_diagnostic_event(
+                job_id,
+                level,
+                stage,
+                event_type,
+                message,
+                metadata=meta,
+            )
+        except Exception as ev_err:
+            logger.warning("Failed recording stale recovery event on %s: %s", job_id, ev_err)
+
     for ff_id in failed_final_job_ids:
         try:
             ensure_terminal_diagnostics_archive(ff_id, JobState.FAILED_FINAL.value)

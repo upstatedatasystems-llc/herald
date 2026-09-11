@@ -552,6 +552,14 @@ def extract_article_via_url_context(
     Returns {"title": "...", "body": "..."} on success, or None if extraction fails.
     This is a fallback for SourceAccessBlockedError only, on URLs that already passed SSRF validation.
     """
+    # 1. Enforce SSRF/Public-URL validation inside URL Context helper before any Gemini HTTP call
+    try:
+        from herald.extraction.url_extractor import validate_url_host
+        validate_url_host(url)
+    except Exception as ssrf_err:
+        logger.warning(f"URL Context extraction rejected URL due to SSRF / host validation error: {ssrf_err}")
+        return None
+
     key = api_key or settings.GEMINI_API_KEY
     model = model_name or settings.GEMINI_MODEL
 
@@ -577,72 +585,347 @@ URL: {url}"""
         "required": ["title", "body"],
     }
 
-    t0 = datetime.now(UTC)
-    try:
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "tools": [{"url_context": {}}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
-                "responseMimeType": "application/json",
-                "responseSchema": schema_dict,
-            },
-        }
+    model_ceiling = get_gemini_max_output_tokens_ceiling(model)
+    hard_cap = (
+        min(settings.GEMINI_URL_CONTEXT_MAX_OUTPUT_TOKENS, model_ceiling)
+        if model_ceiling
+        else settings.GEMINI_URL_CONTEXT_MAX_OUTPUT_TOKENS
+    )
+    current_max_tokens = min(settings.GEMINI_URL_CONTEXT_INITIAL_OUTPUT_TOKENS, hard_cap)
+    max_attempts = settings.GEMINI_RETRY_COUNT
+    backoff = 2.0
 
-        from herald.concurrency import get_semaphores
-        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
-            resp = client.post(api_url, json=payload, headers=headers)
-
-        t1 = datetime.now(UTC)
-        req_id = _extract_request_id(resp)
-
-        if resp.status_code != 200:
-            _record_gemini_interaction(
-                job_id=job_id,
-                model=model,
-                operation="url_context_extraction",
-                started_at=t0,
-                completed_at=t1,
-                success=False,
-                http_status=resp.status_code,
-                input_chars=len(prompt),
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error=f"HTTP {resp.status_code}: {resp.text}",
-                provider_request_id=req_id,
-            )
-            logger.warning(f"URL Context extraction failed with HTTP {resp.status_code}")
-            return None
-
-        result_json = resp.json()
-        p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
-        candidates = result_json.get("candidates", [])
-
-        if not candidates:
-            _record_gemini_interaction(
-                job_id=job_id,
-                model=model,
-                operation="url_context_extraction",
-                started_at=t0,
-                completed_at=t1,
-                success=False,
-                http_status=resp.status_code,
-                input_chars=len(prompt),
-                prompt_tokens=p_tok,
-                completion_tokens=c_tok,
-                total_tokens=t_tok,
-                thought_tokens=th_tok,
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error="No candidates returned",
-                provider_request_id=req_id,
-            )
-            return None
-
-        finish_reason = candidates[0].get("finishReason", "")
-        raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    for attempt in range(1, max_attempts + 1):
+        t0 = datetime.now(UTC)
         try:
-            data = json.loads(raw_text)
-        except Exception as json_err:
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "tools": [{"url_context": {}}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": current_max_tokens,
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema_dict,
+                },
+            }
+
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+                resp = client.post(api_url, json=payload, headers=headers)
+
+            t1 = datetime.now(UTC)
+            req_id = _extract_request_id(resp)
+
+            if resp.status_code != 200:
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"HTTP {resp.status_code}: {resp.text}",
+                    provider_request_id=req_id,
+                )
+                logger.warning(f"URL Context extraction failed with HTTP {resp.status_code}")
+                if attempt < max_attempts:
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                return None
+
+            result_json = resp.json()
+            p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
+            candidates = result_json.get("candidates", [])
+
+            if not candidates:
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="No candidates returned",
+                    provider_request_id=req_id,
+                )
+                return None
+
+            candidate = candidates[0]
+            finish_reason = candidate.get("finishReason", "")
+
+            # 2. Never accept URL Context MAX_TOKENS as success — check finishReason BEFORE parsing
+            if finish_reason == "MAX_TOKENS":
+                logger.warning(
+                    f"URL Context extraction truncated (finishReason=MAX_TOKENS), attempt {attempt}/{max_attempts}, "
+                    f"current_max_tokens={current_max_tokens}"
+                )
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="OUTPUT_TRUNCATED: finishReason=MAX_TOKENS",
+                    provider_request_id=req_id,
+                )
+                if current_max_tokens < hard_cap:
+                    new_budget = min(current_max_tokens * 2, hard_cap)
+                    logger.info(f"Increasing URL Context token budget: {current_max_tokens} -> {new_budget}")
+                    current_max_tokens = new_budget
+                if attempt < max_attempts:
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                return None
+
+            # 3. Require Gemini URL Context retrieval success metadata
+            url_context_meta = (
+                candidate.get("urlContextMetadata")
+                or candidate.get("url_context_metadata")
+                or candidate.get("groundingMetadata", {}).get("urlContextMetadata")
+                or candidate.get("grounding_metadata", {}).get("url_context_metadata")
+                or result_json.get("urlContextMetadata")
+                or result_json.get("url_context_metadata")
+            )
+
+            if not url_context_meta or not isinstance(url_context_meta, dict):
+                logger.warning(f"URL Context metadata missing from Gemini response for {url}")
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="URL Context metadata missing",
+                    provider_request_id=req_id,
+                    metadata={"url": url, "retrieval_status": "MISSING"},
+                )
+                return None
+
+            url_meta_list = (
+                url_context_meta.get("urlMetadata")
+                or url_context_meta.get("url_metadata")
+                or []
+            )
+            if not isinstance(url_meta_list, list) or not url_meta_list:
+                logger.warning(f"URL Context urlMetadata is empty for {url}")
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="URL Context urlMetadata is empty",
+                    provider_request_id=req_id,
+                    metadata={"url": url, "retrieval_status": "EMPTY"},
+                )
+                return None
+
+            retrieval_statuses = []
+            has_success = False
+            for item in url_meta_list:
+                if isinstance(item, dict):
+                    status = item.get("urlRetrievalStatus") or item.get("url_retrieval_status")
+                    if status:
+                        retrieval_statuses.append(status)
+                    if status == "URL_RETRIEVAL_STATUS_SUCCESS":
+                        has_success = True
+
+            primary_status = retrieval_statuses[0] if retrieval_statuses else "UNKNOWN"
+            if not has_success:
+                logger.warning(f"URL Context retrieval failed with status: {primary_status} for {url}")
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"URL Context retrieval unsuccessful: {primary_status}",
+                    provider_request_id=req_id,
+                    metadata={"url": url, "retrieval_status": primary_status},
+                )
+                return None
+
+            # 4. Parse response JSON and validate title/body
+            raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
+            try:
+                data = json.loads(raw_text)
+            except Exception as json_err:
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"Malformed JSON returned from URL Context: {json_err}",
+                    provider_request_id=req_id,
+                )
+                return None
+
+            if not isinstance(data, dict):
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="URL Context response is not a JSON object",
+                    provider_request_id=req_id,
+                )
+                return None
+
+            title = data.get("title")
+            body = data.get("body")
+            if not isinstance(title, str) or not isinstance(body, str):
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error="URL Context title or body has invalid type",
+                    provider_request_id=req_id,
+                )
+                return None
+
+            title = title.strip()
+            body = body.strip()
+
+            if len(body) < 100:
+                logger.warning(f"URL Context extraction returned insufficient body ({len(body)} chars) for {url}")
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="url_context_extraction",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    finish_reason=finish_reason,
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"Insufficient article content extracted from URL Context ({len(body)} chars, minimum 100 required)",
+                    provider_request_id=req_id,
+                )
+                return None
+
+            # Success: all validations passed!
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation="url_context_extraction",
+                started_at=t0,
+                completed_at=t1,
+                success=True,
+                http_status=resp.status_code,
+                attempt=attempt,
+                input_chars=len(prompt),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                thought_tokens=th_tok,
+                finish_reason=finish_reason,
+                requested_max_output_tokens=current_max_tokens,
+                provider_request_id=req_id,
+                metadata={
+                    "url": url,
+                    "retrieval_status": "URL_RETRIEVAL_STATUS_SUCCESS",
+                    "title_chars": len(title),
+                    "body_chars": len(body),
+                },
+            )
+            return {"title": title, "body": body}
+
+        except Exception as e:
+            t1 = datetime.now(UTC)
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
@@ -650,124 +933,19 @@ URL: {url}"""
                 started_at=t0,
                 completed_at=t1,
                 success=False,
-                http_status=resp.status_code,
+                attempt=attempt,
                 input_chars=len(prompt),
-                prompt_tokens=p_tok,
-                completion_tokens=c_tok,
-                total_tokens=t_tok,
-                thought_tokens=th_tok,
-                finish_reason=finish_reason,
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error=f"Malformed JSON returned from URL Context: {json_err}",
-                provider_request_id=req_id,
+                requested_max_output_tokens=current_max_tokens,
+                error=e,
             )
+            logger.warning(f"URL Context extraction error on attempt {attempt}: {e}")
+            if attempt < max_attempts:
+                time.sleep(backoff)
+                backoff *= 2.0
+                continue
             return None
 
-        if not isinstance(data, dict):
-            _record_gemini_interaction(
-                job_id=job_id,
-                model=model,
-                operation="url_context_extraction",
-                started_at=t0,
-                completed_at=t1,
-                success=False,
-                http_status=resp.status_code,
-                input_chars=len(prompt),
-                prompt_tokens=p_tok,
-                completion_tokens=c_tok,
-                total_tokens=t_tok,
-                thought_tokens=th_tok,
-                finish_reason=finish_reason,
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error="URL Context response is not a JSON object",
-                provider_request_id=req_id,
-            )
-            return None
-
-        title = data.get("title")
-        body = data.get("body")
-        if not isinstance(title, str) or not isinstance(body, str):
-            _record_gemini_interaction(
-                job_id=job_id,
-                model=model,
-                operation="url_context_extraction",
-                started_at=t0,
-                completed_at=t1,
-                success=False,
-                http_status=resp.status_code,
-                input_chars=len(prompt),
-                prompt_tokens=p_tok,
-                completion_tokens=c_tok,
-                total_tokens=t_tok,
-                thought_tokens=th_tok,
-                finish_reason=finish_reason,
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error="URL Context title or body has invalid type",
-                provider_request_id=req_id,
-            )
-            return None
-
-        title = title.strip()
-        body = body.strip()
-
-        if len(body) < 100:
-            logger.warning(f"URL Context extraction returned insufficient body ({len(body)} chars) for {url}")
-            _record_gemini_interaction(
-                job_id=job_id,
-                model=model,
-                operation="url_context_extraction",
-                started_at=t0,
-                completed_at=t1,
-                success=False,
-                http_status=resp.status_code,
-                input_chars=len(prompt),
-                prompt_tokens=p_tok,
-                completion_tokens=c_tok,
-                total_tokens=t_tok,
-                thought_tokens=th_tok,
-                finish_reason=finish_reason,
-                requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                error=f"Insufficient article content extracted from URL Context ({len(body)} chars, minimum 100 required)",
-                provider_request_id=req_id,
-            )
-            return None
-
-        _record_gemini_interaction(
-            job_id=job_id,
-            model=model,
-            operation="url_context_extraction",
-            started_at=t0,
-            completed_at=t1,
-            success=True,
-            http_status=resp.status_code,
-            input_chars=len(prompt),
-            prompt_tokens=p_tok,
-            completion_tokens=c_tok,
-            total_tokens=t_tok,
-            thought_tokens=th_tok,
-            finish_reason=finish_reason,
-            requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-            provider_request_id=req_id,
-            metadata={"url": url, "title_chars": len(title), "body_chars": len(body)},
-        )
-        return {"title": title, "body": body}
-
-    except Exception as e:
-        t1 = datetime.now(UTC)
-        _record_gemini_interaction(
-            job_id=job_id,
-            model=model,
-            operation="url_context_extraction",
-            started_at=t0,
-            completed_at=t1,
-            success=False,
-            input_chars=len(prompt),
-            requested_max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-            error=e,
-        )
-        logger.warning(f"URL Context extraction error: {e}")
-        return None
-        return None
+    return None
 
 def normalize_research_dossier(
     source_text: str,

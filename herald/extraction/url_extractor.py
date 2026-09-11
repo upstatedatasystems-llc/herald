@@ -49,6 +49,10 @@ BOT_PAYWALL_MARKERS = (
     "access denied",
     "security check",
     "captcha",
+    "recaptcha",
+    "hcaptcha",
+    "turnstile",
+    "cf-turnstile",
     "bot detection",
     "paywall",
     "subscribe to read",
@@ -60,7 +64,7 @@ BOT_PAYWALL_MARKERS = (
 def _detect_block_reason(marker: str) -> str:
     """Classify bot/paywall marker into structured BlockReason."""
     m = marker.lower()
-    if "captcha" in m or "security check" in m:
+    if "captcha" in m or "security check" in m or "turnstile" in m or "recaptcha" in m or "hcaptcha" in m:
         return BlockReason.CAPTCHA
     if "paywall" in m or "subscribe" in m:
         return BlockReason.PAYWALL
@@ -318,9 +322,30 @@ def extract_article_from_url(
                         )
 
                     if response.status_code == 403:
+                        err_chunks = []
+                        err_bytes = 0
+                        probe_limit = min(51200, max_bytes)
+                        try:
+                            for chunk in response.iter_bytes(chunk_size=4096):
+                                if time.monotonic() - start_time > timeout_seconds:
+                                    break
+                                err_bytes += len(chunk)
+                                err_chunks.append(chunk)
+                                if err_bytes >= probe_limit:
+                                    break
+                        except Exception:
+                            pass
+                        err_text = b"".join(err_chunks).decode("utf-8", errors="replace").lower()
+
+                        detected_reason = BlockReason.PUBLIC_RETRIEVAL_BLOCK
+                        for marker in BOT_PAYWALL_MARKERS:
+                            if marker in err_text:
+                                detected_reason = _detect_block_reason(marker)
+                                break
+
                         raise SourceAccessBlockedError(
                             f"Publisher blocked automated retrieval (HTTP 403): {current_url}",
-                            block_reason=BlockReason.PUBLIC_RETRIEVAL_BLOCK,
+                            block_reason=detected_reason,
                         )
 
                     if response.status_code != 200:
