@@ -32,22 +32,30 @@ def print_startup_banner():
     except Exception:
         tts_ok = False
 
-    from herald.ai.registry import create_provider, is_provider_configured
+    from herald.ai.registry import (
+        create_provider,
+        get_default_model,
+        get_descriptor,
+        is_provider_configured,
+    )
     from herald.ai.resolution import get_server_default_chain
 
     ai_status = "Not configured (Literal mode only)"
     try:
         def_chain = get_server_default_chain()
-        primary_c = def_chain[0]
-        if primary_c.provider_id == "literal":
+        primary_id = def_chain[0] if def_chain else "literal"
+        if primary_id == "literal":
             ai_status = "Literal (Zero-AI narration)"
-        elif not is_provider_configured(primary_c.provider_id):
-            ai_status = f"{primary_c.provider_id.capitalize()} — Not configured on server"
+        elif not is_provider_configured(primary_id):
+            desc = get_descriptor(primary_id)
+            p_name = desc.display_name if desc else primary_id.capitalize()
+            ai_status = f"{p_name} — Not configured on server"
         else:
-            ai_provider = create_provider(primary_c.provider_id, model_id=primary_c.model_id)
+            default_model = get_default_model(primary_id)
+            ai_provider = create_provider(primary_id, model_id=default_model)
             conn_res = ai_provider.check_connection(timeout_seconds=4.0)
             if conn_res.get("connected"):
-                ai_status = f"{ai_provider.provider_name} — Connected ({conn_res.get('model', primary_c.model_id)})"
+                ai_status = f"{ai_provider.provider_name} — Connected ({conn_res.get('model', default_model)})"
             else:
                 ai_status = f"{ai_provider.provider_name} — FAILED ({conn_res.get('error')})"
     except Exception as e:

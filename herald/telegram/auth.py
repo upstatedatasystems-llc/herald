@@ -425,6 +425,7 @@ def set_user_default_voice(
 
     user.updated_at = datetime.now(UTC)
     db.commit()
+    logger.info(f"User default voice updated: {user.default_voice}")
     return True
 
 
@@ -452,6 +453,7 @@ def set_user_default_speed(
 
     user.updated_at = datetime.now(UTC)
     db.commit()
+    logger.info(f"User default speed updated: {user.default_speed}")
     return True
 
 
@@ -477,6 +479,7 @@ def set_user_default_mode(
 
     user.updated_at = datetime.now(UTC)
     db.commit()
+    logger.info(f"User default mode updated: {user.default_mode}")
     return True
 
 
@@ -540,6 +543,8 @@ def set_user_ai_provider_chain(
 
     user.updated_at = datetime.now(UTC)
     db.commit()
+    chain_str = " -> ".join(clean_chain) if clean_chain else "none"
+    logger.info(f"User AI chain updated: {chain_str}")
     return True
 
 
@@ -579,5 +584,7 @@ def set_user_ai_model_for_provider(
     user.ai_models_by_provider_json = models_map if models_map else None
     user.updated_at = datetime.now(UTC)
     db.commit()
+    model_str = m_clean if m_clean is not None else "default"
+    logger.info(f"User model updated: {p_clean} -> {model_str}")
     return True
 

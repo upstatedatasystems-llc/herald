@@ -185,17 +185,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     user_prefs: dict[str, Any] | None = None
     if telegram_user is not None:
         try:
-            from herald.db.models import TelegramUser
-            u_row = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == telegram_user).first()
-            if u_row:
-                user_prefs = {
-                    "default_mode": u_row.default_mode,
-                    "default_voice": u_row.default_voice,
-                    "default_speed": u_row.default_speed,
-                    "default_research_depth": u_row.default_research_depth,
-                    "ai_provider_chain_json": u_row.ai_provider_chain_json,
-                    "ai_models_by_provider_json": u_row.ai_models_by_provider_json,
-                }
+            from herald.telegram.auth import get_effective_user_preferences
+            user_prefs = get_effective_user_preferences(db, telegram_user)
         except Exception as ue:
             logger.warning(f"Could not load user preferences for telegram user {telegram_user}: {ue}")
 
@@ -225,6 +216,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             ),
         )
     mode_val = resolved.mode
+    frozen_chain_str = " -> ".join(f"{c.provider_id}:{c.model_id}" for c in resolved.ai_candidates)
+    logger.info(f"Podcast intake resolved AI chain: {frozen_chain_str} (mode: {resolved.mode})")
 
     # Validate AI provider requirement for non-literal modes
     is_ai_mode = mode_val in (
@@ -335,6 +328,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             db.add(job)
             db.commit()
             db.refresh(job)
+            logger.info(f"Podcast job {job.id} enqueued with frozen AI chain: {frozen_chain_str}")
         except Exception as e:
             db.rollback()
             if req.transport == "telegram" and telegram_chat and telegram_msg:
@@ -829,6 +823,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             db.add(job)
             db.commit()
             db.refresh(job)
+            logger.info(f"Podcast job {job.id} enqueued with frozen AI chain: {frozen_chain_str}")
         except Exception as e:
             db.rollback()
             # Handle concurrent race if another process created this Telegram job
