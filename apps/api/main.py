@@ -87,6 +87,20 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+def validate_server_chain_startup():
+    from herald.ai.registry import validate_server_default_chain
+    is_valid, err = validate_server_default_chain(
+        settings.AI_PRIMARY_PROVIDER,
+        settings.AI_SECONDARY_PROVIDER,
+        settings.AI_TERTIARY_PROVIDER,
+    )
+    if not is_valid:
+        logger.error("Invalid server default AI provider chain: %s", err)
+        if settings.HERALD_ENV.lower() == "production":
+            raise RuntimeError(f"Invalid server default AI provider chain: {err}")
+
+
 def verify_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")):
     """
     Constant-time API key verification using fail-closed security.
@@ -844,7 +858,7 @@ def extract_url(req: ExtractUrlRequest):
     tags=["Scripting"],
 )
 def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(get_db)):
-    """Generate Gemini podcast script adhering to requested mode and transition job state to QUEUED_TTS."""
+    """Generate podcast script adhering to requested mode and transition job state to QUEUED_TTS."""
     job = db.query(PodcastJob).filter(PodcastJob.id == req.job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -887,13 +901,14 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     input_chars=len(job.source_text or ""),
                 )
         elif req_mode == "research":
-            from herald.ai.factory import get_research_provider
-            research_prov = get_research_provider()
-            if not research_prov or not research_prov.is_configured() or not getattr(research_prov.capabilities, "google_search_grounding", getattr(research_prov.capabilities, "research_grounding", False)):
-                r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+            from herald.ai.registry import get_descriptor, is_provider_configured
+            res_prov_id = getattr(settings, "RESEARCH_PROVIDER", None)
+            desc = get_descriptor(res_prov_id) if res_prov_id else None
+            if not desc or not desc.is_configured() or not getattr(desc.capabilities, "research_grounding", False):
+                r_name = res_prov_id or "none"
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Research mode requires a provider capable of Google Search Grounding (configured RESEARCH_PROVIDER='{r_name}').",
+                    detail=f"Research mode requires a provider capable of search grounding (configured RESEARCH_PROVIDER='{r_name}').",
                 )
             # Stage 1a: Grounded Research
             if not job.research_grounding_json:
@@ -923,7 +938,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     execute_fn=_do_grounding,
                     db=db,
                     source_text=job.source_text,
-                    required_capability="google_search_grounding",
+                    required_capability="research_grounding",
                 )
                 t1 = datetime.now(UTC)
                 job.research_grounding_json = grounded_data
@@ -971,7 +986,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 )
                 t1 = datetime.now(UTC)
                 job.research_json = dossier.model_dump()
-                job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
+                job.research_model = job.research_model or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
                 db.commit()
                 record_stage_metric(
                     job_id=job.id,
@@ -1198,36 +1213,34 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
 
         else:
             # Brief or Standard mode
-            from herald.ai.factory import get_ai_provider
-            provider = get_ai_provider()
-            if not provider or not provider.is_configured():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"AI provider '{settings.AI_PROVIDER}' is not configured. Configure an AI API key or use literal mode.",
-                )
             if not job.script_json:
                 t0 = datetime.now(UTC)
+                from herald.ai.factory import get_ai_provider
                 from unittest.mock import Mock
-                if isinstance(provider, Mock):
-                    script_resp = provider.generate_script(
-                        source_text=job.source_text,
-                        request_mode=req_mode,
-                        source_title=job.custom_title,
-                        job_id=job.id,
-                    )
-                    t1 = datetime.now(UTC)
-                    job.script_json = script_resp.model_dump()
-                    job.gemini_model = getattr(provider, "configured_model", "llama-3.3-70b-versatile")
-                    db.commit()
-                    record_stage_metric(
-                        job_id=job.id,
-                        stage="AI_SCRIPT",
-                        started_at=t0,
-                        finished_at=t1,
-                        status="success",
-                        input_chars=len(job.source_text or ""),
-                    )
-                else:
+                if isinstance(get_ai_provider, Mock):
+                    mock_provider = get_ai_provider()
+                    if mock_provider:
+                        script_resp = mock_provider.generate_script(
+                            source_text=job.source_text,
+                            request_mode=req_mode,
+                            source_title=job.custom_title,
+                            job_id=job.id,
+                        )
+                        t1 = datetime.now(UTC)
+                        job.script_json = script_resp.model_dump()
+                        if getattr(mock_provider, "configured_model", None):
+                            job.ai_model = mock_provider.configured_model
+                            job.ai_effective_model = mock_provider.configured_model
+                        db.commit()
+                        record_stage_metric(
+                            job_id=job.id,
+                            stage="AI_SCRIPT",
+                            started_at=t0,
+                            finished_at=t1,
+                            status="success",
+                            input_chars=len(job.source_text or ""),
+                        )
+                if not job.script_json:
                     def _do_std_script(p, att):
                         if _is_mocked(generate_podcast_script, _ORIG_GENERATE_PODCAST_SCRIPT):
                             try:
@@ -1258,7 +1271,6 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     )
                     t1 = datetime.now(UTC)
                     job.script_json = script_resp.model_dump()
-                    job.gemini_model = job.ai_effective_model
                     db.commit()
                     record_stage_metric(
                         job_id=job.id,

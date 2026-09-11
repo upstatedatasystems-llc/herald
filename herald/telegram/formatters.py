@@ -379,7 +379,7 @@ def format_provider_models_select(user_prefs: dict, provider_id: str) -> tuple[s
         token = get_model_token(provider_id, m.model_id)
         keyboard.append([{
             "text": f"{mark}{m.display_name}",
-            "callback_data": f"h3:m:set:{token}",
+            "callback_data": f"h3:m:set:{provider_id}:{token}",
         }])
 
     keyboard.append([{"text": "← Back to AI Models", "callback_data": "h3:settings:models"}])

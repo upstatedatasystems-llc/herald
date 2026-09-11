@@ -12,6 +12,10 @@ from pathlib import Path
 FORBIDDEN_VENDOR_MODULES = {
     "google.genai",
     "google.generativeai",
+    "openai",
+    "groq",
+    "anthropic",
+    "mistralai",
     "herald.ai.gemini_provider",
     "herald.ai.groq_provider",
     "herald.ai.cloudflare_provider",
@@ -63,3 +67,39 @@ def test_api_main_vendor_neutrality():
     for forbidden in FORBIDDEN_VENDOR_MODULES:
         violating = [m for m in imported_modules if m == forbidden or m.startswith(f"{forbidden}.")]
         assert not violating, f"API main imports forbidden vendor module: {violating}"
+
+
+def test_worker_main_vendor_neutrality():
+    """Verify apps/worker/main.py contains zero direct vendor provider imports."""
+    worker_path = Path("apps/worker/main.py")
+    assert worker_path.exists(), "apps/worker/main.py must exist"
+
+    imported_modules = get_imports_from_file(worker_path)
+
+    for forbidden in FORBIDDEN_VENDOR_MODULES:
+        violating = [m for m in imported_modules if m == forbidden or m.startswith(f"{forbidden}.")]
+        assert not violating, f"Worker main imports forbidden vendor module: {violating}"
+
+
+def test_failover_vendor_neutrality():
+    """Verify herald/ai/failover.py contains zero direct vendor provider imports."""
+    fo_path = Path("herald/ai/failover.py")
+    assert fo_path.exists(), "herald/ai/failover.py must exist"
+
+    imported_modules = get_imports_from_file(fo_path)
+
+    for forbidden in FORBIDDEN_VENDOR_MODULES:
+        violating = [m for m in imported_modules if m == forbidden or m.startswith(f"{forbidden}.")]
+        assert not violating, f"Failover module imports forbidden vendor module: {violating}"
+
+
+def test_resolution_vendor_neutrality():
+    """Verify herald/ai/resolution.py contains zero direct vendor provider imports."""
+    res_path = Path("herald/ai/resolution.py")
+    assert res_path.exists(), "herald/ai/resolution.py must exist"
+
+    imported_modules = get_imports_from_file(res_path)
+
+    for forbidden in FORBIDDEN_VENDOR_MODULES:
+        violating = [m for m in imported_modules if m == forbidden or m.startswith(f"{forbidden}.")]
+        assert not violating, f"Resolution module imports forbidden vendor module: {violating}"

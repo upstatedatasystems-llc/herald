@@ -65,7 +65,40 @@ def test_migration_017_upgrade_and_downgrade(tmp_path):
             )
         )
 
-        # Job 4: Telegram user with no stored preference
+        # Job 5: Explicit generation snapshot ai_model winning over legacy gemini_model
+        snap_json = json.dumps({"ai_provider": "openai", "ai_model": "gpt-4o"})
+        conn.execute(
+            text(
+                "INSERT INTO podcast_jobs (id, transport, source_hash, source_text, status, gemini_model, generation_settings_json, created_at, updated_at) "
+                f"VALUES ('job-snap-model-wins', 'telegram', 'hash5', 'Source 5', 'COMPLETE', 'gemini-2.5-flash', '{snap_json}', '2026-09-08 12:05:00', '2026-09-08 12:05:00')"
+            )
+        )
+
+        # Job 6: OpenRouter Llama
+        conn.execute(
+            text(
+                "INSERT INTO podcast_jobs (id, transport, source_hash, source_text, status, gemini_model, created_at, updated_at) "
+                "VALUES ('job-openrouter-llama', 'telegram', 'hash6', 'Source 6', 'COMPLETE', 'openrouter/meta-llama/llama-3.3-70b-instruct', '2026-09-08 12:06:00', '2026-09-08 12:06:00')"
+            )
+        )
+
+        # Job 7: Ollama Llama
+        conn.execute(
+            text(
+                "INSERT INTO podcast_jobs (id, transport, source_hash, source_text, status, gemini_model, created_at, updated_at) "
+                "VALUES ('job-ollama-llama', 'telegram', 'hash7', 'Source 7', 'COMPLETE', 'ollama/llama3.2', '2026-09-08 12:07:00', '2026-09-08 12:07:00')"
+            )
+        )
+
+        # Job 8: Ambiguous Llama without provider prefix or interaction evidence
+        conn.execute(
+            text(
+                "INSERT INTO podcast_jobs (id, transport, source_hash, source_text, status, gemini_model, created_at, updated_at) "
+                "VALUES ('job-ambiguous-llama', 'telegram', 'hash8', 'Source 8', 'COMPLETE', 'llama-3-8b', '2026-09-08 12:08:00', '2026-09-08 12:08:00')"
+            )
+        )
+
+        # User 1: Telegram user with no stored preference
         conn.execute(
             text(
                 "INSERT INTO telegram_users (id, telegram_user_id, telegram_chat_id, role, is_active, created_at, updated_at) "
@@ -119,6 +152,36 @@ def test_migration_017_upgrade_and_downgrade(tmp_path):
         assert r3[0] == "literal"
         assert r3[1] == "none"
         assert r3[2] == "literal"
+
+        # Job 5: Explicit snapshot ai_model ('gpt-4o') WINS over legacy gemini_model ('gemini-2.5-flash')
+        r5 = conn.execute(
+            text("SELECT ai_provider, ai_model, ai_effective_provider, ai_effective_model FROM podcast_jobs WHERE id = 'job-snap-model-wins'")
+        ).fetchone()
+        assert r5[0] == "openai"
+        assert r5[1] == "gpt-4o"
+        assert r5[2] == "openai"
+        assert r5[3] == "gpt-4o"
+
+        # Job 6: OpenRouter Llama
+        r6 = conn.execute(
+            text("SELECT ai_provider, ai_model FROM podcast_jobs WHERE id = 'job-openrouter-llama'")
+        ).fetchone()
+        assert r6[0] == "openrouter"
+        assert r6[1] == "openrouter/meta-llama/llama-3.3-70b-instruct"
+
+        # Job 7: Ollama Llama
+        r7 = conn.execute(
+            text("SELECT ai_provider, ai_model FROM podcast_jobs WHERE id = 'job-ollama-llama'")
+        ).fetchone()
+        assert r7[0] == "ollama"
+        assert r7[1] == "ollama/llama3.2"
+
+        # Job 8: Ambiguous Llama without provider prefix is marked 'ambiguous' (NOT false attribution)
+        r8 = conn.execute(
+            text("SELECT ai_provider, ai_model FROM podcast_jobs WHERE id = 'job-ambiguous-llama'")
+        ).fetchone()
+        assert r8[0] == "ambiguous"
+        assert r8[1] == "llama-3-8b"
 
         # User 1: Empty preferences MUST REMAIN NULL (User Correction 2)
         u1 = conn.execute(

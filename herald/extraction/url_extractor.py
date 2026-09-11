@@ -242,6 +242,20 @@ def _is_structural_boilerplate(tag) -> bool:
     return any(p in combined for p in STRUCTURAL_BOILERPLATE_PATTERNS)
 
 
+class ExtractionResult(tuple):
+    """
+    Subclass of tuple (title, text, canonical_url) that also exposes extraction sanity metrics.
+    Preserves exact 3-tuple unpacking compatibility across all callers.
+    """
+    def __new__(cls, title: str, text: str, canonical_url: str, metrics: dict | None = None):
+        obj = super().__new__(cls, (title, text, canonical_url))
+        obj.title = title
+        obj.text = text
+        obj.canonical_url = canonical_url
+        obj.metrics = metrics or {}
+        return obj
+
+
 def extract_article_from_url(
     url: str,
     timeout_seconds: float = 10.0,
@@ -249,10 +263,11 @@ def extract_article_from_url(
     max_redirects: int = 3,
     transport: httpx.BaseTransport | None = None,
     max_429_retries: int = 2,
-) -> tuple[str, str, str]:
+) -> ExtractionResult:
     """
     Safely extract article title, canonical text, and canonical URL from a public web page.
     Enforces SSRF validation, handles transient 429 retries, and detects bot/paywall blocks.
+    Returns an ExtractionResult tuple (title, text, canonical_url) with sanity metrics.
     """
     start_time = time.monotonic()
     current_url = url
@@ -470,4 +485,52 @@ def extract_article_from_url(
         except (SSRFVulnerabilityError, ArticleExtractionError):
             pass
 
-    return title, full_text, canonical_url
+    # Compute Extraction Sanity Metrics & Detect Obvious Pollution
+    pollution_detected = []
+    
+    # 1. Scripts/Styles pollution check
+    if "<script" in full_text.lower() or "<style" in full_text.lower() or "function()" in full_text:
+        pollution_detected.append("scripts_styles")
+        
+    # 2. Embedded application-state blobs check
+    if any(blob in html_lower for blob in ("__next_data__", "window.__initial_state__", "window.__apollo_state__", "window.__pinia")):
+        pollution_detected.append("embedded_application_state")
+        
+    # 3. Large JSON blobs check
+    for line in extracted_lines:
+        line_s = line.strip()
+        if (line_s.startswith("{") and line_s.endswith("}") and len(line_s) > 100) or (line_s.startswith("[") and line_s.endswith("]") and len(line_s) > 100):
+            try:
+                json.loads(line_s)
+                pollution_detected.append("large_json_blobs")
+                break
+            except Exception:
+                pass
+
+    # 4. Duplicate content sections
+    seen_paras = set()
+    dup_count = 0
+    for p in extracted_lines:
+        if len(p) > 50:
+            if p in seen_paras:
+                dup_count += 1
+            else:
+                seen_paras.add(p)
+    if dup_count >= 2:
+        pollution_detected.append("duplicate_content_sections")
+
+    # 5. Repeated navigation
+    nav_keywords = ("menu", "home", "search", "sign in", "subscribe", "about us", "contact", "privacy policy")
+    short_nav_matches = sum(1 for p in extracted_lines if len(p) < 40 and any(k in p.lower() for k in nav_keywords))
+    if short_nav_matches >= 3:
+        pollution_detected.append("repeated_navigation")
+
+    metrics = {
+        "fetched_bytes": len(content_bytes),
+        "extracted_chars": len(full_text),
+        "normalized_chars": len(full_text.strip()),
+        "paragraph_count": len(extracted_lines),
+        "pollution_detected": sorted(list(set(pollution_detected))),
+    }
+
+    return ExtractionResult(title, full_text, canonical_url, metrics=metrics)

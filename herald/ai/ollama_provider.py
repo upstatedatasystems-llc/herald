@@ -6,16 +6,23 @@ Generates structured podcast scripts using local Ollama JSON chat/generate API.
 import json
 import logging
 import re
-import time
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from herald.ai.base import AIProvider, load_system_prompt
+from herald.ai.errors import (
+    AIClientTimeoutError,
+    AIModelUnavailableError,
+    AIProviderError,
+    AIProviderUnavailableError,
+    AISchemaInvalidError,
+)
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
+from herald.services.redaction import sanitize_error
 
 logger = logging.getLogger("herald.ai.ollama")
 
@@ -136,84 +143,141 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
 """
 
         url = f"{self._base_url}/api/chat"
-        max_attempts = settings.GEMINI_RETRY_COUNT
-        backoff = 2.0
+        attempt = 1
+        t0 = datetime.now(UTC)
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": f"{system_prompt}{json_instruction}"},
+                {"role": "user", "content": user_content},
+            ],
+            "format": "json",
+            "stream": False,
+        }
 
-        for attempt in range(1, max_attempts + 1):
-            t0 = datetime.now(UTC)
-            try:
-                payload = {
-                    "model": self._model,
-                    "messages": [
-                        {"role": "system", "content": f"{system_prompt}{json_instruction}"},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "format": "json",
-                    "stream": False,
-                }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload)
+        except httpx.TimeoutException as timeout_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=timeout_err,
+                metadata={"attempt": attempt, "mode": mode_clean, "timeout_seconds": settings.effective_ai_timeout_seconds},
+            )
+            raise AIClientTimeoutError(
+                f"Ollama client timeout connecting to {self._model}",
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+            )
+        except Exception as net_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=net_err,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            _, safe_net_err = sanitize_error(net_err)
+            raise AIProviderError(
+                f"Ollama network failure: {safe_net_err}",
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+            )
 
-                from herald.concurrency import get_semaphores
-                with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
-                    resp = client.post(url, json=payload)
-
-                if resp.status_code != 200:
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider="ollama",
-                        model=self._model,
-                        operation="script_generation",
-                        started_at=t0,
-                        completed_at=datetime.now(UTC),
-                        success=False,
-                        error=f"HTTP {resp.status_code}: {resp.text}",
-                        metadata={"attempt": attempt, "mode": mode_clean},
-                    )
-                    if attempt < max_attempts:
-                        time.sleep(backoff)
-                        backoff *= 2.0
-                        continue
-                    raise RuntimeError(f"Ollama API error ({resp.status_code}): {resp.text}")
-
-                result_json = resp.json()
-                msg = result_json.get("message", {})
-                raw_content = msg.get("content", "")
-                script_dict = _extract_json_block(raw_content)
-
-                p_tok = result_json.get("prompt_eval_count")
-                c_tok = result_json.get("eval_count")
-                t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
-
-                record_ai_interaction(
-                    job_id=job_id,
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            if resp.status_code == 404:
+                raise AIModelUnavailableError(
+                    f"Ollama model '{self._model}' not found: HTTP 404",
                     provider="ollama",
                     model=self._model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=datetime.now(UTC),
-                    success=True,
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    metadata={"attempt": attempt, "mode": mode_clean},
+                    http_status=404,
                 )
-
-                return PodcastScriptResponse(**script_dict)
-
-            except Exception as e:
-                record_ai_interaction(
-                    job_id=job_id,
+            if resp.status_code >= 500:
+                raise AIProviderUnavailableError(
+                    f"Ollama API returned HTTP {resp.status_code}",
                     provider="ollama",
                     model=self._model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=datetime.now(UTC),
-                    success=False,
-                    error=e,
-                    metadata={"attempt": attempt, "mode": mode_clean},
+                    http_status=resp.status_code,
                 )
-                if attempt == max_attempts:
-                    raise RuntimeError(f"Ollama script generation failed: {e}")
-                time.sleep(backoff)
-                backoff *= 2.0
+            raise AIProviderError(
+                f"Ollama API error ({resp.status_code}): {resp.text[:300]}",
+                provider="ollama",
+                model=self._model,
+                http_status=resp.status_code,
+            )
 
-        raise RuntimeError("Failed to generate podcast script from Ollama after retries.")
+        result_json = resp.json()
+        msg = result_json.get("message", {})
+        raw_content = msg.get("content", "")
+
+        p_tok = result_json.get("prompt_eval_count")
+        c_tok = result_json.get("eval_count")
+        t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
+
+        try:
+            script_dict = _extract_json_block(raw_content)
+            parsed_script = PodcastScriptResponse(**script_dict)
+
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            return parsed_script
+        except Exception as parse_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=parse_err,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            raise AISchemaInvalidError(
+                f"Ollama response schema invalid: {parse_err}",
+                provider="ollama",
+                model=self._model,
+            )

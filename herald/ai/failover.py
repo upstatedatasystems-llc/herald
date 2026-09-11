@@ -9,20 +9,15 @@ Enforces:
 6. Safe preflight logging and failover telemetry with zero secret/source leakage.
 """
 
-import json
 import logging
 import time
-from datetime import UTC, datetime
 from typing import Any, Callable
 
 from herald.ai.adaptation import adapt_source_text
-from herald.ai.capabilities import ProviderCapabilities
 from herald.ai.errors import (
     AIChainExhaustedError,
     AIContextExceededError,
-    AIProviderError,
     AIRequestTooLargeError,
-    AIUnsupportedCapabilityError,
 )
 from herald.ai.policy import (
     ActionType,
@@ -258,7 +253,6 @@ def execute_with_failover(
 
         # 4. Same-provider execution & bounded retry loop
         attempt = 1
-        provider_succeeded = False
 
         while attempt <= max_attempts:
             # Preflight checks
@@ -286,11 +280,8 @@ def execute_with_failover(
                         source_title=getattr(job, "custom_title", None),
                         db=db,
                     )
-                    if hasattr(job, "source_text"):
-                        job.source_text = adapted_text
+                    # Item 17: Canonical job.source_text is NEVER overwritten by adapted content
                     source_text = adapted_text
-                    if db:
-                        db.commit()
                     continue
                 except Exception as adapt_err:
                     logger.warning(f"Preflight adaptation failed on {p_id}/{m_id}: {adapt_err}")
@@ -319,8 +310,8 @@ def execute_with_failover(
                 )
                 return result
 
-            except (TypeError, AttributeError, NameError, KeyError, IndexError, SyntaxError, AssertionError):
-                # User Correction 26: Programmer errors and internal application bugs must never trigger failover
+            except (TypeError, AttributeError, NameError, KeyError, IndexError, SyntaxError, AssertionError, ValueError):
+                # Programmer errors and internal application bugs must never trigger failover
                 raise
             except Exception as e:
                 classified = classify_error(e, provider=p_id, model=m_id, operation=operation)
@@ -349,11 +340,8 @@ def execute_with_failover(
                             source_title=getattr(job, "custom_title", None),
                             db=db,
                         )
-                        if hasattr(job, "source_text"):
-                            job.source_text = adapted_text
+                        # Item 17: Canonical job.source_text is NEVER overwritten by adapted content
                         source_text = adapted_text
-                        if db:
-                            db.commit()
                         attempt += 1
                         continue
                     except Exception as adapt_err:
@@ -409,18 +397,32 @@ def execute_with_failover(
                     break  # Break inner loop to start with next candidate
 
                 else:
-                    # FAIL_FINAL: record failure, advance cursor, and break inner loop
+                    # Item 9: FAIL_FINAL terminates immediately without advancing cursor!
                     failures_log.append({
                         "provider": p_id,
                         "model": m_id,
                         "reason": classified.category,
                         "detail": classified.safe_detail,
                     })
-                    curr_index += 1
-                    job.ai_failover_index = curr_index
                     if db:
-                        db.commit()
-                    break
+                        record_job_diagnostic_event(
+                            job_id=job.id,
+                            level="ERROR",
+                            component="ai_failover",
+                            event_type="AI_FAIL_FINAL",
+                            message=f"Terminal failure on {p_id}: {decision.reason}",
+                            metadata={
+                                "provider": p_id,
+                                "model": m_id,
+                                "category": classified.category,
+                                "safe_detail": classified.safe_detail,
+                                "attempt": attempt,
+                            },
+                            db=db,
+                        )
+                    if len(failures_log) > 1 or curr_index > 0 or (len(chain) > 1 and not has_next):
+                        break
+                    raise classified
 
         # If inner loop finished without success and didn't already advance
         if curr_index == prev_index:

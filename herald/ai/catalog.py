@@ -54,13 +54,25 @@ def get_models_for_provider(
     # Optional live discovery if provider is configured and supports discovery
     if desc.supports_model_discovery and desc.is_configured():
         try:
-            # We can query live models if provider client supports it
             from herald.ai.registry import create_provider
             prov_instance = create_provider(p_id)
             if hasattr(prov_instance, "discover_models"):
                 live_models = prov_instance.discover_models()
                 if live_models:
-                    models = live_models
+                    # Verified metadata has precedence for limits and display names
+                    verified_by_id = {m.model_id: m for m in desc.catalog_models}
+                    merged = []
+                    seen = set()
+                    for lm in live_models:
+                        if lm.model_id in verified_by_id:
+                            merged.append(verified_by_id[lm.model_id])
+                        else:
+                            merged.append(lm)
+                        seen.add(lm.model_id)
+                    for cm in desc.catalog_models:
+                        if cm.model_id not in seen:
+                            merged.append(cm)
+                    models = merged
         except Exception as e:
             logger.debug(f"Live model discovery failed for {p_id}, using static catalog: {e}")
 
@@ -75,6 +87,7 @@ def resolve_model_token(arg1: str, arg2: str | None = None) -> Any:
     """
     Statelessly resolve a model token back to its model ID or (provider_id, model_id).
     Survives bot process restarts because tokens are deterministic hashes.
+    Enforces strict collision rejection: if multiple models match, rejects as ambiguous.
     Supports:
       resolve_model_token(provider_id, token) -> model_id (or None)
       resolve_model_token(token) -> (provider_id, model_id) (or None)
@@ -85,21 +98,38 @@ def resolve_model_token(arg1: str, arg2: str | None = None) -> Any:
         p_id = arg1.lower().strip()
         token_clean = arg2.strip().lower()
         models = get_models_for_provider(p_id)
-        for m in models:
-            if m.selectable:
-                gen_tok = generate_model_token(p_id, m.model_id).lower()
-                if gen_tok == token_clean:
-                    return m.model_id
+        matches = [
+            m.model_id
+            for m in models
+            if m.selectable and generate_model_token(p_id, m.model_id).lower() == token_clean
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                f"Model token collision detected for provider '{p_id}' with token '{token_clean}': {matches}"
+            )
+            return None
         return None
     else:
         token_clean = arg1.strip().lower()
+        matching_candidates = []
         for p_id in list_registered_providers():
             models = get_models_for_provider(p_id)
-            for m in models:
-                if m.selectable:
-                    gen_tok = generate_model_token(p_id, m.model_id).lower()
-                    if gen_tok == token_clean:
-                        return (p_id, m.model_id)
+            matches = [
+                m.model_id
+                for m in models
+                if m.selectable and generate_model_token(p_id, m.model_id).lower() == token_clean
+            ]
+            for mid in matches:
+                matching_candidates.append((p_id, mid))
+        if len(matching_candidates) == 1:
+            return matching_candidates[0]
+        if len(matching_candidates) > 1:
+            logger.warning(
+                f"Ambiguous model token across providers for token '{token_clean}': {matching_candidates}"
+            )
+            return None
         return None
 
 

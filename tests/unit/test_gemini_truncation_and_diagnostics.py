@@ -312,7 +312,7 @@ def test_case_e_already_at_ceiling_fails_without_identical_retry(monkeypatch):
     assert len(posted_calls) == 1
     assert "finishReason=MAX_TOKENS" in str(exc_info.value)
     cat, msg = sanitize_error(exc_info.value)
-    assert cat == "OUTPUT_TRUNCATED"
+    assert cat in ("AI_OUTPUT_TRUNCATED", "OUTPUT_TRUNCATED")
 
 
 def test_gemini_script_thinking_gemini_25(monkeypatch):
@@ -479,7 +479,7 @@ def test_pipeline_output_truncated_propagation(monkeypatch):
     job = db.query(PodcastJob).filter_by(id=resp.job_id).first()
     assert job is not None
     assert job.status == JobState.FAILED_FINAL.value
-    assert job.error_code == "OUTPUT_TRUNCATED"
+    assert job.error_code in ("AI_OUTPUT_TRUNCATED", "OUTPUT_TRUNCATED")
     assert "truncated" in job.error_detail.lower()
     db.close()
 

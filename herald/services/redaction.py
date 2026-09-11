@@ -304,24 +304,28 @@ def sanitize_error(error: Exception | str | None) -> tuple[str, str]:
 
     sanitized_msg = redact_text(msg)
 
-    # Classify error category
+    # Classify error category - check structured category first (Item 28)
     lower_msg = sanitized_msg.lower()
-    if hasattr(error, "error_category") and getattr(error, "error_category"):
+    if hasattr(error, "category") and getattr(error, "category"):
+        cat = getattr(error, "category")
+    elif hasattr(error, "error_category") and getattr(error, "error_category"):
         cat = getattr(error, "error_category")
     elif "modelunavailable" in cat.lower() or "model is unavailable" in lower_msg:
         cat = "AI_MODEL_UNAVAILABLE"
     elif "outputtruncated" in cat.lower() or "truncated" in lower_msg or "max_tokens" in lower_msg or "token limit" in lower_msg:
-        cat = "OUTPUT_TRUNCATED"
-    elif "auth" in lower_msg or "401" in lower_msg or "403" in lower_msg or "permission" in lower_msg or "api key" in lower_msg:
-        cat = "AUTHENTICATION_FAILED"
+        cat = "AI_OUTPUT_TRUNCATED"
+    elif "auth" in lower_msg or "401" in lower_msg or "permission" in lower_msg or "api key" in lower_msg:
+        cat = "AI_AUTH_FAILED"
+    elif "403" in lower_msg:
+        cat = "AI_PERMISSION_DENIED"
     elif "429" in lower_msg or "quota" in lower_msg or "rate limit" in lower_msg:
-        cat = "RATE_LIMIT_EXCEEDED"
+        cat = "AI_RATE_LIMITED"
     elif "timeout" in lower_msg or "timed out" in lower_msg:
-        cat = "TIMEOUT"
+        cat = "AI_PROVIDER_TIMEOUT"
     elif "validation" in lower_msg or "schema" in lower_msg or "json" in lower_msg:
-        cat = "SCHEMA_VALIDATION_ERROR"
+        cat = "AI_SCHEMA_INVALID"
     elif "network" in lower_msg or "connection" in lower_msg or "connect" in lower_msg:
-        cat = "NETWORK_ERROR"
+        cat = "AI_PROVIDER_UNAVAILABLE"
     elif "candidate" in lower_msg or "empty" in lower_msg or "no response" in lower_msg:
         cat = "EMPTY_RESPONSE"
 

@@ -226,7 +226,20 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         "ai_provider": getattr(req, "ai_provider", None),
         "ai_model": getattr(req, "ai_model", None),
     }
-    resolved = resolve_job_settings(request_params=req_params, user_prefs=user_prefs)
+    try:
+        resolved = resolve_job_settings(request_params=req_params, user_prefs=user_prefs)
+    except AIProviderError as e:
+        return HeraldResponse(
+            job_id="",
+            status=JobState.FAILED_FINAL.value,
+            request_mode=req.request_mode or "standard",
+            source_type=SourceType.TEXT.value,
+            is_duplicate=False,
+            message=(
+                f"Requested mode '{req.request_mode}' requires AI script generation, but an AI provider is not configured. "
+                f"Please configure an AI provider or use 'literal' mode."
+            ),
+        )
     mode_val = resolved.mode
 
     # Validate AI provider requirement for non-literal modes
@@ -238,12 +251,11 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     if mode_val == RequestMode.RESEARCH.value:
         has_grounding = any(
             is_provider_configured(c.provider_id)
-            and getattr(get_descriptor(c.provider_id).capabilities, "google_search_grounding", False)
+            and getattr(get_descriptor(c.provider_id).capabilities, "research_grounding", False)
             for c in resolved.ai_candidates
             if get_descriptor(c.provider_id)
         )
         if not has_grounding:
-            r_name = getattr(settings, "RESEARCH_PROVIDER", "gemini")
             return HeraldResponse(
                 job_id="",
                 status=JobState.FAILED_FINAL.value,
@@ -251,8 +263,8 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 source_type=SourceType.TEXT.value,
                 is_duplicate=False,
                 message=(
-                    f"Research mode requires a provider capable of Google Search Grounding (configured RESEARCH_PROVIDER='{r_name}'). "
-                    "Please configure GEMINI_API_KEY with RESEARCH_PROVIDER=gemini to use Research mode, or request 'standard' or 'brief' mode."
+                    "Research mode requires a configured AI provider capable of research grounding. "
+                    "Please configure an AI provider supporting research_grounding or request 'standard' or 'brief' mode."
                 ),
                 error_category="INCOMPATIBLE_PROVIDER_FOR_RESEARCH",
             )
@@ -332,7 +344,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             ai_effective_provider=resolved.primary_candidate.provider_id,
             ai_effective_model=resolved.primary_candidate.model_id,
             ai_failover_index=0,
-            gemini_model=resolved.primary_candidate.model_id,
+            research_model=resolved.research_model,
             generation_settings_json=resolved.to_snapshot(),
         )
         try:
@@ -366,16 +378,29 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             raise e
 
         try:
-            art_title, art_text, canon_url = extract_article_from_url(source_url)
+            art_res = extract_article_from_url(source_url)
+            art_title, art_text, canon_url = art_res
             canonical_title = art_title
             source_url = canon_url
             extracted_text = f"Title: {art_title}\n\n{art_text}" if art_title else art_text
+            
+            # Extraction Sanity Metrics (Item 20)
+            ex_metrics = getattr(art_res, "metrics", {})
+            extraction_meta = {
+                "extraction_method": "DIRECT_HTTP",
+                "url": source_url,
+                "fetched_bytes": ex_metrics.get("fetched_bytes", len(art_text.encode("utf-8"))),
+                "extracted_chars": ex_metrics.get("extracted_chars", len(art_text)),
+                "normalized_chars": ex_metrics.get("normalized_chars", len(art_text.strip())),
+                "paragraph_count": ex_metrics.get("paragraph_count", len(art_text.split("\n\n"))),
+                "pollution_detected": ex_metrics.get("pollution_detected", []),
+            }
             record_stage_metric(
                 job_id=job.id,
                 stage="URL_EXTRACTION",
                 status="SUCCESS",
                 started_at=datetime.now(UTC),
-                metadata_json={"extraction_method": "DIRECT_HTTP", "url": source_url},
+                metadata_json=extraction_meta,
             )
             record_job_diagnostic_event(
                 job.id,
@@ -383,7 +408,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 "extraction",
                 "EXTRACTION_SUCCESS",
                 f"Direct HTTP URL extraction succeeded ({len(art_text)} chars).",
-                metadata={"extraction_method": "DIRECT_HTTP", "url": source_url, "chars": len(art_text)},
+                metadata=extraction_meta,
                 db=db,
             )
         except SSRFVulnerabilityError as e:
@@ -759,16 +784,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         if ext_title and ext_title != "Herald Episode":
             resolved_title = ext_title
 
-    # 3. Settings snapshot and content candidate lookup
-    settings_snapshot = build_generation_settings_snapshot(
-        mode=mode_val,
-        research_depth=req.research_depth,
-        voice=req.custom_voice,
-        speed=req.custom_speed,
-        custom_title=resolved_title,
-        chunk_chars=req.tts_chunk_chars,
-        verify=req.verify_final_script,
-    )
+    # 3. Content candidate lookup
     prior_job = find_prior_content_candidate(
         db,
         source_hash=source_hash,
@@ -781,9 +797,13 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         job.source_url = source_url
         job.source_hash = source_hash
         job.source_text = deduped_text
-        job.custom_title = resolved_title
+        if resolved_title:
+            job.custom_title = resolved_title
+            if isinstance(job.generation_settings_json, dict):
+                updated_snap = dict(job.generation_settings_json)
+                updated_snap["custom_title"] = resolved_title
+                job.generation_settings_json = updated_snap
         job.rerun_of_job_id = prior_job.id if prior_job else None
-        job.generation_settings_json = settings_snapshot
         job.status = JobState.RECEIVED.value
         db.commit()
         db.refresh(job)
@@ -808,7 +828,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             tts_chunk_chars=resolved.chunk_chars,
             verify_final_script=resolved.verify,
             rerun_of_job_id=prior_job.id if prior_job else None,
-            generation_settings_json=settings_snapshot,
+            generation_settings_json=resolved.to_snapshot(),
             status=JobState.RECEIVED.value,
             ai_provider=resolved.primary_candidate.provider_id,
             ai_model=resolved.primary_candidate.model_id,
@@ -816,7 +836,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             ai_effective_provider=resolved.primary_candidate.provider_id,
             ai_effective_model=resolved.primary_candidate.model_id,
             ai_failover_index=0,
-            gemini_model=resolved.primary_candidate.model_id,
+            research_model=resolved.research_model,
         )
 
         try:
@@ -1211,7 +1231,6 @@ def execute_script_generation(
                 source_text=job.source_text,
             )
             job.script_json = script_resp.model_dump()
-            job.gemini_model = job.ai_effective_model
             db.commit()
             record_stage_metric(
                 job_id=job.id,

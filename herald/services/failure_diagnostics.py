@@ -446,26 +446,39 @@ def collect_failure_diagnostics(
             if provider is not None:
                 eff_prov = provider
             elif stage == "research":
-                eff_prov = getattr(settings, "RESEARCH_PROVIDER", "gemini")
+                eff_prov = getattr(settings, "RESEARCH_PROVIDER", None) or "gemini"
             else:
                 eff_prov = getattr(settings, "AI_PROVIDER", "none")
 
             if model is not None:
                 eff_model = model
-            elif stage == "research" or (eff_prov == "gemini" and operation and "research" in str(operation)):
-                eff_model = getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
-            elif eff_prov == "gemini":
-                eff_model = getattr(settings, "GEMINI_MODEL", "")
+            elif eff_prov and eff_prov != "none":
+                from herald.ai.registry import get_default_model
+                eff_model = get_default_model(eff_prov)
             else:
                 eff_model = ""
 
             status_code = getattr(error, "status_code", None) or getattr(error, "http_status", None)
-            is_retryable = error_cat in ("AI_RATE_LIMITED", "AI_TIMEOUT", "AI_SERVER_ERROR", "TEMPORARY_UNAVAILABLE")
+            if hasattr(error, "retryable") and isinstance(getattr(error, "retryable"), bool):
+                is_retryable = getattr(error, "retryable")
+            else:
+                is_retryable = error_cat in (
+                    "AI_RATE_LIMITED",
+                    "RATE_LIMIT_EXCEEDED",
+                    "AI_PROVIDER_TIMEOUT",
+                    "AI_CLIENT_TIMEOUT",
+                    "AI_TIMEOUT",
+                    "AI_PROVIDER_UNAVAILABLE",
+                    "AI_SERVER_ERROR",
+                    "TEMPORARY_UNAVAILABLE",
+                    "AI_OUTPUT_TRUNCATED",
+                )
             ai_diag = {
                 "provider": eff_prov,
                 "configured_model": eff_model,
                 "http_status": status_code,
                 "error_category": error_cat,
+                "category": error_cat,
                 "retryable": is_retryable,
             }
             if operation:

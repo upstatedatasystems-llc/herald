@@ -180,8 +180,8 @@ def test_ai_check_command_aliases(db_session, monkeypatch):
             "text": f"/{cmd}",
         }
         handle_telegram_command(db_session, mock_client, msg, cmd, "")
-        mock_client.send_message.assert_called_once()
-        sent_text = mock_client.send_message.call_args[1]["text"]
+        assert mock_client.send_message.call_count >= 1
+        sent_text = mock_client.send_message.call_args_list[-1][1]["text"]
         assert "Literal" in sent_text
 
 

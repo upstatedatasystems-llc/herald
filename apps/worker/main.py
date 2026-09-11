@@ -713,6 +713,19 @@ def run_single_worker_loop(worker_id: str = "herald-worker"):
 def run_worker_loop():
     """Main worker daemon startup & thread pool manager."""
     logger.info("Starting Herald Worker daemon...")
+
+    # Validate server default AI provider chain at startup boundary
+    from herald.ai.registry import validate_server_default_chain
+    is_valid, err = validate_server_default_chain(
+        settings.AI_PRIMARY_PROVIDER,
+        settings.AI_SECONDARY_PROVIDER,
+        settings.AI_TERTIARY_PROVIDER,
+    )
+    if not is_valid:
+        logger.error("Invalid server default AI provider chain: %s", err)
+        if settings.HERALD_ENV.lower() == "production":
+            raise RuntimeError(f"Invalid server default AI provider chain: {err}")
+
     concurrency_config = settings.get_concurrency_config()
     concurrency_config.log_diagnostics()
 

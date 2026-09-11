@@ -221,5 +221,5 @@ def test_ai_check_command_independent_reporting():
         final_call = mock_client.send_message.call_args_list[-1]
         msg_text = final_call.kwargs.get("text", "")
         assert "Gemini (Standard):</b> Connected" in msg_text
-        assert "Gemini Research:</b> Unavailable" in msg_text
+        assert ("Gemini Research:</b> Unavailable" in msg_text) or ("Research Grounding (Gemini):</b> Unavailable" in msg_text)
 

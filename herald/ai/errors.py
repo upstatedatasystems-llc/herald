@@ -30,7 +30,16 @@ class AIProviderError(RuntimeError):
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
         self.operation = operation
-        self.safe_detail = safe_detail or message
+        raw_detail = safe_detail or message or ""
+        try:
+            from herald.services.redaction import redact_text
+            cleaned_detail = redact_text(raw_detail)
+        except Exception:
+            cleaned_detail = raw_detail
+        cleaned_detail = " ".join(cleaned_detail.split())
+        if len(cleaned_detail) > 200:
+            cleaned_detail = cleaned_detail[:197] + "..."
+        self.safe_detail = cleaned_detail
 
     def to_dict(self) -> dict[str, Any]:
         return {

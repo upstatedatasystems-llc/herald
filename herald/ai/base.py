@@ -3,10 +3,10 @@ Abstract Base Class and Capabilities Contract for Herald AI Providers.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from herald.ai.capabilities import ProviderCapabilities
 from herald.ai.schema import PodcastScriptResponse
 
 
@@ -16,9 +16,6 @@ def load_system_prompt() -> str:
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return "Transform the provided source content into a podcast script JSON matching schema."
-
-
-from herald.ai.capabilities import ProviderCapabilities
 
 
 class AIProvider(ABC):

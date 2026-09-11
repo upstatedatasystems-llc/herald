@@ -4,14 +4,14 @@ Computes authoritative, typed ResolvedJobSettings with strict precedence:
 explicit request override > user preference > server/application default.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from herald.ai.catalog import validate_model_for_provider
+from herald.ai.errors import AIProviderError
 from herald.ai.registry import (
     get_default_model,
     get_descriptor,
-    is_provider_configured,
     validate_server_default_chain,
 )
 from herald.config import settings as global_settings
@@ -41,6 +41,8 @@ class ResolvedJobSettings:
     chunk_chars: int
     verify: bool
     ai_candidates: list[AIProviderCandidate] = field(default_factory=list)
+    research_provider: str | None = None
+    research_model: str | None = None
 
     @property
     def primary_candidate(self) -> AIProviderCandidate:
@@ -61,6 +63,8 @@ class ResolvedJobSettings:
             "ai_provider": self.primary_candidate.provider_id,
             "ai_model": self.primary_candidate.model_id,
             "ai_provider_chain": [c.to_dict() for c in self.ai_candidates],
+            "research_provider": self.research_provider,
+            "research_model": self.research_model,
         }
 
 
@@ -108,12 +112,14 @@ def resolve_job_settings(
     cfg = server_cfg or global_settings
 
     # 1. Resolve Mode
-    # Request explicit mode > user default_mode > server default_mode
     req_mode_raw = req.get("mode") or req.get("request_mode")
     usr_mode_raw = usr.get("default_mode")
-    cfg_mode_raw = getattr(cfg, "get_default_mode", lambda: "standard")()
+    mode_cand: str | None = None
+    if req_mode_raw:
+        mode_cand = str(req_mode_raw).lower().strip()
+    elif usr_mode_raw:
+        mode_cand = str(usr_mode_raw).lower().strip()
 
-    mode_cand = (req_mode_raw or usr_mode_raw or cfg_mode_raw or "standard").lower().strip()
     # Handle legacy 'detailed' alias
     if mode_cand == "detailed":
         mode_cand = RequestMode.RESEARCH.value
@@ -144,6 +150,65 @@ def resolve_job_settings(
     verify = bool(req.get("verify") if req.get("verify") is not None else req.get("verify_final_script", False))
 
     # 5. Resolve AI Provider Chain
+    req_provider = req.get("ai_provider")
+    usr_chain = usr.get("ai_provider_chain_json")
+    user_models_map = usr.get("ai_models_by_provider_json") or {}
+
+    # Determine base chain from user stored preferences or server defaults
+    base_chain: list[str] = []
+    if usr_chain and isinstance(usr_chain, list) and len(usr_chain) > 0:
+        base_chain = [str(p).lower().strip() for p in usr_chain if p]
+    else:
+        base_chain = get_server_default_chain(cfg)
+
+    raw_providers: list[str] = []
+    if req_provider:
+        primary_p = str(req_provider).lower().strip()
+        if primary_p == "literal":
+            raw_providers = ["literal"]
+        else:
+            disable_fo = bool(req.get("disable_failover") or req.get("single_provider_only"))
+            raw_providers = [primary_p]
+            if not disable_fo:
+                for p in base_chain:
+                    if p and p != primary_p and p != "literal" and p not in raw_providers:
+                        raw_providers.append(p)
+    else:
+        raw_providers = list(base_chain)
+
+    # Validate provider slots: unique, max 3, no literal in fallback, must be registered
+    cleaned_providers: list[str] = []
+    for p in raw_providers[:3]:
+        if p and p not in cleaned_providers:
+            desc = get_descriptor(p)
+            if desc:
+                if p == "literal":
+                    if not cleaned_providers:
+                        cleaned_providers = ["literal"]
+                    break
+                cleaned_providers.append(p)
+
+    if not cleaned_providers:
+        if mode_cand and mode_cand != RequestMode.LITERAL.value:
+            raise AIProviderError(
+                "No valid configured AI providers found in chain",
+                provider="none",
+                safe_detail="No valid AI provider available in chain",
+            )
+        cleaned_providers = ["literal"]
+
+    # Item 27: If mode was not explicitly requested or set in user preferences,
+    # resolve default mode from the resolved provider chain.
+    if mode_cand is None:
+        if cleaned_providers and cleaned_providers[0] != "literal":
+            mode_cand = RequestMode.STANDARD.value
+        else:
+            mode_cand = getattr(cfg, "get_default_mode", lambda: "standard")()
+
+    # If primary candidate is literal and mode was not explicitly requested, mode resolves to literal (Item 27)
+    if cleaned_providers[0] == "literal" and req_mode_raw is None:
+        mode_cand = RequestMode.LITERAL.value
+
     # Literal mode has strict zero-AI short circuit
     if mode_cand == RequestMode.LITERAL.value:
         return ResolvedJobSettings(
@@ -155,39 +220,9 @@ def resolve_job_settings(
             chunk_chars=chunk_chars,
             verify=False,
             ai_candidates=[AIProviderCandidate(provider_id="literal", model_id="none")],
+            research_provider=None,
+            research_model=None,
         )
-
-    # Provider Chain Resolution:
-    # Explicit request provider override > user stored chain > server default chain
-    req_provider = req.get("ai_provider")
-    usr_chain = usr.get("ai_provider_chain_json")
-    user_models_map = usr.get("ai_models_by_provider_json") or {}
-
-    raw_providers: list[str] = []
-    if req_provider:
-        # Explicit primary override from request
-        raw_providers = [str(req_provider).lower().strip()]
-    elif usr_chain and isinstance(usr_chain, list) and len(usr_chain) > 0:
-        raw_providers = [str(p).lower().strip() for p in usr_chain if p]
-    else:
-        # Fallback to server default chain
-        raw_providers = get_server_default_chain(cfg)
-
-    # Validate provider slots: unique, max 3, no literal in fallback, must be registered
-    cleaned_providers: list[str] = []
-    for p in raw_providers[:3]:
-        if p and p not in cleaned_providers:
-            desc = get_descriptor(p)
-            if desc:
-                # If literal is selected as primary, chain becomes just ['literal']
-                if p == "literal":
-                    if not cleaned_providers:
-                        cleaned_providers = ["literal"]
-                    break
-                cleaned_providers.append(p)
-
-    if not cleaned_providers:
-        cleaned_providers = ["gemini"]
 
     # Now resolve model for EACH candidate provider in the chain
     candidates: list[AIProviderCandidate] = []
@@ -196,17 +231,23 @@ def resolve_job_settings(
             candidates.append(AIProviderCandidate(provider_id="literal", model_id="none"))
             continue
 
-        # Model precedence: explicit request model (if primary) > user remembered model for provider > provider default
         chosen_model: str | None = None
         if prov_id == cleaned_providers[0] and req.get("ai_model"):
-            chosen_model = str(req["ai_model"]).strip()
+            cand_model = str(req["ai_model"]).strip()
+            # Validate explicit model through catalog (Item 24)
+            if not validate_model_for_provider(prov_id, cand_model):
+                raise AIProviderError(
+                    f"Model '{cand_model}' is not valid for provider '{prov_id}'",
+                    provider=prov_id,
+                    model=cand_model,
+                    safe_detail=f"Invalid model requested for {prov_id}",
+                )
+            chosen_model = cand_model
         elif prov_id in user_models_map and user_models_map[prov_id]:
             rem_model = str(user_models_map[prov_id]).strip()
-            # User Correction 22: Validate remembered model at job creation
             if validate_model_for_provider(prov_id, rem_model):
                 chosen_model = rem_model
             else:
-                # Stale remembered model fallback to provider approved default
                 chosen_model = get_default_model(prov_id)
         else:
             chosen_model = get_default_model(prov_id)
@@ -215,6 +256,20 @@ def resolve_job_settings(
             chosen_model = get_default_model(prov_id)
 
         candidates.append(AIProviderCandidate(provider_id=prov_id, model_id=chosen_model))
+
+    # Resolve and snapshot Research identity (Item 13)
+    res_provider: str | None = None
+    res_model: str | None = None
+    if mode_cand == RequestMode.RESEARCH.value:
+        for c in candidates:
+            desc = get_descriptor(c.provider_id)
+            if desc and getattr(desc.capabilities, "research_grounding", False):
+                res_provider = c.provider_id
+                if c.provider_id == "gemini":
+                    res_model = getattr(cfg, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
+                else:
+                    res_model = c.model_id
+                break
 
     return ResolvedJobSettings(
         mode=mode_cand,
@@ -225,4 +280,6 @@ def resolve_job_settings(
         chunk_chars=chunk_chars,
         verify=verify,
         ai_candidates=candidates,
+        research_provider=res_provider,
+        research_model=res_model,
     )

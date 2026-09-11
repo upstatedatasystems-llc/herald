@@ -6,7 +6,6 @@ and non-cached per-job provider instantiation.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
 from herald.ai.base import AIProvider
 from herald.ai.capabilities import AIModelCapabilities, ProviderCapabilities
@@ -98,11 +97,16 @@ def create_provider(provider_id: str | None, model_id: str | None = None) -> AIP
     Instantiate a new AIProvider for job execution without global mutable caching.
     Uses specified model_id, or falls back to provider default model.
     """
-    p_id = (provider_id or "literal").lower().strip()
-    desc = get_descriptor(p_id)
-    if not desc:
+    if not provider_id:
+        raise ValueError("Provider ID cannot be empty or None")
+    p_id = provider_id.lower().strip()
+    if p_id == "literal":
         from herald.ai.literal_provider import LiteralProvider
         return LiteralProvider()
+
+    desc = get_descriptor(p_id)
+    if not desc:
+        raise ValueError(f"Unknown AI provider '{provider_id}'")
 
     eff_model = model_id or get_default_model(p_id)
     return desc.factory(eff_model)
@@ -254,7 +258,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(settings.GROQ_API_KEY and settings.GROQ_API_KEY.strip()),
@@ -312,7 +316,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(
@@ -370,7 +374,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip()),
@@ -407,7 +411,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(settings.OPENROUTER_API_KEY and settings.OPENROUTER_API_KEY.strip()),
@@ -437,7 +441,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(settings.MISTRAL_API_KEY and settings.MISTRAL_API_KEY.strip()),
@@ -467,7 +471,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY.strip()),
@@ -497,7 +501,7 @@ register_provider(
             structured_output=True,
             research_grounding=False,
             url_context_extraction=False,
-            verification=True,
+            verification=False,
             usage_metrics=True,
         ),
         is_configured_fn=lambda: bool(getattr(settings, "OLLAMA_BASE_URL", "")),

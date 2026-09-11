@@ -5,12 +5,10 @@ Note: Pipeline job execution must NOT use get_ai_provider() directly;
 instead use execute_with_failover() deriving from the job's snapshotted provider chain.
 """
 
-from typing import Any
 
 from herald.ai.base import AIProvider
-from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
+from herald.ai.registry import create_provider
 from herald.config import settings
-
 
 _global_provider: AIProvider | None = None
 

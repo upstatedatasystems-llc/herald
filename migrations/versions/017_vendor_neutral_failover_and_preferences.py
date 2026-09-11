@@ -56,7 +56,7 @@ def upgrade() -> None:
                 except Exception:
                     gen_settings = {}
 
-        # Precedence Rule 1: SCRIPT AI interactions evidence
+        # Precedence Rule 1: Authoritative SCRIPT AI interactions evidence
         interaction = conn.execute(sa.text("""
             SELECT provider, model FROM ai_interactions
             WHERE job_id = :jid AND operation IN ('script_generation', 'script') AND success = true
@@ -73,36 +73,52 @@ def upgrade() -> None:
         provider = None
         model = None
 
-        if interaction:
+        if interaction and interaction[0] and interaction[1]:
             provider = interaction[0]
             model = interaction[1]
+        elif gen_settings.get("ai_provider") and gen_settings.get("ai_model"):
+            # Precedence Rule 2: Explicit generation snapshot provider and model (explicit ai_model wins over gem_model)
+            provider = gen_settings["ai_provider"]
+            model = gen_settings["ai_model"]
         elif gen_settings.get("ai_provider"):
             provider = gen_settings["ai_provider"]
-            model = gem_model or gen_settings.get("ai_model")
-        elif req_mode == "research":
-            provider = "gemini"
-            model = res_model or gem_model or "gemini-3.6-flash"
+            model = gen_settings.get("ai_model") or gem_model or ""
         elif req_mode == "literal":
             provider = "literal"
             model = "none"
+        elif req_mode == "research":
+            provider = gen_settings.get("research_provider") or "gemini"
+            model = res_model or gen_settings.get("research_model") or gem_model or "gemini-3.6-flash"
         elif gem_model:
             model = gem_model
-            # Classify provider from model string signatures without assuming Gemini
-            m_low = gem_model.lower()
-            if m_low.startswith("@cf/"):
+            m_low = gem_model.lower().strip()
+            # Precedence Rule 3: Unambiguous provider-prefixed or vendor-exclusive models
+            if m_low.startswith("@cf/") or m_low.startswith("cloudflare/"):
                 provider = "cloudflare"
-            elif "compound" in m_low or "llama" in m_low:
+            elif m_low.startswith("groq/"):
                 provider = "groq"
-            elif "gpt" in m_low or "o1" in m_low or "o3" in m_low:
-                provider = "openai"
-            elif "claude" in m_low:
+            elif m_low.startswith("openrouter/"):
+                provider = "openrouter"
+            elif m_low.startswith("ollama/"):
+                provider = "ollama"
+            elif m_low.startswith("anthropic/") or m_low.startswith("claude-"):
                 provider = "anthropic"
-            elif "mistral" in m_low or "mixtral" in m_low:
+            elif m_low.startswith("mistral/") or m_low.startswith("codestral-"):
                 provider = "mistral"
-            elif "gemini" in m_low:
+            elif m_low.startswith("gemini-") or m_low.startswith("models/gemini"):
                 provider = "gemini"
             else:
-                provider = "gemini"
+                # Ambiguous model family (e.g. llama, gpt) check if any interaction recorded provider on job
+                any_inter = conn.execute(sa.text("""
+                    SELECT provider FROM ai_interactions WHERE job_id = :jid LIMIT 1
+                """), {"jid": job_id}).fetchone()
+                if any_inter and any_inter[0]:
+                    provider = any_inter[0]
+                elif "llama" in m_low or "gpt" in m_low:
+                    provider = "ambiguous"
+                else:
+                    # Legacy fallback
+                    provider = "gemini"
         else:
             provider = "gemini"
             model = "gemini-3.5-flash"

@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from herald.ai.registry import is_provider_configured, is_provider_registered
 from herald.config import settings
 from herald.db.models import TelegramPairingCode, TelegramUser
 
@@ -278,11 +279,6 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
     else:
         cand_mode = settings.get_default_mode().lower()
 
-    if not settings.is_ai_configured() and cand_mode != "literal":
-        mode = "literal"
-    else:
-        mode = cand_mode
-
     chain_json = None
     models_json = None
     if user:
@@ -295,12 +291,31 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
         except Exception:
             models_json = None
 
+    # Check user's effective provider chain capability (Item 27)
+    has_valid_ai = False
+    if chain_json and isinstance(chain_json, list) and len(chain_json) > 0:
+        if chain_json[0] == "literal":
+            has_valid_ai = False
+        else:
+            has_valid_ai = any(p != "literal" and is_provider_configured(p) for p in chain_json)
+    else:
+        has_valid_ai = settings.is_ai_configured()
+
+    if not has_valid_ai and cand_mode != "literal":
+        mode = "literal"
+    elif chain_json and chain_json[0] == "literal" and not stored_mode:
+        mode = "literal"
+    else:
+        mode = cand_mode
+
+    primary_disp = (chain_json[0].capitalize() if chain_json else None) or getattr(settings, "AI_PROVIDER", None) or "None (Literal only)"
+
     return {
         "confirm_before_tts": confirm,
         "default_voice": voice,
         "default_speed": speed,
         "default_mode": mode,
-        "ai_provider": getattr(settings, "AI_PROVIDER", None) or "None (Literal only)",
+        "ai_provider": primary_disp,
         "ai_provider_chain_json": chain_json,
         "ai_models_by_provider_json": models_json,
     }
@@ -473,26 +488,53 @@ def set_user_ai_provider_chain(
 ) -> bool:
     """
     Set ai_provider_chain_json preference for a Telegram user.
-    Enforces deduplication, compaction, and valid provider IDs.
+    Enforces Telegram invariants:
+    - Rejects unconfigured providers (does not persist)
+    - Rejects duplicate provider selections cleanly (does not silently deduplicate/reorder)
+    - Enforces maximum length of 3
+    - Enforces Literal rules: Literal may only be Primary, never Secondary/Tertiary.
+      Selecting Literal as Primary sets chain = ["literal"] and if current default mode
+      requires AI, sets default_mode = "literal" in the SAME transaction.
+      Changing away from Literal Primary later does not change an explicitly selected Literal mode.
     """
-    from herald.ai.registry import is_provider_registered
-
-    cid = chat_id if chat_id is not None else user_id
-    user = ensure_telegram_user(db, user_id, cid)
-    if not user:
-        return False
-
+    clean_chain: list[str] | None = None
     if chain is not None:
-        compacted: list[str] = []
+        if len(chain) > 3:
+            raise ValueError(f"Provider chain cannot exceed 3 providers (received {len(chain)})")
+
+        seen = set()
+        clean_chain = []
         for p in chain:
             if not p:
                 continue
             p_clean = str(p).lower().strip()
             if not is_provider_registered(p_clean):
                 raise ValueError(f"Unknown provider '{p_clean}'")
-            if p_clean not in compacted:
-                compacted.append(p_clean)
-        user.ai_provider_chain_json = compacted if compacted else None
+            if p_clean in seen:
+                raise ValueError(f"Duplicate provider '{p_clean}' in chain is not permitted")
+            seen.add(p_clean)
+
+            # Check configuration
+            if p_clean != "literal" and not is_provider_configured(p_clean):
+                raise ValueError(f"Provider '{p_clean}' is not configured on this server (missing API key)")
+            clean_chain.append(p_clean)
+
+        if "literal" in clean_chain:
+            if clean_chain[0] != "literal" or len(clean_chain) > 1:
+                raise ValueError("Literal provider may only be Primary and cannot have fallbacks")
+
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    if clean_chain is not None:
+        if clean_chain == ["literal"]:
+            curr_mode = (user.default_mode or "").lower().strip()
+            if not curr_mode or curr_mode in ("standard", "brief", "research"):
+                user.default_mode = "literal"
+
+        user.ai_provider_chain_json = clean_chain if clean_chain else None
     else:
         user.ai_provider_chain_json = None
 
@@ -510,10 +552,18 @@ def set_user_ai_model_for_provider(
 ) -> bool:
     """Set or clear preferred model for a specific provider in ai_models_by_provider_json."""
     from herald.ai.registry import is_provider_registered
+    from herald.ai.catalog import validate_model_for_provider
 
     p_clean = str(provider_id).lower().strip()
     if not is_provider_registered(p_clean):
         raise ValueError(f"Unknown provider '{p_clean}'")
+
+    if model_id is not None:
+        m_clean = str(model_id).strip()
+        if not validate_model_for_provider(p_clean, m_clean):
+            raise ValueError(f"Model '{m_clean}' is not recognized or selectable for provider '{p_clean}'")
+    else:
+        m_clean = None
 
     cid = chat_id if chat_id is not None else user_id
     user = ensure_telegram_user(db, user_id, cid)
@@ -521,8 +571,8 @@ def set_user_ai_model_for_provider(
         return False
 
     models_map = dict(user.ai_models_by_provider_json or {})
-    if model_id is not None:
-        models_map[p_clean] = str(model_id).strip()
+    if m_clean is not None:
+        models_map[p_clean] = m_clean
     else:
         models_map.pop(p_clean, None)
 

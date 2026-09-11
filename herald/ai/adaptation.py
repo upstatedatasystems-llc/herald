@@ -7,14 +7,10 @@ strict typed AdaptationBudget guarantees.
 
 import logging
 import re
-from datetime import UTC, datetime
 from typing import Any
 
 from herald.ai.base import AIProvider
 from herald.ai.errors import (
-    AIProviderError,
-    AIProviderTimeoutError,
-    AIProviderUnavailableError,
     AIRequestTooLargeError,
 )
 from herald.ai.policy import AdaptationBudget, AdaptationUsage
@@ -98,11 +94,24 @@ def distill_chunk(
     chunk_index: int,
     total_chunks: int,
     provider: AIProvider | None = None,
+    usage: AdaptationUsage | None = None,
+    budget: AdaptationBudget | None = None,
 ) -> str:
     """
     Distill key narrative facts and information from a source chunk.
     Preserves section context, quotes, numbers, and logical flow.
+    Supports active provider distillation with budget accounting, falling
+    back cleanly to structured fact-preserving heuristic reduction.
     """
+    if provider is not None and hasattr(provider, "distill_text"):
+        if usage and budget:
+            usage.ai_calls += 1
+            usage.check_budget(budget)
+        try:
+            return provider.distill_text(chunk, chunk_index=chunk_index, total_chunks=total_chunks)
+        except Exception:
+            pass
+
     lines = [f"### SECTION {chunk_index + 1}/{total_chunks}"]
     clean_chunk = chunk.strip()
     paragraphs = [p.strip() for p in clean_chunk.split("\n") if p.strip()]
@@ -184,7 +193,7 @@ def adapt_source_text(
         for idx, ch in enumerate(chunks):
             usage.estimated_work += len(ch)
             usage.check_budget(budget)
-            dist = distill_chunk(ch, idx, len(chunks), provider=provider)
+            dist = distill_chunk(ch, idx, len(chunks), provider=provider, usage=usage, budget=budget)
             distilled.append(dist)
 
         current_text = merge_dossier(distilled, title=source_title)

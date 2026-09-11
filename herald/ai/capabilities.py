@@ -14,18 +14,9 @@ class ProviderCapabilities:
     script_standard: bool = True
     structured_output: bool = True
     research_grounding: bool = False
-    google_search_grounding: bool = False
     url_context_extraction: bool = False
-    verification: bool = True
+    verification: bool = False
     usage_metrics: bool = True
-
-    def __post_init__(self) -> None:
-        # Keep research_grounding and google_search_grounding synchronized
-        effective_grounding = self.research_grounding or self.google_search_grounding
-        if self.research_grounding != effective_grounding:
-            object.__setattr__(self, "research_grounding", effective_grounding)
-        if self.google_search_grounding != effective_grounding:
-            object.__setattr__(self, "google_search_grounding", effective_grounding)
 
 
 @dataclass

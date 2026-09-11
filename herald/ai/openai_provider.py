@@ -7,7 +7,6 @@ truthful one-call/one-record interaction tracking, and 1 bounded schema repair a
 import json
 import logging
 import re
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,15 +15,15 @@ import httpx
 from herald.ai.base import AIProvider, ProviderCapabilities, load_system_prompt
 from herald.ai.errors import (
     AIAuthFailedError,
-    AIAuthenticationError,
+    AIClientTimeoutError,
     AIContextExceededError,
-    AIContextLimitExceededError,
     AIPermissionDeniedError,
     AIProviderError,
+    AIProviderTimeoutError,
     AIProviderUnavailableError,
     AIRateLimitedError,
-    AIRateLimitError,
     AIRequestTooLargeError,
+    AISchemaInvalidError,
 )
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
@@ -78,6 +77,67 @@ class OpenAIProvider(AIProvider):
 
     def is_configured(self) -> bool:
         return bool(self._api_key and self._api_key.strip())
+
+    def discover_models(self) -> list[Any]:
+        """
+        Query live models from the OpenAI-compatible /models endpoint.
+        Returns live models for the provider, preserving known catalog metadata if present.
+        """
+        if not self.is_configured():
+            return []
+        url = f"{self._api_base}/models"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "application/json",
+        }
+        if self._custom_headers:
+            headers.update(self._custom_headers)
+
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    logger.debug(f"Live model discovery failed for {self._custom_provider_name}: HTTP {resp.status_code}")
+                    return []
+                data = resp.json()
+                items = data.get("data", [])
+                if not isinstance(items, list):
+                    return []
+
+                from herald.ai.capabilities import AIModelCapabilities
+                from herald.ai.registry import get_descriptor
+                p_id = self._custom_provider_name.lower().strip()
+                desc = get_descriptor(p_id)
+                known_map = {m.model_id: m for m in (desc.catalog_models if desc else [])}
+
+                results: list[AIModelCapabilities] = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    m_id = item.get("id")
+                    if not m_id or not isinstance(m_id, str):
+                        continue
+
+                    if m_id in known_map:
+                        results.append(known_map[m_id])
+                    else:
+                        m_id_lower = m_id.lower()
+                        if any(skip in m_id_lower for skip in ("embed", "whisper", "tts", "dall-e", "moderation", "davinci", "babbage", "curie", "ada")):
+                            continue
+                        results.append(
+                            AIModelCapabilities(
+                                provider_id=p_id,
+                                model_id=m_id,
+                                display_name=m_id,
+                                context_window=8192,
+                                max_output=4096,
+                                selectable=True,
+                            )
+                        )
+                return results
+        except Exception as e:
+            logger.debug(f"Live model discovery error for {self._custom_provider_name}: {e}")
+            return []
 
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         if not self.is_configured():
@@ -159,22 +219,18 @@ class OpenAIProvider(AIProvider):
     def _classify_http_error(
         self,
         resp: httpx.Response,
-        attempt: int,
-        max_attempts: int,
+        attempt: int = 1,
+        max_attempts: int = 1,
         operation: str = "script_generation",
     ) -> float | None:
         """
-        Classify HTTP error status into standard AIProviderError hierarchy.
-        Extracts Retry-After header for 429 backoff.
-        Raises immediate unretryable errors (401, 403, 413, context exceeded).
-        On terminal attempt, raises appropriate typed AIProviderError.
-        Returns retry delay in seconds if 429 and retryable, else None.
+        Classify OpenAI-compatible HTTP error responses into standard AIProviderError taxonomy.
+        Maps 401, 403, 408, 413, 429, 5xx, and context window errors.
         """
         status = resp.status_code
         text_preview = resp.text[:300] if resp.text else ""
         text_lower = text_preview.lower()
 
-        # Immediate unretryable errors
         if status == 401:
             raise AIAuthFailedError(
                 f"{self.provider_name} API authentication failed: HTTP 401 ({text_preview})",
@@ -189,6 +245,14 @@ class OpenAIProvider(AIProvider):
                 provider=self.provider_name.lower(),
                 model=self._model,
                 http_status=403,
+                operation=operation,
+            )
+        if status == 408:
+            raise AIProviderTimeoutError(
+                f"{self.provider_name} API provider timeout: HTTP 408 ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=408,
                 operation=operation,
             )
         if status == 413:
@@ -217,26 +281,17 @@ class OpenAIProvider(AIProvider):
                     retry_delay = float(retry_header)
                 except ValueError:
                     pass
+            raise AIRateLimitedError(
+                f"{self.provider_name} API rate limit exceeded: HTTP 429 ({text_preview})",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                http_status=429,
+                retry_after_seconds=retry_delay,
+                operation=operation,
+            )
 
-        if attempt == max_attempts:
-            if status == 429:
-                raise AIRateLimitedError(
-                    f"{self.provider_name} API rate limit exceeded: HTTP 429 ({text_preview})",
-                    provider=self.provider_name.lower(),
-                    model=self._model,
-                    http_status=429,
-                    retry_after_seconds=retry_delay,
-                    operation=operation,
-                )
-            if status >= 500:
-                raise AIProviderUnavailableError(
-                    f"{self.provider_name} API returned HTTP {status}",
-                    provider=self.provider_name.lower(),
-                    model=self._model,
-                    http_status=status,
-                    operation=operation,
-                )
-            raise AIProviderError(
+        if status >= 500:
+            raise AIProviderUnavailableError(
                 f"{self.provider_name} API returned HTTP {status}",
                 provider=self.provider_name.lower(),
                 model=self._model,
@@ -244,7 +299,13 @@ class OpenAIProvider(AIProvider):
                 operation=operation,
             )
 
-        return retry_delay
+        raise AIProviderError(
+            f"{self.provider_name} API returned HTTP {status}: {text_preview}",
+            provider=self.provider_name.lower(),
+            model=self._model,
+            http_status=status,
+            operation=operation,
+        )
 
     def generate_script(
         self,
@@ -253,6 +314,8 @@ class OpenAIProvider(AIProvider):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
         job_id: str | None = None,
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
             raise RuntimeError(f"{self.provider_name} API key is not configured.")
@@ -283,286 +346,312 @@ Generate the podcast script JSON response now.
             **self._custom_headers,
         }
 
-        max_attempts = settings.GEMINI_RETRY_COUNT
-        backoff = 2.0
+        attempt = kwargs.get("attempt", attempt)
+        t0 = datetime.now(UTC)
+        req_evidence = {
+            "mode": mode_clean,
+            "attempt": attempt,
+            "source_character_count": len(source_text),
+            "structured_output_mode": "json_object",
+            "repair_phase": False,
+        }
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": f"{system_prompt}{json_instruction}"},
+                {"role": "user", "content": user_content},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.3,
+        }
 
-        for attempt in range(1, max_attempts + 1):
-            t0 = datetime.now(UTC)
-            req_evidence = {
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+        except httpx.TimeoutException as timeout_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=timeout_err,
+                request_json=req_evidence,
+                metadata={"attempt": attempt, "mode": mode_clean, "timeout_seconds": settings.effective_ai_timeout_seconds},
+            )
+            raise AIClientTimeoutError(
+                f"{self.provider_name} client timeout connecting to {self._model}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+            )
+        except Exception as net_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=net_err,
+                request_json=req_evidence,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            _, safe_net_err = sanitize_error(net_err)
+            raise AIProviderError(
+                f"{self.provider_name} network failure: {safe_net_err}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+            )
+
+        req_id = resp.headers.get("x-request-id") or resp.headers.get("cf-ray") or resp.headers.get("openai-organization")
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(user_content),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+                request_json=req_evidence,
+                response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            self._classify_http_error(resp, attempt=attempt, max_attempts=1, operation="script_generation")
+
+        result_json = resp.json()
+        req_id = req_id or result_json.get("id")
+        choices = result_json.get("choices", [])
+        raw_content = choices[0].get("message", {}).get("content", "") if choices else ""
+        usage = result_json.get("usage", {})
+        p_tok = usage.get("prompt_tokens")
+        c_tok = usage.get("completion_tokens")
+        t_tok = usage.get("total_tokens")
+
+        resp_evidence = {
+            "http_status": resp.status_code,
+            "response_character_count": len(raw_content),
+            "finish_reason": choices[0].get("finish_reason") if choices else None,
+        }
+
+        # Parse and validate with 1 bounded schema repair attempt if needed
+        try:
+            script_dict = _extract_json_block(raw_content)
+            parsed_script = PodcastScriptResponse(**script_dict)
+            resp_evidence["schema_validation"] = "valid"
+
+            # Invariant: Record terminal success only after schema validation succeeds
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(user_content),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                request_json=req_evidence,
+                response_json=resp_evidence,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            return parsed_script
+
+        except Exception as parse_err:
+            logger.warning(
+                "%s output parsing failed: %s. Initiating 1 bounded repair retry.",
+                self.provider_name,
+                parse_err,
+            )
+            resp_evidence["schema_validation"] = "failed"
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(user_content),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=parse_err,
+                request_json=req_evidence,
+                response_json=resp_evidence,
+                metadata={"attempt": attempt, "mode": mode_clean, "phase": "parse_failure"},
+            )
+
+            # Bounded Repair Attempt (Second HTTP Call)
+            t_repair = datetime.now(UTC)
+            rep_evidence = {
                 "mode": mode_clean,
                 "attempt": attempt,
                 "source_character_count": len(source_text),
                 "structured_output_mode": "json_object",
-                "repair_phase": False,
+                "repair_phase": True,
             }
-            payload = {
+            repair_messages = [
+                {"role": "system", "content": f"{system_prompt}{json_instruction}"},
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": raw_content},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your previous response produced a validation error: {parse_err}. "
+                        "Please fix the error and return only the valid JSON response adhering strictly to the schema."
+                    ),
+                },
+            ]
+            repair_payload = {
                 "model": self._model,
-                "messages": [
-                    {"role": "system", "content": f"{system_prompt}{json_instruction}"},
-                    {"role": "user", "content": user_content},
-                ],
+                "messages": repair_messages,
                 "response_format": {"type": "json_object"},
-                "temperature": settings.GEMINI_TEMPERATURE,
+                "temperature": 0.3,
             }
 
             try:
                 from herald.concurrency import get_semaphores
                 with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
-                    resp = client.post(url, json=payload, headers=headers)
-            except Exception as net_err:
+                    repair_resp = client.post(url, json=repair_payload, headers=headers)
+            except httpx.TimeoutException as rep_timeout_err:
                 record_ai_interaction(
                     job_id=job_id,
                     provider=self.provider_name.lower(),
                     model=self._model,
-                    operation="script_generation",
+                    operation="script_repair",
                     attempt=attempt,
-                    started_at=t0,
+                    started_at=t_repair,
                     completed_at=datetime.now(UTC),
                     success=False,
-                    error=net_err,
-                    request_json=req_evidence,
-                    metadata={"attempt": attempt, "mode": mode_clean},
+                    error=rep_timeout_err,
+                    request_json=rep_evidence,
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_client_timeout"},
                 )
-                if attempt == max_attempts:
-                    _, safe_net_err = sanitize_error(net_err)
-                    raise AIProviderError(f"{self.provider_name} network failure: {safe_net_err}", provider=self.provider_name.lower(), model=self._model)
-                time.sleep(backoff)
-                backoff *= 2.0
-                continue
-
-            req_id = resp.headers.get("x-request-id") or resp.headers.get("cf-ray") or resp.headers.get("openai-organization")
-            if resp.status_code != 200:
+                raise AIClientTimeoutError(
+                    f"{self.provider_name} client timeout during repair connecting to {self._model}",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    operation="script_repair",
+                )
+            except Exception as rep_net_err:
                 record_ai_interaction(
                     job_id=job_id,
                     provider=self.provider_name.lower(),
                     model=self._model,
-                    operation="script_generation",
+                    operation="script_repair",
                     attempt=attempt,
-                    http_status=resp.status_code,
-                    provider_request_id=req_id,
+                    started_at=t_repair,
+                    completed_at=datetime.now(UTC),
+                    success=False,
+                    error=rep_net_err,
+                    request_json=rep_evidence,
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_network_failure"},
+                )
+                _, safe_rep_err = sanitize_error(rep_net_err)
+                raise AIProviderError(
+                    f"{self.provider_name} repair network failure: {safe_rep_err}",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    operation="script_repair",
+                )
+
+            repair_req_id = repair_resp.headers.get("x-request-id") or repair_resp.headers.get("cf-ray")
+            if repair_resp.status_code != 200:
+                record_ai_interaction(
+                    job_id=job_id,
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    operation="script_repair",
+                    attempt=attempt,
+                    http_status=repair_resp.status_code,
+                    provider_request_id=repair_req_id,
                     input_chars=len(user_content),
-                    started_at=t0,
+                    started_at=t_repair,
                     completed_at=datetime.now(UTC),
                     success=False,
-                    error=f"HTTP {resp.status_code}: {resp.text[:300]}",
-                    request_json=req_evidence,
-                    response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
-                    metadata={"attempt": attempt, "mode": mode_clean},
+                    error=f"Repair HTTP {repair_resp.status_code}: {repair_resp.text[:300]}",
+                    request_json=rep_evidence,
+                    response_json={"http_status": repair_resp.status_code, "response_character_count": len(repair_resp.text)},
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_http_failure"},
                 )
-                retry_delay = self._classify_http_error(resp, attempt, max_attempts, operation="script_generation")
-                if retry_delay is not None and retry_delay > 0:
-                    time.sleep(retry_delay)
-                else:
-                    time.sleep(backoff)
-                    backoff *= 2.0
-                continue
+                self._classify_http_error(repair_resp, attempt=attempt, max_attempts=1, operation="script_repair")
 
-            result_json = resp.json()
-            req_id = req_id or result_json.get("id")
-            choices = result_json.get("choices", [])
-            raw_content = choices[0].get("message", {}).get("content", "") if choices else ""
-            usage = result_json.get("usage", {})
-            p_tok = usage.get("prompt_tokens")
-            c_tok = usage.get("completion_tokens")
-            t_tok = usage.get("total_tokens")
-
-            resp_evidence = {
-                "http_status": resp.status_code,
-                "response_character_count": len(raw_content),
-                "finish_reason": choices[0].get("finish_reason") if choices else None,
+            repair_result_json = repair_resp.json()
+            repair_req_id = repair_req_id or repair_result_json.get("id")
+            repair_choices = repair_result_json.get("choices", [])
+            repair_raw = repair_choices[0].get("message", {}).get("content", "") if repair_choices else ""
+            rep_usage = repair_result_json.get("usage", {})
+            rep_resp_evidence = {
+                "http_status": repair_resp.status_code,
+                "response_character_count": len(repair_raw),
+                "finish_reason": repair_choices[0].get("finish_reason") if repair_choices else None,
+                "usage": rep_usage,
             }
 
-            # Parse and validate with 1 bounded schema repair attempt if needed
             try:
-                script_dict = _extract_json_block(raw_content)
-                parsed_script = PodcastScriptResponse(**script_dict)
-                resp_evidence["schema_validation"] = "valid"
+                repair_dict = _extract_json_block(repair_raw)
+                repaired_script = PodcastScriptResponse(**repair_dict)
+                rep_resp_evidence["schema_validation"] = "repaired"
 
-                # Invariant: Record terminal success only after schema validation succeeds
                 record_ai_interaction(
                     job_id=job_id,
                     provider=self.provider_name.lower(),
                     model=self._model,
-                    operation="script_generation",
+                    operation="script_repair",
                     attempt=attempt,
-                    http_status=resp.status_code,
-                    provider_request_id=req_id,
+                    http_status=repair_resp.status_code,
+                    provider_request_id=repair_req_id,
                     input_chars=len(user_content),
-                    started_at=t0,
+                    started_at=t_repair,
                     completed_at=datetime.now(UTC),
                     success=True,
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    request_json=req_evidence,
-                    response_json=resp_evidence,
-                    metadata={"attempt": attempt, "mode": mode_clean},
+                    request_json=rep_evidence,
+                    response_json=rep_resp_evidence,
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_success"},
                 )
-                return parsed_script
+                return repaired_script
 
-            except Exception as parse_err:
-                logger.warning(
-                    "%s output parsing failed on attempt %d: %s. Initiating 1 bounded repair retry.",
-                    self.provider_name,
-                    attempt,
-                    parse_err,
-                )
-                resp_evidence["schema_validation"] = "failed"
+            except Exception as rep_parse_err:
+                rep_resp_evidence["schema_validation"] = "failed"
                 record_ai_interaction(
                     job_id=job_id,
                     provider=self.provider_name.lower(),
                     model=self._model,
-                    operation="script_generation",
+                    operation="script_repair",
                     attempt=attempt,
-                    http_status=resp.status_code,
-                    provider_request_id=req_id,
+                    http_status=repair_resp.status_code,
+                    provider_request_id=repair_req_id,
                     input_chars=len(user_content),
-                    started_at=t0,
+                    started_at=t_repair,
                     completed_at=datetime.now(UTC),
                     success=False,
-                    error=parse_err,
-                    request_json=req_evidence,
-                    response_json=resp_evidence,
-                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "parse_failure"},
+                    error=rep_parse_err,
+                    request_json=rep_evidence,
+                    response_json=rep_resp_evidence,
+                    metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_parse_failure"},
                 )
-
-                # Bounded Repair Attempt (Second HTTP Call)
-                t_repair = datetime.now(UTC)
-                rep_evidence = {
-                    "mode": mode_clean,
-                    "attempt": attempt,
-                    "source_character_count": len(source_text),
-                    "structured_output_mode": "json_object",
-                    "repair_phase": True,
-                }
-                repair_messages = [
-                    {"role": "system", "content": f"{system_prompt}{json_instruction}"},
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": raw_content},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Your previous response produced a validation error: {parse_err}. "
-                            "Please fix the error and return only the valid JSON response adhering strictly to the schema."
-                        ),
-                    },
-                ]
-                repair_payload = {
-                    "model": self._model,
-                    "messages": repair_messages,
-                    "response_format": {"type": "json_object"},
-                    "temperature": settings.GEMINI_TEMPERATURE,
-                }
-
-                try:
-                    from herald.concurrency import get_semaphores
-                    with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
-                        repair_resp = client.post(url, json=repair_payload, headers=headers)
-                except Exception as rep_net_err:
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider=self.provider_name.lower(),
-                        model=self._model,
-                        operation="script_repair",
-                        attempt=attempt,
-                        started_at=t_repair,
-                        completed_at=datetime.now(UTC),
-                        success=False,
-                        error=rep_net_err,
-                        request_json=rep_evidence,
-                        metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_network_failure"},
-                    )
-                    if attempt == max_attempts:
-                        _, safe_rep_err = sanitize_error(rep_net_err)
-                        raise AIProviderError(f"{self.provider_name} repair network failure: {safe_rep_err}", provider=self.provider_name.lower(), model=self._model)
-                    time.sleep(backoff)
-                    backoff *= 2.0
-                    continue
-
-                repair_req_id = repair_resp.headers.get("x-request-id") or repair_resp.headers.get("cf-ray")
-                if repair_resp.status_code != 200:
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider=self.provider_name.lower(),
-                        model=self._model,
-                        operation="script_repair",
-                        attempt=attempt,
-                        http_status=repair_resp.status_code,
-                        provider_request_id=repair_req_id,
-                        input_chars=len(user_content),
-                        started_at=t_repair,
-                        completed_at=datetime.now(UTC),
-                        success=False,
-                        error=f"Repair HTTP {repair_resp.status_code}: {repair_resp.text[:300]}",
-                        request_json=rep_evidence,
-                        response_json={"http_status": repair_resp.status_code, "response_character_count": len(repair_resp.text)},
-                        metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_http_failure"},
-                    )
-                    rep_retry_delay = self._classify_http_error(repair_resp, attempt, max_attempts, operation="script_repair")
-                    if rep_retry_delay is not None and rep_retry_delay > 0:
-                        time.sleep(rep_retry_delay)
-                    else:
-                        time.sleep(backoff)
-                        backoff *= 2.0
-                    continue
-
-                repair_result_json = repair_resp.json()
-                repair_req_id = repair_req_id or repair_result_json.get("id")
-                repair_choices = repair_result_json.get("choices", [])
-                repair_raw = repair_choices[0].get("message", {}).get("content", "") if repair_choices else ""
-                rep_usage = repair_result_json.get("usage", {})
-                rep_resp_evidence = {
-                    "http_status": repair_resp.status_code,
-                    "response_character_count": len(repair_raw),
-                    "finish_reason": repair_choices[0].get("finish_reason") if repair_choices else None,
-                }
-
-                try:
-                    repair_dict = _extract_json_block(repair_raw)
-                    repaired_script = PodcastScriptResponse(**repair_dict)
-                    rep_resp_evidence["schema_validation"] = "repaired"
-
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider=self.provider_name.lower(),
-                        model=self._model,
-                        operation="script_repair",
-                        attempt=attempt,
-                        http_status=repair_resp.status_code,
-                        provider_request_id=repair_req_id,
-                        input_chars=len(user_content),
-                        started_at=t_repair,
-                        completed_at=datetime.now(UTC),
-                        success=True,
-                        request_json=rep_evidence,
-                        response_json=rep_resp_evidence,
-                        metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_success"},
-                    )
-                    return repaired_script
-
-                except Exception as rep_parse_err:
-                    rep_resp_evidence["schema_validation"] = "failed"
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider=self.provider_name.lower(),
-                        model=self._model,
-                        operation="script_repair",
-                        attempt=attempt,
-                        http_status=repair_resp.status_code,
-                        provider_request_id=repair_req_id,
-                        input_chars=len(user_content),
-                        started_at=t_repair,
-                        completed_at=datetime.now(UTC),
-                        success=False,
-                        error=rep_parse_err,
-                        request_json=rep_evidence,
-                        response_json=rep_resp_evidence,
-                        metadata={"attempt": attempt, "mode": mode_clean, "phase": "repair_parse_failure"},
-                    )
-                    if attempt == max_attempts:
-                        raise AIProviderError(f"{self.provider_name} schema validation and repair failed: {rep_parse_err}", provider=self.provider_name.lower(), model=self._model)
-                    time.sleep(backoff)
-                    backoff *= 2.0
-                    continue
-
-        raise AIProviderError(f"Failed to generate podcast script from {self.provider_name} after retries.", provider=self.provider_name.lower(), model=self._model)
+                raise AISchemaInvalidError(
+                    f"{self.provider_name} schema validation and repair failed: {rep_parse_err}",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    operation="script_repair",
+                )

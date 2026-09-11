@@ -83,50 +83,54 @@ def test_ai_providers_menu_and_slot_selection():
     db = _setup_test_db()
     mock_client = MagicMock()
 
-    cb = {
-        "id": "cb1",
-        "from": {"id": 12345},
-        "message": {"message_id": 100, "chat": {"id": 12345, "type": "private"}},
-        "data": "h3:settings:providers",
-    }
-    handle_telegram_callback_query(db, mock_client, cb)
-    mock_client.edit_message_text.assert_called_once()
-    text = mock_client.edit_message_text.call_args[1]["text"]
-    assert "AI Provider Chain Configuration" in text
+    with patch("herald.telegram.bot.is_provider_configured", return_value=True), \
+         patch("herald.telegram.auth.is_provider_configured", return_value=True):
+        cb = {
+            "id": "cb1",
+            "from": {"id": 12345},
+            "message": {"message_id": 100, "chat": {"id": 12345, "type": "private"}},
+            "data": "h3:settings:providers",
+        }
+        handle_telegram_callback_query(db, mock_client, cb)
+        mock_client.edit_message_text.assert_called_once()
+        text = mock_client.edit_message_text.call_args[1]["text"]
+        assert "AI Provider Chain Configuration" in text
 
-    mock_client.reset_mock()
-    cb["data"] = "h3:p:slot:0"
-    handle_telegram_callback_query(db, mock_client, cb)
-    text = mock_client.edit_message_text.call_args[1]["text"]
-    assert "Select Primary Provider" in text
+        mock_client.reset_mock()
+        cb["data"] = "h3:p:slot:0"
+        handle_telegram_callback_query(db, mock_client, cb)
+        text = mock_client.edit_message_text.call_args[1]["text"]
+        assert "Select Primary Provider" in text
 
-    mock_client.reset_mock()
-    cb["data"] = "h3:p:set:0:groq"
-    handle_telegram_callback_query(db, mock_client, cb)
+        mock_client.reset_mock()
+        cb["data"] = "h3:p:set:0:groq"
+        handle_telegram_callback_query(db, mock_client, cb)
 
-    user = db.query(TelegramUser).filter_by(telegram_user_id=12345).first()
-    assert user.ai_provider_chain_json == ["groq"]
+        user = db.query(TelegramUser).filter_by(telegram_user_id=12345).first()
+        assert user.ai_provider_chain_json == ["groq"]
 
-    mock_client.reset_mock()
-    cb["data"] = "h3:p:set:1:openai"
-    handle_telegram_callback_query(db, mock_client, cb)
+        mock_client.reset_mock()
+        cb["data"] = "h3:p:set:1:openai"
+        handle_telegram_callback_query(db, mock_client, cb)
 
-    db.refresh(user)
-    assert user.ai_provider_chain_json == ["groq", "openai"]
+        db.refresh(user)
+        assert user.ai_provider_chain_json == ["groq", "openai"]
 
-    mock_client.reset_mock()
-    cb["data"] = "h3:p:set:2:groq"
-    handle_telegram_callback_query(db, mock_client, cb)
+        mock_client.reset_mock()
+        cb["data"] = "h3:p:set:2:groq"
+        handle_telegram_callback_query(db, mock_client, cb)
 
-    db.refresh(user)
-    assert user.ai_provider_chain_json == ["openai", "groq"]
+        db.refresh(user)
+        # Item 22: Duplicate selection rejected cleanly, not silently reordered
+        assert user.ai_provider_chain_json == ["groq", "openai"]
+        mock_client.answer_callback_query.assert_called_with("cb1", text="Groq is already in your failover chain. Duplicates are not allowed.", show_alert=True)
 
-    mock_client.reset_mock()
-    cb["data"] = "h3:p:clear_subs"
-    handle_telegram_callback_query(db, mock_client, cb)
+        mock_client.reset_mock()
+        cb["data"] = "h3:p:clear_subs"
+        handle_telegram_callback_query(db, mock_client, cb)
 
-    db.refresh(user)
-    assert user.ai_provider_chain_json == ["openai"]
+        db.refresh(user)
+        assert user.ai_provider_chain_json == ["groq"]
 
 
 def test_ai_models_menu_and_token_selection():

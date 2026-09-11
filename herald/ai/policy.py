@@ -11,7 +11,6 @@ import httpx
 
 from herald.ai.errors import (
     AIAuthFailedError,
-    AIChainExhaustedError,
     AIClientTimeoutError,
     AIContextExceededError,
     AIModelUnavailableError,
@@ -23,7 +22,6 @@ from herald.ai.errors import (
     AIRateLimitedError,
     AIRequestTooLargeError,
     AISchemaInvalidError,
-    AIUnsupportedCapabilityError,
 )
 
 
@@ -278,7 +276,7 @@ def classify_error(
 
 
 def decide_policy(
-    error: AIProviderError,
+    error: Exception,
     attempt: int,
     max_attempts: int,
     has_next_candidate: bool,
@@ -292,7 +290,12 @@ def decide_policy(
     4. Fail final (when candidates exhausted or non-retryable fatal error)
     """
     # 1. Non-failover errors: internal programmer bugs / malformed application state
-    # (These will not be AIProviderError or will have UNSUPPORTED_CAPABILITY handled elsewhere)
+    if not isinstance(error, AIProviderError):
+        return RetryDecision(
+            action=ActionType.FAIL_FINAL,
+            reason=f"Programmer error or unclassified exception ({type(error).__name__}): {error}",
+            error=None,
+        )
 
     # 2. Large source errors: 413 Request Too Large or Context Exceeded
     if isinstance(error, (AIRequestTooLargeError, AIContextExceededError)):
@@ -397,11 +400,15 @@ def decide_policy(
             )
         return RetryDecision(action=ActionType.FAIL_FINAL, reason="Output truncated", error=error)
 
-    # Default fallback
-    if has_next_candidate:
-        return RetryDecision(
-            action=ActionType.FAILOVER_NEXT_PROVIDER,
-            reason=f"Error {error.category}; failing over to next candidate",
-            error=error,
-        )
-    return RetryDecision(action=ActionType.FAIL_FINAL, reason=error.message, error=error)
+    # Default fallback: strictly allowlist-based failover.
+    # Unclassified errors, generic errors, programmer bugs, and non-allowlisted errors
+    # terminate immediately as FAIL_FINAL without advancing failover cursor.
+    return RetryDecision(
+        action=ActionType.FAIL_FINAL,
+        reason=f"Unclassified or non-failover error ({error.category}): {error.message}",
+        error=error,
+    )
+
+
+# Alias for backwards compatibility / semantic clarity
+decide_failover_action = decide_policy

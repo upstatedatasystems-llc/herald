@@ -22,10 +22,10 @@ import httpx
 from herald.ai.cloudflare_provider import CloudflareProvider, extract_cloudflare_content
 from herald.ai.errors import (
     AIAuthFailedError,
-    AIContextLimitExceededError,
     AIPermissionDeniedError,
     AIProviderError,
     AIRateLimitedError,
+    AIRequestTooLargeError,
 )
 from herald.ai.groq_provider import GroqProvider
 from herald.config import settings
@@ -107,7 +107,7 @@ def test_cloudflare_model_tuning():
 
 
 def test_groq_error_classification_413():
-    """Verify Groq HTTP 413 maps immediately to AIContextLimitExceededError."""
+    """Verify Groq HTTP 413 maps immediately to AIRequestTooLargeError (Item 8)."""
     groq = GroqProvider(api_key="gsk_test", model="llama-3.3-70b-versatile")
 
     mock_resp = MagicMock(
@@ -117,7 +117,7 @@ def test_groq_error_classification_413():
     )
 
     with patch("httpx.Client.post", return_value=mock_resp):
-        with pytest.raises(AIContextLimitExceededError) as exc_info:
+        with pytest.raises(AIRequestTooLargeError) as exc_info:
             groq.generate_script(source_text="Very large source text", request_mode="standard", job_id="test-groq-413")
 
     assert exc_info.value.http_status == 413
@@ -156,7 +156,7 @@ def test_groq_error_classification_401_and_403():
 
 
 def test_groq_error_classification_429_with_retry_after():
-    """Verify Groq HTTP 429 extracts Retry-After and raises AIRateLimitedError on max retries."""
+    """Verify Groq HTTP 429 extracts Retry-After and raises AIRateLimitedError without inner retries (Item 4)."""
     groq = GroqProvider(api_key="gsk_test", model="llama-3.3-70b-versatile")
 
     mock_resp_429 = MagicMock(
@@ -165,13 +165,9 @@ def test_groq_error_classification_429_with_retry_after():
         headers={"x-request-id": "req-429", "retry-after": "5.5"},
     )
 
-    with patch.object(settings, "GEMINI_RETRY_COUNT", 2), \
-         patch("time.sleep") as mock_sleep, \
-         patch("httpx.Client.post", return_value=mock_resp_429):
+    with patch("httpx.Client.post", return_value=mock_resp_429):
         with pytest.raises(AIRateLimitedError) as exc_info:
             groq.generate_script(source_text="Rate limit test", request_mode="standard", job_id="test-groq-429")
 
     assert exc_info.value.http_status == 429
     assert exc_info.value.retry_after_seconds == 5.5
-    # Verify sleep was called with at least 5.5
-    mock_sleep.assert_called_with(5.5)

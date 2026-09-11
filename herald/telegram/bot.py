@@ -1,6 +1,5 @@
 import html
 import logging
-import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +7,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from herald.ai.catalog import resolve_model_token
 from herald.ai.factory import get_ai_provider
+from herald.ai.registry import is_provider_configured
 from herald.audio.ffmpeg_builder import check_free_disk_mb
 from herald.config import settings
 from herald.core.models import HeraldRequest, HeraldResponse
@@ -31,12 +32,7 @@ from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
     get_cached_voice_sample,
-    get_voice_sample_path,
-    is_valid_sample_audio,
 )
-from herald.ai.catalog import resolve_model_token
-from herald.ai.factory import get_ai_provider
-from herald.ai.registry import is_provider_configured
 from herald.telegram.auth import (
     get_effective_user_preferences,
     get_paired_owner,
@@ -258,17 +254,6 @@ def perform_ai_check(
     resolved = resolve_job_settings(request_params={}, user_prefs=prefs)
     candidates = resolved.ai_candidates
 
-    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
-    research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
-
-    if getattr(settings, "AI_PROVIDER", "gemini") in ("none", "literal") and not research_configured:
-        client.send_message(
-            chat_id=chat_id,
-            text="ℹ️ <b>AI Provider is not configured.</b>\nHerald is running in deterministic <b>Literal</b> mode (no AI API keys required).",
-            reply_to_message_id=reply_to_msg_id,
-            parse_mode="HTML",
-        )
-        return
 
     client.send_message(
         chat_id=chat_id,
@@ -326,24 +311,29 @@ def perform_ai_check(
             )
 
     # Research grounding check
-    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini")
-    research_configured = (res_provider != "none") and bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
-    if res_provider == "none":
-        research_status = "⚪ <b>Gemini Research:</b> Disabled (RESEARCH_PROVIDER=none)"
-    elif research_configured:
-        try:
-            from herald.ai.gemini_provider import GeminiProvider
-            res_res = GeminiProvider().check_research_connection(timeout_seconds=5.0, force_refresh=True)
-            res_model = html.escape(res_res.get("model", settings.GEMINI_RESEARCH_MODEL))
-            if res_res.get("connected"):
-                research_status = f"✅ <b>Gemini Research:</b> Connected\n• Model: <code>{res_model}</code> (Google Search Grounding ready)"
-            else:
-                r_err = html.escape(res_res.get("error") or "Unknown error")
-                research_status = f"❌ <b>Gemini Research:</b> Unavailable\n• Error: <code>{r_err}</code>"
-        except Exception as re_err:
-            research_status = f"❌ <b>Gemini Research:</b> Error: <code>{html.escape(str(re_err))}</code>"
+    res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini").lower().strip()
+    from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
+    desc = get_descriptor(res_provider) if res_provider != "none" else None
+
+    if res_provider == "none" or not desc:
+        research_status = f"⚪ <b>Research Grounding:</b> Disabled (RESEARCH_PROVIDER={res_provider})"
+    elif not is_provider_configured(res_provider):
+        research_status = f"⚪ <b>Research Grounding ({desc.display_name}):</b> Not configured (Missing credentials)"
     else:
-        research_status = "⚪ <b>Gemini Research:</b> Not configured (GEMINI_API_KEY required for Grounded Research)"
+        try:
+            prov = create_provider(res_provider)
+            if hasattr(prov, "check_research_connection"):
+                res_res = prov.check_research_connection(timeout_seconds=5.0, force_refresh=True)
+                res_model = html.escape(res_res.get("model", getattr(prov, "model_name", "default")))
+                if res_res.get("connected"):
+                    research_status = f"✅ <b>Research Grounding ({desc.display_name}):</b> Connected\n• Model: <code>{res_model}</code> (Research Grounding ready)"
+                else:
+                    r_err = html.escape(res_res.get("error") or "Unknown error")
+                    research_status = f"❌ <b>Research Grounding ({desc.display_name}):</b> Unavailable\n• Error: <code>{r_err}</code>"
+            else:
+                research_status = f"✅ <b>Research Grounding ({desc.display_name}):</b> Configured"
+        except Exception as re_err:
+            research_status = f"❌ <b>Research Grounding ({desc.display_name}):</b> Error: <code>{html.escape(str(re_err))}</code>"
 
     chain_block = "\n\n".join(status_lines) if status_lines else "<i>No AI providers in chain.</i>"
     warn_block = ""
@@ -1231,37 +1221,60 @@ def handle_telegram_callback_query(
             from herald.ai.resolution import resolve_job_settings
             resolved = resolve_job_settings(request_params={}, user_prefs=prefs)
             chain = [c.provider_id for c in resolved.ai_candidates if c.provider_id != "literal"]
-            if not chain:
-                chain = ["gemini"]
         while len(chain) < 3:
             chain.append(None)
 
         if target_p == "none":
+            if slot_idx == 0:
+                client.answer_callback_query(cb_id, text="Primary provider cannot be empty.", show_alert=True)
+                return
             chain[slot_idx] = None
             client.answer_callback_query(cb_id, text=f"Cleared slot {slot_idx+1}.")
+            compacted = [p for p in chain if p]
         else:
-            for idx, p in enumerate(chain):
-                if p == target_p and idx != slot_idx:
-                    chain[idx] = None
-            chain[slot_idx] = target_p
-
-            if not is_provider_configured(target_p) and target_p != "literal":
+            # Check if unconfigured
+            if target_p != "literal" and not is_provider_configured(target_p):
                 client.answer_callback_query(
                     cb_id,
-                    text=f"⚠️ {target_p.capitalize()} API key is missing on server. Provider will be skipped during failover unless configured.",
+                    text=f"⚠️ {target_p.capitalize()} API key is missing on this server. Add credentials before selecting it.",
                     show_alert=True,
                 )
-            else:
-                client.answer_callback_query(cb_id, text=f"Slot {slot_idx+1} set to {target_p.capitalize()}.")
+                return
 
-        compacted = []
-        for p in chain:
-            if p and p not in compacted:
-                compacted.append(p)
+            # Check literal restriction
+            if target_p == "literal":
+                if slot_idx > 0:
+                    client.answer_callback_query(
+                        cb_id,
+                        text="Literal mode can only be Primary and cannot be used as a fallback.",
+                        show_alert=True,
+                    )
+                    return
+                compacted = ["literal"]
+                client.answer_callback_query(cb_id, text="Primary set to Literal (zero-AI narration).")
+            else:
+                # Check for duplicate selection without silently moving existing slot
+                if target_p in chain and chain[slot_idx] != target_p:
+                    client.answer_callback_query(
+                        cb_id,
+                        text=f"{target_p.capitalize()} is already in your failover chain. Duplicates are not allowed.",
+                        show_alert=True,
+                    )
+                    return
+
+                chain[slot_idx] = target_p
+                client.answer_callback_query(cb_id, text=f"Slot {slot_idx+1} set to {target_p.capitalize()}.")
+                compacted = [p for p in chain if p]
+
         if not compacted:
             compacted = ["literal"]
 
-        set_user_ai_provider_chain(db, user_id=user_id, chain=compacted, chat_id=chat_id)
+        try:
+            set_user_ai_provider_chain(db, user_id=user_id, chain=compacted, chat_id=chat_id)
+        except ValueError as ve:
+            client.answer_callback_query(cb_id, text=str(ve), show_alert=True)
+            return
+
         new_prefs = get_effective_user_preferences(db, user_id)
         text, reply_markup = format_ai_providers_menu(new_prefs)
         try:
@@ -1280,8 +1293,12 @@ def handle_telegram_callback_query(
     elif raw_data == "h3:p:clear_subs":
         client.answer_callback_query(cb_id, text="Cleared secondary and tertiary providers.")
         user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == user_id).first()
-        curr_chain = list(user.ai_provider_chain_json) if user and user.ai_provider_chain_json else ["gemini"]
-        primary_only = curr_chain[:1]
+        curr_chain = list(user.ai_provider_chain_json) if user and user.ai_provider_chain_json else []
+        if not curr_chain:
+            from herald.ai.resolution import resolve_job_settings
+            resolved = resolve_job_settings(request_params={}, user_prefs=get_effective_user_preferences(db, user_id))
+            curr_chain = [c.provider_id for c in resolved.ai_candidates]
+        primary_only = curr_chain[:1] if curr_chain else ["literal"]
         set_user_ai_provider_chain(db, user_id=user_id, chain=primary_only, chat_id=chat_id)
         new_prefs = get_effective_user_preferences(db, user_id)
         text, reply_markup = format_ai_providers_menu(new_prefs)
@@ -1334,12 +1351,24 @@ def handle_telegram_callback_query(
         return
 
     elif raw_data.startswith("h3:m:set:"):
-        token = raw_data[len("h3:m:set:") :]
-        resolved_info = resolve_model_token(token)
-        if resolved_info:
+        payload = raw_data[len("h3:m:set:") :]
+        parts = payload.split(":")
+        if len(parts) == 2:
+            prov_id, token = parts[0].lower().strip(), parts[1].strip()
+            model_id = resolve_model_token(prov_id, token)
+            resolved_info = (prov_id, model_id) if model_id else None
+        else:
+            token = payload.strip()
+            resolved_info = resolve_model_token(token)
+
+        if resolved_info and resolved_info[1]:
             prov_id, model_id = resolved_info
-            set_user_ai_model_for_provider(db, user_id=user_id, provider_id=prov_id, model_id=model_id, chat_id=chat_id)
-            client.answer_callback_query(cb_id, text=f"Model set to {model_id}.")
+            try:
+                set_user_ai_model_for_provider(db, user_id=user_id, provider_id=prov_id, model_id=model_id, chat_id=chat_id)
+                client.answer_callback_query(cb_id, text=f"Model set to {model_id}.")
+            except ValueError as ve:
+                client.answer_callback_query(cb_id, text=str(ve), show_alert=True)
+                return
             new_prefs = get_effective_user_preferences(db, user_id)
             text, reply_markup = format_provider_models_select(new_prefs, provider_id=prov_id)
             try:
@@ -1354,7 +1383,7 @@ def handle_telegram_callback_query(
                 if "message is not modified" not in str(e).lower():
                     logger.warning(f"Failed to update provider model: {e}")
         else:
-            client.answer_callback_query(cb_id, text="Model token invalid or expired.", show_alert=True)
+            client.answer_callback_query(cb_id, text="Model token invalid, ambiguous, or expired.", show_alert=True)
         return
 
     elif raw_data == "h3:settings:speed":

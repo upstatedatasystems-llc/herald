@@ -6,16 +6,27 @@ Generates structured podcast scripts using Anthropic Messages API.
 import json
 import logging
 import re
-import time
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from herald.ai.base import AIProvider, load_system_prompt
+from herald.ai.errors import (
+    AIAuthFailedError,
+    AIClientTimeoutError,
+    AIPermissionDeniedError,
+    AIProviderError,
+    AIProviderTimeoutError,
+    AIProviderUnavailableError,
+    AIRateLimitedError,
+    AIRequestTooLargeError,
+    AISchemaInvalidError,
+)
 from herald.ai.schema import PodcastScriptResponse
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
+from herald.services.redaction import sanitize_error
 
 logger = logging.getLogger("herald.ai.anthropic")
 
@@ -154,82 +165,134 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             "content-type": "application/json",
         }
 
-        max_attempts = settings.GEMINI_RETRY_COUNT
-        backoff = 2.0
+        attempt = 1
+        t0 = datetime.now(UTC)
+        payload = {
+            "model": self._model,
+            "max_tokens": 8192,
+            "system": f"{system_prompt}{json_instruction}",
+            "messages": [{"role": "user", "content": user_content}],
+        }
 
-        for attempt in range(1, max_attempts + 1):
-            t0 = datetime.now(UTC)
-            try:
-                payload = {
-                    "model": self._model,
-                    "max_tokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
-                    "system": f"{system_prompt}{json_instruction}",
-                    "messages": [{"role": "user", "content": user_content}],
-                }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(ANTHROPIC_API_URL, json=payload, headers=headers)
+        except httpx.TimeoutException as timeout_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=timeout_err,
+                metadata={"attempt": attempt, "mode": mode_clean, "timeout_seconds": settings.effective_ai_timeout_seconds},
+            )
+            raise AIClientTimeoutError(
+                f"Anthropic client timeout connecting to {self._model}",
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+            )
+        except Exception as net_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=net_err,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            _, safe_net_err = sanitize_error(net_err)
+            raise AIProviderError(
+                f"Anthropic network failure: {safe_net_err}",
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+            )
 
-                from herald.concurrency import get_semaphores
-                with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
-                    resp = client.post(ANTHROPIC_API_URL, json=payload, headers=headers)
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            if resp.status_code == 401:
+                raise AIAuthFailedError("Anthropic authentication failed: HTTP 401", provider="anthropic", model=self._model, http_status=401)
+            if resp.status_code == 403:
+                raise AIPermissionDeniedError("Anthropic permission denied: HTTP 403", provider="anthropic", model=self._model, http_status=403)
+            if resp.status_code == 408:
+                raise AIProviderTimeoutError("Anthropic provider timeout: HTTP 408", provider="anthropic", model=self._model, http_status=408)
+            if resp.status_code == 413:
+                raise AIRequestTooLargeError("Anthropic request payload too large: HTTP 413", provider="anthropic", model=self._model, http_status=413)
+            if resp.status_code == 429:
+                retry_h = resp.headers.get("retry-after")
+                retry_s = float(retry_h) if (retry_h and retry_h.isdigit()) else None
+                raise AIRateLimitedError("Anthropic rate limited: HTTP 429", provider="anthropic", model=self._model, http_status=429, retry_after_seconds=retry_s)
+            if resp.status_code >= 500:
+                raise AIProviderUnavailableError(f"Anthropic API returned HTTP {resp.status_code}", provider="anthropic", model=self._model, http_status=resp.status_code)
+            raise AIProviderError(f"Anthropic API error ({resp.status_code}): {resp.text[:300]}", provider="anthropic", model=self._model, http_status=resp.status_code)
 
-                if resp.status_code != 200:
-                    record_ai_interaction(
-                        job_id=job_id,
-                        provider="anthropic",
-                        model=self._model,
-                        operation="script_generation",
-                        started_at=t0,
-                        completed_at=datetime.now(UTC),
-                        success=False,
-                        error=f"HTTP {resp.status_code}: {resp.text}",
-                        metadata={"attempt": attempt, "mode": mode_clean},
-                    )
-                    if attempt < max_attempts:
-                        time.sleep(backoff)
-                        backoff *= 2.0
-                        continue
-                    raise RuntimeError(f"Anthropic API error ({resp.status_code}): {resp.text}")
+        result_json = resp.json()
+        content_blocks = result_json.get("content", [])
+        text_response = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
 
-                result_json = resp.json()
-                content_blocks = result_json.get("content", [])
-                text_response = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
-                script_dict = _extract_json_block(text_response)
+        usage = result_json.get("usage", {})
+        p_tok = usage.get("input_tokens")
+        c_tok = usage.get("output_tokens")
+        t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
 
-                usage = result_json.get("usage", {})
-                p_tok = usage.get("input_tokens")
-                c_tok = usage.get("output_tokens")
-                t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
+        try:
+            script_dict = _extract_json_block(text_response)
+            parsed_script = PodcastScriptResponse(**script_dict)
 
-                record_ai_interaction(
-                    job_id=job_id,
-                    provider="anthropic",
-                    model=self._model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=datetime.now(UTC),
-                    success=True,
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    metadata={"attempt": attempt, "mode": mode_clean},
-                )
-
-                return PodcastScriptResponse(**script_dict)
-
-            except Exception as e:
-                record_ai_interaction(
-                    job_id=job_id,
-                    provider="anthropic",
-                    model=self._model,
-                    operation="script_generation",
-                    started_at=t0,
-                    completed_at=datetime.now(UTC),
-                    success=False,
-                    error=e,
-                    metadata={"attempt": attempt, "mode": mode_clean},
-                )
-                if attempt == max_attempts:
-                    raise RuntimeError(f"Anthropic script generation failed: {e}")
-                time.sleep(backoff)
-                backoff *= 2.0
-
-        raise RuntimeError("Failed to generate podcast script from Anthropic after retries.")
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            return parsed_script
+        except Exception as parse_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation="script_generation",
+                attempt=attempt,
+                http_status=resp.status_code,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=parse_err,
+                metadata={"attempt": attempt, "mode": mode_clean},
+            )
+            raise AISchemaInvalidError(
+                f"Anthropic response schema invalid: {parse_err}",
+                provider="anthropic",
+                model=self._model,
+            )
