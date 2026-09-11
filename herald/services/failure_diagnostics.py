@@ -7,16 +7,14 @@ preserves multi-attempt histories in PodcastJob.auto_diagnostics_json, and
 formats concise summaries for Telegram error notifications.
 """
 
-from datetime import UTC, datetime
 import html
-import ipaddress
 import logging
-import os
-from pathlib import Path
 import socket
 import ssl
 import threading
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -446,7 +444,7 @@ def collect_failure_diagnostics(
             if provider is not None:
                 eff_prov = provider
             elif stage == "research":
-                eff_prov = getattr(settings, "RESEARCH_PROVIDER", None) or "gemini"
+                eff_prov = getattr(settings, "RESEARCH_PROVIDER", None) or getattr(settings, "AI_PROVIDER", "gemini")
             else:
                 eff_prov = getattr(settings, "AI_PROVIDER", "none")
 

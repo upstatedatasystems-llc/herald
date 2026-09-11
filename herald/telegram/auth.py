@@ -551,8 +551,8 @@ def set_user_ai_model_for_provider(
     chat_id: int | str | None = None,
 ) -> bool:
     """Set or clear preferred model for a specific provider in ai_models_by_provider_json."""
-    from herald.ai.registry import is_provider_registered
     from herald.ai.catalog import validate_model_for_provider
+    from herald.ai.registry import is_provider_registered
 
     p_clean = str(provider_id).lower().strip()
     if not is_provider_registered(p_clean):

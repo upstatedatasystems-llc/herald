@@ -296,3 +296,72 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 provider="anthropic",
                 model=self._model,
             )
+
+    def _classify_http_error(self, resp: httpx.Response, operation: str = "script_generation") -> None:
+        status = resp.status_code
+        text_preview = resp.text[:300] if resp.text else ""
+        if status == 401:
+            raise AIAuthFailedError("Anthropic authentication failed: HTTP 401", provider="anthropic", model=self._model, http_status=401, operation=operation)
+        if status == 403:
+            raise AIPermissionDeniedError("Anthropic permission denied: HTTP 403", provider="anthropic", model=self._model, http_status=403, operation=operation)
+        if status == 408:
+            raise AIProviderTimeoutError("Anthropic provider timeout: HTTP 408", provider="anthropic", model=self._model, http_status=408, operation=operation)
+        if status == 413:
+            raise AIRequestTooLargeError("Anthropic request payload too large: HTTP 413", provider="anthropic", model=self._model, http_status=413, operation=operation)
+        if status == 429:
+            retry_h = resp.headers.get("retry-after")
+            retry_s = float(retry_h) if (retry_h and retry_h.isdigit()) else None
+            raise AIRateLimitedError("Anthropic rate limited: HTTP 429", provider="anthropic", model=self._model, http_status=429, retry_after_seconds=retry_s, operation=operation)
+        if status >= 500:
+            raise AIProviderUnavailableError(f"Anthropic API returned HTTP {status}", provider="anthropic", model=self._model, http_status=status, operation=operation)
+        raise AIProviderError(f"Anthropic API error ({status}): {text_preview}", provider="anthropic", model=self._model, http_status=status, operation=operation)
+
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """Distill key narrative facts from source chunk using Anthropic Messages API."""
+        if not self.is_configured():
+            raise AIAuthFailedError("Anthropic API key is not configured", provider="anthropic")
+
+        from herald.ai.adaptation import DISTILLATION_SYSTEM_PROMPT
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "content-type": "application/json",
+        }
+        user_prompt = (
+            f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+            f"<SOURCE_CHUNK>\n{chunk}\n</SOURCE_CHUNK>\n\n"
+            "Distill this chunk into concise, structured factual points preserving all entities, "
+            "metrics, dates, citations, and qualifiers in logical order."
+        )
+        payload = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "system": DISTILLATION_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.2,
+        }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(ANTHROPIC_API_URL, json=payload, headers=headers)
+            if resp.status_code != 200:
+                self._classify_http_error(resp, operation="distillation")
+            data = resp.json()
+            content_blocks = data.get("content", [])
+            text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+            return "".join(text_parts).strip()
+        except httpx.TimeoutException:
+            raise AIClientTimeoutError("Anthropic timeout during distillation", provider="anthropic", model=self._model, operation="distillation")
+        except Exception as e:
+            if isinstance(e, AIProviderError):
+                raise
+            if isinstance(e, httpx.NetworkError):
+                raise AIProviderUnavailableError(f"Anthropic network error during distillation: {e}", provider="anthropic", model=self._model, operation="distillation")
+            raise AIProviderError(f"Anthropic distillation error: {e}", provider="anthropic", model=self._model, operation="distillation")

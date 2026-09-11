@@ -281,3 +281,51 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 provider="ollama",
                 model=self._model,
             )
+
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """Distill key narrative facts from source chunk using Ollama."""
+        from herald.ai.adaptation import DISTILLATION_SYSTEM_PROMPT
+        url = f"{self._base_url}/api/chat"
+        user_prompt = (
+            f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+            f"<SOURCE_CHUNK>\n{chunk}\n</SOURCE_CHUNK>\n\n"
+            "Distill this chunk into concise, structured factual points preserving all entities, "
+            "metrics, dates, citations, and qualifiers in logical order."
+        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": DISTILLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.2},
+        }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload)
+            if resp.status_code == 404:
+                raise AIModelUnavailableError(f"Ollama model {self._model} not found", provider="ollama", model=self._model, operation="distillation")
+            if resp.status_code >= 500:
+                raise AIProviderUnavailableError(f"Ollama server error HTTP {resp.status_code}", provider="ollama", model=self._model, operation="distillation")
+            if resp.status_code != 200:
+                raise AIProviderError(f"Ollama error HTTP {resp.status_code}: {resp.text[:200]}", provider="ollama", model=self._model, operation="distillation")
+            data = resp.json()
+            msg = data.get("message", {})
+            return msg.get("content", "").strip()
+        except httpx.TimeoutException:
+            raise AIClientTimeoutError("Ollama timeout during distillation", provider="ollama", model=self._model, operation="distillation")
+        except Exception as e:
+            if isinstance(e, AIProviderError):
+                raise
+            if isinstance(e, httpx.NetworkError):
+                raise AIProviderUnavailableError(f"Ollama network error during distillation: {e}", provider="ollama", model=self._model, operation="distillation")
+            raise AIProviderError(f"Ollama distillation error: {e}", provider="ollama", model=self._model, operation="distillation")

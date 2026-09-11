@@ -272,15 +272,29 @@ def perform_ai_check(
         p_name = desc.display_name if desc else c.provider_id.capitalize()
         slot_tag = f"{slot_label} — {html.escape(p_name)} (Standard)" if i == 0 else f"{slot_label} ({html.escape(p_name)})"
 
+        caps = []
+        if desc and desc.capabilities:
+            if desc.capabilities.research_grounding:
+                caps.append("Research")
+            if desc.capabilities.url_context_extraction:
+                caps.append("URL Context")
+            if desc.capabilities.verification:
+                caps.append("Verification")
+        caps_str = ", ".join(caps) if caps else "Standard/Brief"
+
         if c.provider_id == "literal":
             has_any_configured = True
-            status_lines.append(f"• <b>{slot_tag}:</b> 🟢 Ready (Zero-AI narration)")
+            status_lines.append(
+                f"• <b>{slot_tag}:</b> 🟢 Ready (Zero-AI narration)\n"
+                f"  • Capabilities: <code>Literal</code>"
+            )
             continue
 
         if not is_provider_configured(c.provider_id):
             status_lines.append(
                 f"• <b>{slot_tag}:</b> ⚪ Not configured on server\n"
-                f"  • Model: <code>{html.escape(c.model_id)}</code>"
+                f"  • Model: <code>{html.escape(c.model_id)}</code>\n"
+                f"  • Capabilities: <code>{html.escape(caps_str)}</code>"
             )
             continue
 
@@ -292,13 +306,15 @@ def perform_ai_check(
                 if res.get("connected"):
                     status_lines.append(
                         f"• <b>{slot_tag}:</b> Connected\n"
-                        f"  • Model: <code>{html.escape(c.model_id)}</code>"
+                        f"  • Model: <code>{html.escape(c.model_id)}</code>\n"
+                        f"  • Capabilities: <code>{html.escape(caps_str)}</code>"
                     )
                 else:
                     err = res.get("error") or "Connection failed"
                     status_lines.append(
                         f"• <b>{slot_tag}:</b> Failed\n"
                         f"  • Model: <code>{html.escape(c.model_id)}</code>\n"
+                        f"  • Capabilities: <code>{html.escape(caps_str)}</code>\n"
                         f"  • Error: <code>{html.escape(str(err))}</code>"
                     )
             else:
@@ -310,6 +326,7 @@ def perform_ai_check(
                 f"• <b>{slot_tag}:</b> ❌ Error: <code>{html.escape(str(e))}</code>"
             )
 
+    # Research grounding capability derived from resolved candidate chain
     # Research grounding check
     res_provider = getattr(settings, "RESEARCH_PROVIDER", "gemini").lower().strip()
     from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
@@ -799,7 +816,9 @@ def handle_telegram_content_message(
                         JobState.VALIDATING.value,
                     ):
                         from herald.db.state_machine import transition_job_state
-                        from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                        from herald.services.diagnostics_export import (
+                            ensure_terminal_diagnostics_archive,
+                        )
                         from herald.services.failure_diagnostics import collect_failure_diagnostics
                         from herald.services.redaction import sanitize_error
 
@@ -1941,8 +1960,7 @@ def process_telegram_update(db: Session, client: TelegramClient, update: dict[st
         handle_telegram_content_message(db, client, message)
 
 
-from herald.telegram.approval_recovery import sweep_unpresented_approval_cards
-
+from herald.telegram.approval_recovery import sweep_unpresented_approval_cards  # noqa: E402
 
 # Backward compatibility aliases
 handle_telegram_message = handle_telegram_content_message

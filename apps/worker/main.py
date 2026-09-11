@@ -16,7 +16,7 @@ from herald.audio.ffmpeg_builder import (
 from herald.concurrency import get_semaphores, initialize_semaphores
 from herald.config import settings
 from herald.db.connection import SessionLocal
-from herald.db.models import JobState, PodcastJob, RequestMode
+from herald.db.models import JobState, PodcastJob
 from herald.db.state_machine import transition_job_state
 from herald.logging import setup_service_logging
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
@@ -216,7 +216,9 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
             db.commit()
             if target_state == JobState.FAILED_FINAL.value:
                 try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    from herald.services.diagnostics_export import (
+                        ensure_terminal_diagnostics_archive,
+                    )
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive on stale claim recovery: %s", arc_err)
@@ -544,8 +546,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             job.audio_duration_seconds = audio_info["duration_seconds"]
             job.audio_sha256 = audio_info["sha256"]
             job.audio_ready_at = datetime.now(UTC)
-            if job.request_mode != RequestMode.LITERAL.value and not job.gemini_model:
-                job.gemini_model = settings.GEMINI_MODEL if job.request_mode != RequestMode.RESEARCH.value else None
+
 
             # Clear claim fields on successful completion
             job.claimed_at = None
@@ -646,7 +647,9 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             db.commit()
             if target_failed_state == JobState.FAILED_FINAL.value:
                 try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    from herald.services.diagnostics_export import (
+                        ensure_terminal_diagnostics_archive,
+                    )
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive on worker synthesis failure: %s", arc_err)
@@ -717,7 +720,7 @@ def run_worker_loop():
     # Validate server default AI provider chain at startup boundary
     from herald.ai.registry import validate_server_default_chain
     is_valid, err = validate_server_default_chain(
-        settings.AI_PRIMARY_PROVIDER,
+        settings.AI_PROVIDER,
         settings.AI_SECONDARY_PROVIDER,
         settings.AI_TERTIARY_PROVIDER,
     )

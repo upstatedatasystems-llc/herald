@@ -326,7 +326,9 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
                 )
                 db.commit()
                 try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    from herald.services.diagnostics_export import (
+                        ensure_terminal_diagnostics_archive,
+                    )
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive on permanent delivery failure for %s: %s", job.id, arc_err)
@@ -513,7 +515,10 @@ def deliver_job_diagnostics(
     zip_path = None
     is_terminal = job.status in {JobState.COMPLETE.value, JobState.FAILED_FINAL.value, JobState.CANCELLED.value}
     try:
-        from herald.services.diagnostics_export import get_terminal_diagnostics_path, is_terminal_archive_valid
+        from herald.services.diagnostics_export import (
+            get_terminal_diagnostics_path,
+            is_terminal_archive_valid,
+        )
         canonical_path = get_terminal_diagnostics_path(job.id, job.status) if is_terminal else None
         if is_terminal and canonical_path and is_terminal_archive_valid(canonical_path, job):
             zip_path = canonical_path

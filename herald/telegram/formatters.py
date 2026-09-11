@@ -10,8 +10,6 @@ from typing import Any
 
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob, RequestMode
-
-logger = logging.getLogger(__name__)
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.settings_fingerprint import (
     are_generation_settings_identical,
@@ -19,46 +17,79 @@ from herald.services.settings_fingerprint import (
     get_job_generation_settings,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def get_job_ai_identity(job: PodcastJob) -> tuple[str | None, str | None]:
     """
-    Return truthful (provider_name, model_name) for a job based on its request mode, active provider, and persisted model evidence.
+    Return truthful (provider_name, model_name) for a job based on its request mode,
+    effective provider, interactions, and persisted model evidence.
     Returns (None, None) for Literal mode (no AI used).
+    Attribution precedence:
+      ai_effective_provider/model -> ai_interactions -> ai_provider/model -> isolated legacy fallback only.
     """
     mode = getattr(job, "request_mode", RequestMode.STANDARD.value)
     if mode == RequestMode.LITERAL.value:
         return None, None
 
-    if mode == RequestMode.RESEARCH.value:
-        model = getattr(job, "research_model", None) or getattr(settings, "GEMINI_RESEARCH_MODEL", "gemini-3.6-flash")
-        return "Gemini", model
+    provider_display_map = {
+        "gemini": "Gemini",
+        "groq": "Groq",
+        "openrouter": "OpenRouter",
+        "mistral": "Mistral",
+        "cloudflare": "Cloudflare Workers AI",
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+        "ollama": "Ollama",
+        "literal": "Literal",
+    }
 
-    # Check ai_interactions first for authoritative evidence
+    # 1. ai_effective_provider / ai_effective_model (highest precedence for completed/active operations)
+    eff_prov = getattr(job, "ai_effective_provider", None)
+    eff_mod = getattr(job, "ai_effective_model", None)
+    if eff_prov:
+        p_low = str(eff_prov).lower().strip()
+        disp_name = provider_display_map.get(p_low, p_low.capitalize())
+        return disp_name, eff_mod
+
+    # 2. ai_interactions for recorded external AI execution evidence
     if hasattr(job, "ai_interactions") and job.ai_interactions:
         first_ai = job.ai_interactions[0]
         p_low = str(first_ai.provider or "").lower().strip()
-        provider_display_map = {
-            "gemini": "Gemini",
-            "groq": "Groq",
-            "openrouter": "OpenRouter",
-            "mistral": "Mistral",
-            "cloudflare": "Cloudflare Workers AI",
-            "anthropic": "Anthropic",
-            "openai": "OpenAI",
-            "ollama": "Ollama",
-        }
         disp_name = provider_display_map.get(p_low, p_low.capitalize())
         return disp_name, first_ai.model
 
-    # Brief / Standard fallback to active AIProvider
-    from herald.ai.factory import get_ai_provider
+    # 3. Snapshotted research_provider / research_model for Research mode jobs
+    if mode == RequestMode.RESEARCH.value:
+        res_mod = getattr(job, "research_model", None)
+        gen_settings = getattr(job, "generation_settings_json", None) or {}
+        res_prov = gen_settings.get("research_provider") if isinstance(gen_settings, dict) else None
+        if not res_prov and hasattr(job, "ai_provider") and job.ai_provider:
+            res_prov = job.ai_provider
+        if res_prov or res_mod:
+            p_low = str(res_prov or "gemini").lower().strip()
+            disp_name = provider_display_map.get(p_low, p_low.capitalize())
+            return disp_name, res_mod
 
-    prov = get_ai_provider()
-    if prov:
-        return prov.provider_name, getattr(job, "gemini_model", None) or prov.configured_model
+    # 4. ai_provider / ai_model (primary configured provider)
+    ai_prov = getattr(job, "ai_provider", None)
+    ai_mod = getattr(job, "ai_model", None)
+    if ai_prov:
+        p_low = str(ai_prov).lower().strip()
+        disp_name = provider_display_map.get(p_low, p_low.capitalize())
+        return disp_name, ai_mod
 
-    model = getattr(job, "gemini_model", None) or getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash")
-    return "Gemini", model
+    # 5. Isolated legacy fallback only (historical jobs with only gemini_model column)
+    legacy_model = getattr(job, "gemini_model", None)
+    if legacy_model:
+        return "Gemini", legacy_model
+
+    # Default configured server provider
+    def_prov = getattr(settings, "AI_PROVIDER", "gemini").lower().strip()
+    disp_name = provider_display_map.get(def_prov, def_prov.capitalize())
+    def_model = getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash") if def_prov == "gemini" else None
+    return disp_name, def_model
+
 
 
 def format_duration_sec(seconds: int | float | None) -> str:

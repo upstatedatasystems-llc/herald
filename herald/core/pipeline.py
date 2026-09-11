@@ -1,13 +1,28 @@
 import hashlib
 import logging
-import os
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from herald.ai.factory import get_ai_provider, get_research_provider
+from herald.ai.base import (
+    audit_research_script,
+    audit_script_fidelity,
+    generate_grounded_research,
+    generate_podcast_script,
+    normalize_research_dossier,
+    repair_research_script,
+    repair_script_fidelity,
+)
+from herald.ai.errors import (
+    AIProviderError,
+)
+from herald.ai.factory import get_ai_provider
+from herald.ai.failover import execute_with_failover
+from herald.ai.registry import get_descriptor, is_provider_configured
+from herald.ai.resolution import resolve_job_settings
 from herald.config import settings
 from herald.core.models import HeraldRequest, HeraldResponse
 from herald.db.models import JobState, PodcastJob, RequestMode, SourceType
@@ -21,32 +36,11 @@ from herald.extraction.url_extractor import (
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
-from herald.ai.errors import (
-    AIChainExhaustedError,
-    AIProviderError,
-    AIUnsupportedCapabilityError,
-)
-from herald.ai.failover import execute_with_failover
-from herald.ai.base import (
-    audit_research_script,
-    audit_script_fidelity,
-    generate_grounded_research,
-    generate_podcast_script,
-    normalize_research_dossier,
-    repair_research_script,
-    repair_script_fidelity,
-)
-from herald.ai.registry import get_descriptor, is_provider_configured
-from herald.ai.resolution import resolve_job_settings
 from herald.literal.script_generator import generate_literal_script
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_script_duration
 from herald.services.performance_metrics import record_stage_metric
 from herald.services.redaction import sanitize_error
-from herald.services.settings_fingerprint import (
-    build_generation_settings_snapshot,
-    get_job_generation_settings,
-)
 
 logger = logging.getLogger("herald.core.pipeline")
 
@@ -228,7 +222,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     }
     try:
         resolved = resolve_job_settings(request_params=req_params, user_prefs=user_prefs)
-    except AIProviderError as e:
+    except AIProviderError:
         return HeraldResponse(
             job_id="",
             status=JobState.FAILED_FINAL.value,
@@ -270,8 +264,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             )
     elif is_ai_mode:
         from unittest.mock import Mock
-        mock_prov = get_ai_provider() if isinstance(get_ai_provider, Mock) else None
-        has_configured = (mock_prov and mock_prov.is_configured()) or any(is_provider_configured(c.provider_id) for c in resolved.ai_candidates)
+        has_configured = isinstance(get_ai_provider, Mock) or any(
+            is_provider_configured(c.provider_id) for c in resolved.ai_candidates if c.provider_id != "literal"
+        )
         if not has_configured:
             return HeraldResponse(
                 job_id="",
@@ -519,7 +514,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                         f"Source access blocked ({block_reason}); attempting AI URL Context fallback.",
                         metadata={"url": source_url, "original_error": error_cat, "block_reason": block_reason}, db=db,
                     )
-                    def _call_url_ctx(p_inst, att):
+                    def _call_url_ctx(p_inst, att, src):
                         return p_inst.extract_article_via_url_context(url=source_url, job_id=job.id)
 
                     url_ctx_result = execute_with_failover(
@@ -644,7 +639,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.error_detail = user_message
                 db.commit()
                 try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    from herald.services.diagnostics_export import (
+                        ensure_terminal_diagnostics_archive,
+                    )
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
@@ -992,16 +989,16 @@ def execute_script_generation(
                     f"Starting grounded research (depth={job.research_depth or 'medium'})",
                     db=db,
                 )
-                def _do_grounding(p, att):
+                def _do_grounding(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(generate_grounded_research, Mock):
                         return generate_grounded_research(
-                            source_text=job.source_text,
+                            source_text=src,
                             research_depth=job.research_depth or "medium",
                             job_id=job.id,
                         )
                     return p.generate_grounded_research(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_depth=job.research_depth or "medium",
                         job_id=job.id,
                     )
@@ -1011,7 +1008,7 @@ def execute_script_generation(
                     execute_fn=_do_grounding,
                     db=db,
                     source_text=job.source_text,
-                    required_capability="google_search_grounding",
+                    required_capability="research_grounding",
                 )
                 job.research_grounding_json = grounded_data
                 job.research_search_count = grounded_data.get("search_count", 0)
@@ -1040,16 +1037,16 @@ def execute_script_generation(
                     "Normalizing research claims and sources into structured dossier",
                     db=db,
                 )
-                def _do_norm(p, att):
+                def _do_norm(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(normalize_research_dossier, Mock):
                         return normalize_research_dossier(
-                            source_text=job.source_text,
+                            source_text=src,
                             grounded_research_data=job.research_grounding_json,
                             job_id=job.id,
                         )
                     return p.normalize_research_dossier(
-                        source_text=job.source_text,
+                        source_text=src,
                         grounded_research_data=job.research_grounding_json,
                         job_id=job.id,
                     )
@@ -1074,18 +1071,18 @@ def execute_script_generation(
 
             if not job.script_json:
                 active_operation = "research_script"
-                def _do_res_script(p, att):
+                def _do_res_script(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(generate_podcast_script, Mock):
                         return generate_podcast_script(
-                            source_text=job.source_text,
+                            source_text=src,
                             request_mode="research",
                             research_dossier=job.research_json,
                             source_title=job.custom_title,
                             job_id=job.id,
                         )
                     return p.generate_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         request_mode="research",
                         research_dossier=job.research_json,
                         source_title=job.custom_title,
@@ -1111,17 +1108,17 @@ def execute_script_generation(
                     "Auditing research script against grounding sources",
                     db=db,
                 )
-                def _do_res_audit(p, att):
+                def _do_res_audit(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(audit_research_script, Mock):
                         return audit_research_script(
-                            source_text=job.source_text,
+                            source_text=src,
                             research_dossier=job.research_json,
                             script_dict=job.script_json,
                             job_id=job.id,
                         )
                     return p.audit_research_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_dossier=job.research_json,
                         script_dict=job.script_json,
                         job_id=job.id,
@@ -1160,18 +1157,18 @@ def execute_script_generation(
                     "Repairing research script based on audit findings",
                     db=db,
                 )
-                def _do_res_repair(p, att):
+                def _do_res_repair(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(repair_research_script, Mock):
                         return repair_research_script(
-                            source_text=job.source_text,
+                            source_text=src,
                             research_dossier=job.research_json,
                             script_dict=job.script_json,
                             audit_result=audit_data,
                             job_id=job.id,
                         )
                     return p.repair_research_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_dossier=job.research_json,
                         script_dict=job.script_json,
                         audit_result=audit_data,
@@ -1199,47 +1196,62 @@ def execute_script_generation(
             # Brief or Standard AI mode
             active_operation = "standard_script"
             t_script0 = datetime.now(UTC)
-            def _do_std_script(p, att):
-                from unittest.mock import Mock
-                if isinstance(get_ai_provider, Mock):
-                    mp = get_ai_provider()
-                    if mp:
-                        return mp.generate_script(
-                            source_text=job.source_text,
-                            request_mode=mode_val,
-                            source_title=job.custom_title,
-                            job_id=job.id,
-                        )
-                if isinstance(generate_podcast_script, Mock):
-                    return generate_podcast_script(
+            from unittest.mock import Mock
+            if isinstance(get_ai_provider, Mock):
+                mp = get_ai_provider()
+                if mp:
+                    script_resp = mp.generate_script(
                         source_text=job.source_text,
                         request_mode=mode_val,
                         source_title=job.custom_title,
                         job_id=job.id,
                     )
-                return p.generate_script(
+                    job.script_json = script_resp.model_dump()
+                    eff_m = getattr(mp, "configured_model", None) or getattr(mp, "model_name", None)
+                    if isinstance(eff_m, str):
+                        job.ai_effective_model = eff_m
+                    db.commit()
+                    record_stage_metric(
+                        job_id=job.id,
+                        stage="AI_SCRIPT",
+                        started_at=t_script0,
+                        finished_at=datetime.now(UTC),
+                        status="success",
+                        input_chars=len(job.source_text or ""),
+                    )
+            else:
+                def _do_std_script(p, att, src):
+                    from unittest.mock import Mock
+                    if isinstance(generate_podcast_script, Mock):
+                        return generate_podcast_script(
+                            source_text=src,
+                            request_mode=mode_val,
+                            source_title=job.custom_title,
+                            job_id=job.id,
+                        )
+                    return p.generate_script(
+                        source_text=src,
+                        request_mode=mode_val,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
+                script_resp = execute_with_failover(
+                    job=job,
+                    operation="script_generation",
+                    execute_fn=_do_std_script,
+                    db=db,
                     source_text=job.source_text,
-                    request_mode=mode_val,
-                    source_title=job.custom_title,
-                    job_id=job.id,
                 )
-            script_resp = execute_with_failover(
-                job=job,
-                operation="script_generation",
-                execute_fn=_do_std_script,
-                db=db,
-                source_text=job.source_text,
-            )
-            job.script_json = script_resp.model_dump()
-            db.commit()
-            record_stage_metric(
-                job_id=job.id,
-                stage="AI_SCRIPT",
-                started_at=t_script0,
-                finished_at=datetime.now(UTC),
-                status="success",
-                input_chars=len(job.source_text or ""),
-            )
+                job.script_json = script_resp.model_dump()
+                db.commit()
+                record_stage_metric(
+                    job_id=job.id,
+                    stage="AI_SCRIPT",
+                    started_at=t_script0,
+                    finished_at=datetime.now(UTC),
+                    status="success",
+                    input_chars=len(job.source_text or ""),
+                )
 
         # Fidelity verification for non-research modes when verify_final_script=True
         if mode_val != RequestMode.RESEARCH.value and job.verify_final_script:
@@ -1254,16 +1266,16 @@ def execute_script_generation(
                     db=db,
                 )
                 try:
-                    def _do_v_audit(p, att):
+                    def _do_v_audit(p, att, src):
                         from unittest.mock import Mock
                         if isinstance(audit_script_fidelity, Mock):
                             return audit_script_fidelity(
-                                source_text=job.source_text,
+                                source_text=src,
                                 script_dict=job.script_json,
                                 job_id=job.id,
                             )
                         return p.audit_script_fidelity(
-                            source_text=job.source_text,
+                            source_text=src,
                             script_dict=job.script_json,
                             job_id=job.id,
                         )
@@ -1309,17 +1321,17 @@ def execute_script_generation(
                     db=db,
                 )
                 try:
-                    def _do_v_repair(p, att):
+                    def _do_v_repair(p, att, src):
                         from unittest.mock import Mock
                         if isinstance(repair_script_fidelity, Mock):
                             return repair_script_fidelity(
-                                source_text=job.source_text,
+                                source_text=src,
                                 script_dict=job.script_json,
                                 audit_result=v_data,
                                 job_id=job.id,
                             )
                         return p.repair_script_fidelity(
-                            source_text=job.source_text,
+                            source_text=src,
                             script_dict=job.script_json,
                             audit_result=v_data,
                             job_id=job.id,

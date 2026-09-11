@@ -1,22 +1,19 @@
-import json
 from unittest.mock import MagicMock, patch
+
 import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.ai.adaptation import AdaptationBudget, AdaptationUsage, adapt_source_text
-from herald.ai.capabilities import AIModelCapabilities, ProviderCapabilities
 from herald.ai.catalog import (
     generate_model_token,
     get_models_for_provider,
     resolve_model_token,
-    validate_model_for_provider,
 )
 from herald.ai.cloudflare_provider import CloudflareProvider, extract_cloudflare_content
 from herald.ai.errors import (
     AIAuthFailedError,
-    AIChainExhaustedError,
     AIClientTimeoutError,
     AIContextExceededError,
     AIPermissionDeniedError,
@@ -25,17 +22,13 @@ from herald.ai.errors import (
     AIProviderUnavailableError,
     AIRateLimitedError,
     AIRequestTooLargeError,
-    AISchemaInvalidError,
 )
 from herald.ai.failover import execute_with_failover
 from herald.ai.groq_provider import GroqProvider
 from herald.ai.openai_provider import OpenAIProvider
 from herald.ai.policy import ActionType, decide_failover_action
-from herald.ai.literal_provider import LiteralProvider
 from herald.ai.registry import (
     create_provider,
-    get_descriptor,
-    is_provider_configured,
     is_provider_registered,
 )
 from herald.ai.resolution import (
@@ -43,14 +36,23 @@ from herald.ai.resolution import (
     ResolvedJobSettings,
     resolve_job_settings,
 )
-from herald.config import settings
 from herald.db.models import Base, PodcastJob, TelegramUser
-from herald.extraction.url_extractor import ExtractionResult, extract_article_from_url
+from herald.extraction.url_extractor import extract_article_from_url
 from herald.telegram.auth import (
-    get_effective_user_preferences,
-    set_user_ai_model_for_provider,
     set_user_ai_provider_chain,
 )
+
+
+def create_test_job(chain: list[dict[str, str]], failover_index: int = 0) -> PodcastJob:
+    return PodcastJob(
+        id="test-job-regress-123",
+        transport="telegram",
+        status="RECEIVED",
+        ai_provider=chain[0]["provider"] if chain else "gemini",
+        ai_model=chain[0]["model"] if chain else "gemini-3.5-flash",
+        ai_provider_chain_json=chain,
+        ai_failover_index=failover_index,
+    )
 
 
 def test_cloudflare_all_4_response_shapes():
@@ -94,31 +96,48 @@ def test_cloudflare_error_classification():
 
 
 def test_cloudflare_qwen_and_gemma_authoritative_tuning():
-    """Verify Qwen and Gemma request payloads contain authoritative catalog metadata."""
-    prov_qwen = CloudflareProvider(
+    """Verify verified catalog Qwen and Gemma request payloads contain authoritative tuning, but unverified models do not."""
+    # 1. Verified catalog models get authoritative tuning
+    prov_qwen_verified = CloudflareProvider(
         account_id="acc",
         api_token="tok",
-        model="@cf/qwen/qwen2.5-72b-instruct",
+        model="@cf/qwen/qwen3.8-27b",
     )
-    payload_qwen = prov_qwen._build_request_payload(
+    payload_qwen = prov_qwen_verified._build_request_payload(
         system_prompt="sys",
         user_prompt="usr",
         max_output_tokens=16384,
     )
     assert payload_qwen["max_tokens"] == 16384
     assert payload_qwen["reasoning_effort"] == "low"
+    assert payload_qwen["max_completion_tokens"] == 16384
 
-    prov_gemma = CloudflareProvider(
+    prov_gemma_verified = CloudflareProvider(
         account_id="acc",
         api_token="tok",
-        model="@cf/google/gemma-7b-it",
+        model="@cf/google/gemma-4-26b-a4b-it",
     )
-    payload_gemma = prov_gemma._build_request_payload(
+    payload_gemma = prov_gemma_verified._build_request_payload(
         system_prompt="sys",
         user_prompt="usr",
-        max_output_tokens=8192,
+        max_output_tokens=16384,
     )
-    assert payload_gemma["max_tokens"] == 8192
+    assert payload_gemma["max_tokens"] == 16384
+    assert payload_gemma["reasoning_effort"] == "low"
+    assert payload_gemma["max_completion_tokens"] == 16384
+
+    # 2. Unverified arbitrary model with 'qwen' or 'gemma' in name must NOT get special tuning
+    prov_unverified = CloudflareProvider(
+        account_id="acc",
+        api_token="tok",
+        model="@cf/qwen/custom-unverified-qwen-model",
+    )
+    payload_unverified = prov_unverified._build_request_payload(
+        system_prompt="sys",
+        user_prompt="usr",
+    )
+    assert "reasoning_effort" not in payload_unverified
+    assert "max_completion_tokens" not in payload_unverified
 
 
 def test_groq_413_vs_context_exceeded():
@@ -405,6 +424,7 @@ def test_extraction_sanity_metrics_returned():
 def test_non_gemini_providers_clean_of_gemini_settings():
     """Verify OpenAI, Groq, Cloudflare, Anthropic, Ollama do not read generic GEMINI_* settings."""
     import inspect
+
     from herald.ai import (
         anthropic_provider,
         cloudflare_provider,
@@ -425,3 +445,236 @@ def test_non_gemini_providers_clean_of_gemini_settings():
         assert "GEMINI_RETRY_COUNT" not in src, f"{mod.__name__} reads GEMINI_RETRY_COUNT"
         assert "GEMINI_TEMPERATURE" not in src, f"{mod.__name__} reads GEMINI_TEMPERATURE"
         assert "GEMINI_MAX_OUTPUT_TOKENS" not in src, f"{mod.__name__} reads GEMINI_MAX_OUTPUT_TOKENS"
+
+
+def test_startup_validation_uses_ai_provider():
+    """Verify startup validation in api, worker, and telegram_bot uses settings.AI_PROVIDER."""
+    import inspect
+
+    from apps.api import main as api_main
+    from apps.telegram_bot import main as bot_main
+    from apps.worker import main as worker_main
+
+    api_src = inspect.getsource(api_main.validate_server_chain_startup)
+    assert "settings.AI_PROVIDER" in api_src
+    assert "settings.AI_PRIMARY_PROVIDER" not in api_src
+
+    worker_src = inspect.getsource(worker_main.run_worker_loop)
+    assert "settings.AI_PROVIDER" in worker_src
+    assert "settings.AI_PRIMARY_PROVIDER" not in worker_src
+
+    bot_src = inspect.getsource(bot_main.main)
+    assert "validate_server_default_chain" in bot_src
+    assert "settings.AI_PROVIDER" in bot_src
+
+
+def test_research_through_research_grounding():
+    """Verify pipeline.py requires capability 'research_grounding', not 'google_search_grounding'."""
+    import inspect
+
+    from herald.core import pipeline
+
+    pipeline_src = inspect.getsource(pipeline)
+    assert 'required_capability="research_grounding"' in pipeline_src
+    assert "google_search_grounding" not in pipeline_src
+
+
+def test_adapted_source_forwarded_to_execute_fn():
+    """Verify execute_with_failover forwards adapted source_text to execute_fn."""
+    chain = [{"provider": "groq", "model": "groq/compound"}]
+    job = create_test_job(chain)
+    job.source_text = "original_large_text"
+    received_sources = []
+
+    def mock_exec(prov, attempt, source_text=None):
+        received_sources.append(source_text)
+        if attempt == 1:
+            raise AIRequestTooLargeError("Source too large")
+        return "adapted-success"
+
+    with patch("herald.ai.failover.is_provider_configured", return_value=True), \
+         patch("herald.ai.failover.adapt_source_text", return_value="adapted_compact_text"):
+        result = execute_with_failover(
+            job,
+            operation="script_generation",
+            execute_fn=mock_exec,
+            source_text=job.source_text,
+            max_same_provider_attempts=2,
+        )
+
+    assert result == "adapted-success"
+    assert received_sources == ["original_large_text", "adapted_compact_text"]
+    # Invariant: job.source_text remains canonical
+    assert job.source_text == "original_large_text"
+
+
+def test_fail_final_never_advances_cursor_execution():
+    """Verify FAIL_FINAL immediately raises without advancing cursor to next candidate."""
+    chain = [
+        {"provider": "groq", "model": "groq/compound"},
+        {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"},
+        {"provider": "openai", "model": "gpt-4o"},
+    ]
+    job = create_test_job(chain, failover_index=0)
+    invoked = []
+
+    def mock_exec(prov, attempt, src=None):
+        invoked.append(prov.provider_name)
+        raise AIProviderError("Terminal unrecoverable error", category="unclassified")
+
+    with patch("herald.ai.failover.is_provider_configured", return_value=True):
+        with pytest.raises(AIProviderError, match="Terminal unrecoverable error"):
+            execute_with_failover(
+                job,
+                operation="script_generation",
+                execute_fn=mock_exec,
+            )
+
+    # Must only attempt Groq; never advance to Cloudflare or OpenAI
+    assert invoked == ["Groq"]
+    assert job.ai_failover_index == 0
+
+
+def test_no_direct_gemini_timeout_uses():
+    """Verify gemini/client.py uses effective_ai_timeout_seconds and has no direct GEMINI_TIMEOUT_SECONDS in httpx clients."""
+    with open("herald/gemini/client.py", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    assert "httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS)" not in content
+    assert "timeout=settings.effective_ai_timeout_seconds" in content
+
+
+def test_no_runtime_gemini_model_writes_in_worker():
+    """Verify worker/main.py does not write job.gemini_model for completed jobs."""
+    with open("apps/worker/main.py", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    assert "job.gemini_model = settings.GEMINI_MODEL" not in content
+
+
+def test_research_snapshot_survives_env_changes():
+    """Verify get_job_ai_identity uses snapshotted research model without rereading settings."""
+    from herald.telegram.formatters import get_job_ai_identity
+
+    job = PodcastJob(
+        id="job-res-1",
+        request_mode="research",
+        research_model="gemini-custom-research-v1",
+        generation_settings_json={"research_provider": "gemini"},
+    )
+
+    with patch("herald.config.settings.GEMINI_RESEARCH_MODEL", "gemini-other-env"):
+        prov_name, model_name = get_job_ai_identity(job)
+
+    assert prov_name == "Gemini"
+    assert model_name == "gemini-custom-research-v1"
+
+
+def test_ai_check_stays_inside_user_chain():
+    """Verify perform_ai_check inspects capabilities for candidates and has no separate RESEARCH_PROVIDER check."""
+    from herald.telegram.bot import perform_ai_check
+
+    mock_client = MagicMock()
+    db = MagicMock()
+
+    with patch("herald.telegram.bot.get_effective_user_preferences", return_value={}), \
+         patch("herald.telegram.bot.get_ai_provider") as mock_get_p:
+        mock_prov = MagicMock()
+        mock_prov.check_connection.return_value = {"connected": True}
+        mock_get_p.return_value = mock_prov
+        perform_ai_check(db, mock_client, chat_id=123, user_id=456)
+
+    assert mock_client.send_message.call_count >= 2
+    final_text = mock_client.send_message.call_args_list[-1][1]["text"]
+    assert "Your Failover Chain:" in final_text
+    assert "Research Grounding:" in final_text
+    # Capabilities reported in output
+    assert "Capabilities:" in final_text
+
+
+def test_provider_distillation_actually_runs():
+    """Verify distill_chunk invokes provider.distill_text and propagates typed errors."""
+    from herald.ai.adaptation import distill_chunk
+
+    mock_prov = MagicMock()
+    mock_prov.distill_text.return_value = "Structured distilled text"
+
+    res = distill_chunk("Long text chunk", chunk_index=0, total_chunks=1, provider=mock_prov)
+    assert res == "Structured distilled text"
+    mock_prov.distill_text.assert_called_once()
+
+    # Verify typed errors are NOT silently swallowed
+    mock_failing_prov = MagicMock()
+    mock_failing_prov.distill_text.side_effect = AIRateLimitedError("Rate limit in distillation")
+
+    with pytest.raises(AIRateLimitedError):
+        distill_chunk("Long text chunk", chunk_index=0, total_chunks=1, provider=mock_failing_prov)
+
+
+def test_unknown_discovered_models_have_unknown_limits():
+    """Verify live discovery sets context_window=None, max_output=None for unknown models."""
+    prov = OpenAIProvider(api_key="sk-test")
+    fake_models_resp = {
+        "data": [
+            {"id": "unknown-brand-new-model-2026"},
+        ]
+    }
+
+    with patch("httpx.Client.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = fake_models_resp
+        mock_get.return_value = mock_resp
+
+        discovered = prov.discover_models()
+
+    assert len(discovered) == 1
+    m = discovered[0]
+    assert m.model_id == "unknown-brand-new-model-2026"
+    assert m.context_window is None
+    assert m.max_output is None
+
+
+def test_configured_secondary_keeps_ai_mode_available_when_primary_unconfigured():
+    """When Primary is unconfigured but Secondary has valid credentials, AI mode is available."""
+    from herald.ai.resolution import resolve_job_settings
+
+    # Primary (gemini) unconfigured, Secondary (groq) configured
+    with patch("herald.config.settings.AI_PROVIDER", "gemini"), \
+         patch("herald.config.settings.AI_SECONDARY_PROVIDER", "groq"), \
+         patch("herald.config.settings.AI_TERTIARY_PROVIDER", None), \
+         patch("herald.config.settings.GEMINI_API_KEY", ""), \
+         patch("herald.config.settings.GROQ_API_KEY", "gsk_valid_key"), \
+         patch("herald.ai.registry.is_provider_configured", side_effect=lambda p: p == "groq"):
+        resolved = resolve_job_settings(request_params={}, user_prefs={})
+
+    assert resolved.mode == "standard"
+    assert len(resolved.ai_candidates) == 2
+
+
+def test_do_not_silently_repair_invalid_server_chains():
+    """Verify get_server_default_chain raises ValueError on invalid configuration."""
+    from herald.ai.resolution import get_server_default_chain
+
+    mock_cfg = MagicMock()
+    mock_cfg.AI_PROVIDER = "groq"
+    mock_cfg.AI_SECONDARY_PROVIDER = "groq"  # Duplicate -> invalid chain
+    mock_cfg.AI_TERTIARY_PROVIDER = None
+
+    with pytest.raises(ValueError) as exc:
+        get_server_default_chain(mock_cfg)
+
+    assert "Invalid server default AI provider chain" in str(exc.value)
+
+
+def test_config_no_duplicate_adaptation_block():
+    """Verify Settings has only one ADAPTATION_* block containing ADAPTATION_CHUNK_MAX_CHARS."""
+    with open("herald/config.py", "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    adaptation_chunk_lines = [line for line in lines if "ADAPTATION_CHUNK_MAX_CHARS" in line]
+    assert len(adaptation_chunk_lines) == 1
+
+    adaptation_max_chunks_lines = [line for line in lines if "ADAPTATION_MAX_CHUNKS" in line]
+    assert len(adaptation_max_chunks_lines) == 1
+

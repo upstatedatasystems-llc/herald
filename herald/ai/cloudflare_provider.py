@@ -234,15 +234,6 @@ class CloudflareProvider(AIProvider):
         except Exception:
             pass
 
-        model_lower = (self._model or "").lower()
-        if "qwen" in model_lower:
-            if "reasoning_effort" not in payload:
-                payload["reasoning_effort"] = "low"
-            if "max_completion_tokens" not in payload:
-                payload["max_completion_tokens"] = 16384
-        if ("gemma-4" in model_lower or "gemma" in model_lower) and "max_completion_tokens" not in payload:
-            payload["max_completion_tokens"] = 16384
-
         return payload
 
     def _classify_transport_error(self, exc: Exception, operation: str = "script_generation") -> None:
@@ -552,14 +543,7 @@ class CloudflareProvider(AIProvider):
             except Exception:
                 pass
 
-            model_lower = self._model.lower()
-            if "qwen" in model_lower:
-                if "reasoning_effort" not in repair_payload:
-                    repair_payload["reasoning_effort"] = "low"
-                if "max_completion_tokens" not in repair_payload:
-                    repair_payload["max_completion_tokens"] = 16384
-            if ("gemma-4" in model_lower or "gemma" in model_lower) and "max_completion_tokens" not in repair_payload:
-                repair_payload["max_completion_tokens"] = 16384
+
 
             try:
                 from herald.concurrency import get_semaphores
@@ -723,4 +707,66 @@ class CloudflareProvider(AIProvider):
                     model=self._model,
                     operation="script_repair",
                 )
+
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """Distill key narrative facts from source chunk using Cloudflare Workers AI."""
+        if not self.is_configured():
+            raise AIAuthFailedError("Cloudflare Workers AI credentials missing", provider="cloudflare")
+
+        from herald.ai.adaptation import DISTILLATION_SYSTEM_PROMPT
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self._account_id}/ai/run/{self._model}"
+        headers = {
+            "Authorization": f"Bearer {self._api_token}",
+            "Content-Type": "application/json",
+        }
+        user_prompt = (
+            f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+            f"<SOURCE_CHUNK>\n{chunk}\n</SOURCE_CHUNK>\n\n"
+            "Distill this chunk into concise, structured factual points preserving all entities, "
+            "metrics, dates, citations, and qualifiers in logical order."
+        )
+        payload = self._build_request_payload(
+            system_prompt=DISTILLATION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.2,
+        )
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                self._classify_http_error(resp, operation="distillation")
+            data = resp.json()
+            raw_text = self._extract_response_text(data)
+            return raw_text.strip()
+        except httpx.TimeoutException:
+            raise AIClientTimeoutError(
+                "Cloudflare Workers AI timeout during distillation",
+                provider="cloudflare",
+                model=self._model,
+                operation="distillation",
+            )
+        except Exception as e:
+            if isinstance(e, AIProviderError):
+                raise
+            if isinstance(e, httpx.NetworkError):
+                raise AIProviderUnavailableError(
+                    f"Cloudflare Workers AI network error during distillation: {e}",
+                    provider="cloudflare",
+                    model=self._model,
+                    operation="distillation",
+                )
+            raise AIProviderError(
+                f"Cloudflare Workers AI distillation error: {e}",
+                provider="cloudflare",
+                model=self._model,
+                operation="distillation",
+            )
 

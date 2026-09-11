@@ -3,7 +3,8 @@ Unit tests for deterministic AI provider failover execution, sticky provider sta
 capability skipping, and negative non-failover protections.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
 import pytest
 
 from herald.ai.errors import (
@@ -39,7 +40,7 @@ def test_primary_success_does_not_call_secondary():
     job = create_test_job(chain)
     calls = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         calls.append((provider_instance.provider_name, attempt))
         return "success-primary"
 
@@ -62,7 +63,7 @@ def test_primary_failure_moves_to_secondary_and_becomes_sticky():
     job = create_test_job(chain)
     calls = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         calls.append((provider_instance.provider_name, attempt))
         if provider_instance.provider_name == "Groq":
             raise AIRateLimitedError("Groq 429 quota exhausted", retry_after_seconds=0.01)
@@ -92,7 +93,7 @@ def test_primary_failure_moves_to_secondary_and_becomes_sticky():
     # Second subsequent operation on same job MUST NOT return to Groq!
     subsequent_calls = []
 
-    def mock_second_exec(provider_instance, attempt):
+    def mock_second_exec(provider_instance, attempt, src=None):
         subsequent_calls.append(provider_instance.provider_name)
         return "success-subsequent"
 
@@ -117,7 +118,7 @@ def test_secondary_failure_moves_to_tertiary():
     job = create_test_job(chain)
     calls = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         calls.append(provider_instance.provider_name)
         if provider_instance.provider_name == "Groq":
             raise AIAuthFailedError("Groq invalid key")  # Immediate failover
@@ -142,7 +143,7 @@ def test_chain_exhaustion_returns_combined_safe_failure():
     ]
     job = create_test_job(chain)
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         if provider_instance.provider_name == "Groq":
             raise AIAuthFailedError("Groq 401 unauthorized")
         raise AIProviderTimeoutError("Cloudflare 504 timeout")
@@ -172,7 +173,7 @@ def test_failover_never_uses_provider_outside_snapshot():
     job = create_test_job(chain)
     invoked_providers = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         invoked_providers.append(provider_instance.provider_name)
         raise AIAuthFailedError("Failure")
 
@@ -198,7 +199,7 @@ def test_capability_aware_skipping():
     job = create_test_job(chain)
     invoked = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         invoked.append(provider_instance.provider_name)
         return "grounded-dossier"
 
@@ -226,7 +227,7 @@ def test_recovery_resumes_from_failover_cursor():
     job = create_test_job(chain, failover_index=1)
     invoked = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         invoked.append(provider_instance.provider_name)
         return "success-recovery"
 
@@ -250,13 +251,13 @@ def test_negative_failover_programmer_error_does_not_failover():
     job = create_test_job(chain)
     invoked = []
 
-    def mock_bug_exec(provider_instance, attempt):
+    def mock_bug_exec(provider_instance, attempt, src=None):
         invoked.append(provider_instance.provider_name)
         # Simulate application programmer bug
         raise TypeError("unsupported operand type(s) for +: 'int' and 'str'")
 
     with patch("herald.ai.failover.is_provider_configured", return_value=True):
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(Exception):
             execute_with_failover(job, operation="script_generation", execute_fn=mock_bug_exec)
 
     # Prove Secondary was NEVER invoked for a programmer bug!
@@ -272,7 +273,7 @@ def test_literal_mode_has_zero_provider_calls():
     job.request_mode = "literal"
     invoked = []
 
-    def mock_exec(provider_instance, attempt):
+    def mock_exec(provider_instance, attempt, src=None):
         invoked.append(provider_instance.provider_name)
         return "literal-result"
 

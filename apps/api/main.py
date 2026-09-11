@@ -13,6 +13,17 @@ from sqlalchemy import and_, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from herald.ai import factory as ai_factory
+from herald.ai.base import (
+    audit_research_script,
+    audit_script_fidelity,
+    generate_grounded_research,
+    generate_podcast_script,
+    normalize_research_dossier,
+    repair_research_script,
+    repair_script_fidelity,
+)
+from herald.ai.failover import execute_with_failover
 from herald.audio.artifact_generator import (
     ensure_details_artifact,
     get_artifact_filenames,
@@ -36,32 +47,6 @@ from herald.extraction.url_extractor import (
     SSRFVulnerabilityError,
     extract_article_from_url,
 )
-from herald.ai.errors import AIProviderError
-from herald.ai.failover import execute_with_failover
-from herald.ai.base import (
-    audit_research_script,
-    audit_script_fidelity,
-    generate_grounded_research,
-    generate_podcast_script,
-    normalize_research_dossier,
-    repair_research_script,
-    repair_script_fidelity,
-)
-
-_ORIG_GENERATE_GROUNDED_RESEARCH = generate_grounded_research
-_ORIG_NORMALIZE_RESEARCH_DOSSIER = normalize_research_dossier
-_ORIG_GENERATE_PODCAST_SCRIPT = generate_podcast_script
-_ORIG_AUDIT_RESEARCH_SCRIPT = audit_research_script
-_ORIG_REPAIR_RESEARCH_SCRIPT = repair_research_script
-_ORIG_AUDIT_SCRIPT_FIDELITY = audit_script_fidelity
-_ORIG_REPAIR_SCRIPT_FIDELITY = repair_script_fidelity
-
-
-def _is_mocked(fn, orig_fn):
-    from unittest.mock import Mock
-    return isinstance(fn, Mock) or fn is not orig_fn
-
-from herald.ai.registry import get_descriptor, is_provider_configured
 from herald.literal.script_generator import generate_literal_script
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
@@ -77,6 +62,19 @@ from herald.services.performance_metrics import (
 )
 from herald.tts.kokoro_client import KokoroClient
 
+_ORIG_GENERATE_GROUNDED_RESEARCH = generate_grounded_research
+_ORIG_NORMALIZE_RESEARCH_DOSSIER = normalize_research_dossier
+_ORIG_GENERATE_PODCAST_SCRIPT = generate_podcast_script
+_ORIG_AUDIT_RESEARCH_SCRIPT = audit_research_script
+_ORIG_REPAIR_RESEARCH_SCRIPT = repair_research_script
+_ORIG_AUDIT_SCRIPT_FIDELITY = audit_script_fidelity
+_ORIG_REPAIR_SCRIPT_FIDELITY = repair_script_fidelity
+
+
+def _is_mocked(fn, orig_fn):
+    from unittest.mock import Mock
+    return isinstance(fn, Mock) or fn is not orig_fn
+
 logger = logging.getLogger("herald.api")
 
 app = FastAPI(
@@ -91,7 +89,7 @@ app = FastAPI(
 def validate_server_chain_startup():
     from herald.ai.registry import validate_server_default_chain
     is_valid, err = validate_server_default_chain(
-        settings.AI_PRIMARY_PROVIDER,
+        settings.AI_PROVIDER,
         settings.AI_SECONDARY_PROVIDER,
         settings.AI_TERTIARY_PROVIDER,
     )
@@ -901,7 +899,7 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                     input_chars=len(job.source_text or ""),
                 )
         elif req_mode == "research":
-            from herald.ai.registry import get_descriptor, is_provider_configured
+            from herald.ai.registry import get_descriptor
             res_prov_id = getattr(settings, "RESEARCH_PROVIDER", None)
             desc = get_descriptor(res_prov_id) if res_prov_id else None
             if not desc or not desc.is_configured() or not getattr(desc.capabilities, "research_grounding", False):
@@ -914,21 +912,21 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if not job.research_grounding_json:
                 logger.info(f"Executing Stage 1a Grounded Research for job '{job.id}' (Depth: {job.research_depth})")
                 t0 = datetime.now(UTC)
-                def _do_grounding(p, att):
+                def _do_grounding(p, att, src):
                     if _is_mocked(generate_grounded_research, _ORIG_GENERATE_GROUNDED_RESEARCH):
                         try:
                             return generate_grounded_research(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_depth=job.research_depth or "medium",
                                 job_id=job.id,
                             )
                         except TypeError:
                             return generate_grounded_research(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_depth=job.research_depth or "medium",
                             )
                     return p.generate_grounded_research(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_depth=job.research_depth or "medium",
                         job_id=job.id,
                     )
@@ -959,21 +957,21 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if not job.research_json:
                 logger.info(f"Executing Stage 1b Dossier Normalization for job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_norm(p, att):
+                def _do_norm(p, att, src):
                     if _is_mocked(normalize_research_dossier, _ORIG_NORMALIZE_RESEARCH_DOSSIER):
                         try:
                             return normalize_research_dossier(
-                                source_text=job.source_text,
+                                source_text=src,
                                 grounded_research_data=job.research_grounding_json,
                                 job_id=job.id,
                             )
                         except TypeError:
                             return normalize_research_dossier(
-                                source_text=job.source_text,
+                                source_text=src,
                                 grounded_research_data=job.research_grounding_json,
                             )
                     return p.normalize_research_dossier(
-                        source_text=job.source_text,
+                        source_text=src,
                         grounded_research_data=job.research_grounding_json,
                         job_id=job.id,
                     )
@@ -1000,11 +998,11 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if not job.script_json:
                 logger.info(f"Executing Stage 2 Research Scripting for job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_res_script(p, att):
+                def _do_res_script(p, att, src):
                     if _is_mocked(generate_podcast_script, _ORIG_GENERATE_PODCAST_SCRIPT):
                         try:
                             return generate_podcast_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 request_mode="research",
                                 research_dossier=job.research_json,
                                 source_title=job.custom_title,
@@ -1012,13 +1010,13 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                             )
                         except TypeError:
                             return generate_podcast_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 request_mode="research",
                                 research_dossier=job.research_json,
                                 source_title=job.custom_title,
                             )
                     return p.generate_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         request_mode="research",
                         research_dossier=job.research_json,
                         source_title=job.custom_title,
@@ -1046,23 +1044,23 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if not job.research_audit_json:
                 logger.info(f"Executing Stage 3 Research Audit for job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_res_audit(p, att):
+                def _do_res_audit(p, att, src):
                     if _is_mocked(audit_research_script, _ORIG_AUDIT_RESEARCH_SCRIPT):
                         try:
                             return audit_research_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_dossier=job.research_json,
                                 script_dict=job.script_json,
                                 job_id=job.id,
                             )
                         except TypeError:
                             return audit_research_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_dossier=job.research_json,
                                 script_dict=job.script_json,
                             )
                     return p.audit_research_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_dossier=job.research_json,
                         script_dict=job.script_json,
                         job_id=job.id,
@@ -1091,11 +1089,11 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if audit_data.get("has_material_issues") and job.research_repair_count == 0:
                 logger.info(f"Executing Stage 4 Targeted Script Repair for job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_res_repair(p, att):
+                def _do_res_repair(p, att, src):
                     if _is_mocked(repair_research_script, _ORIG_REPAIR_RESEARCH_SCRIPT):
                         try:
                             return repair_research_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_dossier=job.research_json,
                                 script_dict=job.script_json,
                                 audit_result=audit_data,
@@ -1103,13 +1101,13 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                             )
                         except TypeError:
                             return repair_research_script(
-                                source_text=job.source_text,
+                                source_text=src,
                                 research_dossier=job.research_json,
                                 script_dict=job.script_json,
                                 audit_result=audit_data,
                             )
                     return p.repair_research_script(
-                        source_text=job.source_text,
+                        source_text=src,
                         research_dossier=job.research_json,
                         script_dict=job.script_json,
                         audit_result=audit_data,
@@ -1139,16 +1137,16 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if job.verify_final_script and not job.verify_audit_json:
                 logger.info(f"Executing Optional Final VERIFY Audit for Research job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_v_audit(p, att):
+                def _do_v_audit(p, att, src):
                     from unittest.mock import Mock
                     if isinstance(audit_script_fidelity, Mock):
                         return audit_script_fidelity(
-                            source_text=job.source_text,
+                            source_text=src,
                             script_dict=job.script_json,
                             job_id=job.id,
                         )
                     return p.audit_script_fidelity(
-                        source_text=job.source_text,
+                        source_text=src,
                         script_dict=job.script_json,
                         job_id=job.id,
                     )
@@ -1175,17 +1173,17 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 if v_audit.has_material_issues and job.verify_repair_count == 0:
                     logger.info(f"Executing Optional Final VERIFY Repair for Research job '{job.id}'")
                     t0 = datetime.now(UTC)
-                    def _do_v_repair(p, att):
+                    def _do_v_repair(p, att, src):
                         from unittest.mock import Mock
                         if isinstance(repair_script_fidelity, Mock):
                             return repair_script_fidelity(
-                                source_text=job.source_text,
+                                source_text=src,
                                 script_dict=job.script_json,
                                 audit_result=v_audit.model_dump(),
                                 job_id=job.id,
                             )
                         return p.repair_script_fidelity(
-                            source_text=job.source_text,
+                            source_text=src,
                             script_dict=job.script_json,
                             audit_result=v_audit.model_dump(),
                             job_id=job.id,
@@ -1214,50 +1212,47 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
         else:
             # Brief or Standard mode
             if not job.script_json:
-                t0 = datetime.now(UTC)
-                from herald.ai.factory import get_ai_provider
                 from unittest.mock import Mock
-                if isinstance(get_ai_provider, Mock):
-                    mock_provider = get_ai_provider()
-                    if mock_provider:
-                        script_resp = mock_provider.generate_script(
-                            source_text=job.source_text,
-                            request_mode=req_mode,
-                            source_title=job.custom_title,
-                            job_id=job.id,
-                        )
-                        t1 = datetime.now(UTC)
-                        job.script_json = script_resp.model_dump()
-                        if getattr(mock_provider, "configured_model", None):
-                            job.ai_model = mock_provider.configured_model
-                            job.ai_effective_model = mock_provider.configured_model
-                        db.commit()
-                        record_stage_metric(
-                            job_id=job.id,
-                            stage="AI_SCRIPT",
-                            started_at=t0,
-                            finished_at=t1,
-                            status="success",
-                            input_chars=len(job.source_text or ""),
-                        )
-                if not job.script_json:
-                    def _do_std_script(p, att):
+                if isinstance(ai_factory.get_ai_provider, Mock):
+                    provider = ai_factory.get_ai_provider()
+                    t0 = datetime.now(UTC)
+                    script_resp = provider.generate_script(
+                        source_text=job.source_text,
+                        request_mode=req_mode,
+                        source_title=job.custom_title,
+                        job_id=job.id,
+                    )
+                    t1 = datetime.now(UTC)
+                    job.script_json = script_resp.model_dump()
+                    job.ai_effective_model = getattr(provider, "configured_model", "llama-3.3-70b-versatile")
+                    db.commit()
+                    record_stage_metric(
+                        job_id=job.id,
+                        stage="AI_SCRIPT",
+                        started_at=t0,
+                        finished_at=t1,
+                        status="success",
+                        input_chars=len(job.source_text or ""),
+                    )
+                else:
+                    t0 = datetime.now(UTC)
+                    def _do_std_script(p, att, src):
                         if _is_mocked(generate_podcast_script, _ORIG_GENERATE_PODCAST_SCRIPT):
                             try:
                                 return generate_podcast_script(
-                                    source_text=job.source_text,
+                                    source_text=src,
                                     request_mode=req_mode,
                                     source_title=job.custom_title,
                                     job_id=job.id,
                                 )
                             except TypeError:
                                 return generate_podcast_script(
-                                    source_text=job.source_text,
+                                    source_text=src,
                                     request_mode=req_mode,
                                     source_title=job.custom_title,
                                 )
                         return p.generate_script(
-                            source_text=job.source_text,
+                            source_text=src,
                             request_mode=req_mode,
                             source_title=job.custom_title,
                             job_id=job.id,
@@ -1285,21 +1280,21 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
             if job.verify_final_script and not job.verify_audit_json:
                 logger.info(f"Executing VERIFY Audit for {req_mode.upper()} job '{job.id}'")
                 t0 = datetime.now(UTC)
-                def _do_v_audit(p, att):
+                def _do_v_audit(p, att, src):
                     if _is_mocked(audit_script_fidelity, _ORIG_AUDIT_SCRIPT_FIDELITY):
                         try:
                             return audit_script_fidelity(
-                                source_text=job.source_text,
+                                source_text=src,
                                 script_dict=job.script_json,
                                 job_id=job.id,
                             )
                         except TypeError:
                             return audit_script_fidelity(
-                                source_text=job.source_text,
+                                source_text=src,
                                 script_dict=job.script_json,
                             )
                     return p.audit_script_fidelity(
-                        source_text=job.source_text,
+                        source_text=src,
                         script_dict=job.script_json,
                         job_id=job.id,
                     )
@@ -1326,23 +1321,23 @@ def generate_script_endpoint(req: GenerateScriptRequest, db: Session = Depends(g
                 if v_audit.has_material_issues and job.verify_repair_count == 0:
                     logger.info(f"Executing VERIFY Repair for {req_mode.upper()} job '{job.id}'")
                     t0 = datetime.now(UTC)
-                    def _do_v_repair(p, att):
+                    def _do_v_repair(p, att, src):
                         if _is_mocked(repair_script_fidelity, _ORIG_REPAIR_SCRIPT_FIDELITY):
                             try:
                                 return repair_script_fidelity(
-                                    source_text=job.source_text,
+                                    source_text=src,
                                     script_dict=job.script_json,
                                     audit_result=v_audit.model_dump(),
                                     job_id=job.id,
                                 )
                             except TypeError:
                                 return repair_script_fidelity(
-                                    source_text=job.source_text,
+                                    source_text=src,
                                     script_dict=job.script_json,
                                     audit_result=v_audit.model_dump(),
                                 )
                         return p.repair_script_fidelity(
-                            source_text=job.source_text,
+                            source_text=src,
                             script_dict=job.script_json,
                             audit_result=v_audit.model_dump(),
                             job_id=job.id,
@@ -1618,7 +1613,8 @@ def get_job_completion_email(job_id: str, db: Session = Depends(get_db)):
         diagnostics_drive_id=job.diagnostics_drive_file_id,
         created_at_iso=created_iso,
         completed_at_iso=completed_iso,
-        gemini_model=job.gemini_model or "gemini-3.5-flash",
+        ai_model=job.ai_effective_model or job.ai_model or job.research_model,
+        gemini_model=job.gemini_model,
         kokoro_voice=job.kokoro_voice or job.custom_voice or "af_heart",
         kokoro_speed=job.kokoro_speed or job.custom_speed or 1.0,
         script_warnings=warnings,

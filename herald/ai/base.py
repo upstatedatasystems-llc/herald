@@ -131,6 +131,21 @@ class AIProvider(ABC):
         from herald.ai.errors import AIUnsupportedCapabilityError
         raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support URL context extraction")
 
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """
+        Distill key narrative facts and information from a source chunk using AI.
+        Preserves names, dates, numbers, attribution, qualifiers, uncertainty, and order.
+        Subclasses override if supported. Default raises NotImplementedError to trigger fallback.
+        """
+        raise NotImplementedError(f"Provider {self.provider_name} does not implement distill_text")
+
 
 # Module-level provider-neutral operation delegates
 def generate_grounded_research(*args, **kwargs):

@@ -89,6 +89,19 @@ def semantic_chunk_text(
     return chunks
 
 
+DISTILLATION_SYSTEM_PROMPT = (
+    "You are an expert editorial research analyst. Your task is to distill the provided text into a dense, "
+    "fact-preserving summary. You MUST strictly adhere to the following rules:\n"
+    "1. Preserve all proper names, titles, organizations, and entities.\n"
+    "2. Preserve all dates, times, numbers, percentages, and metrics exactly as stated.\n"
+    "3. Preserve all source attributions, direct quotes, and citations.\n"
+    "4. Preserve all nuances, qualifiers, and expressions of uncertainty.\n"
+    "5. Maintain the chronological and logical order of information.\n"
+    "6. Do not invent, extrapolate, or hallucinate any facts.\n"
+    "7. Format output clearly with section headings and concise bulleted or prose facts."
+)
+
+
 def distill_chunk(
     chunk: str,
     chunk_index: int,
@@ -101,7 +114,9 @@ def distill_chunk(
     Distill key narrative facts and information from a source chunk.
     Preserves section context, quotes, numbers, and logical flow.
     Supports active provider distillation with budget accounting, falling
-    back cleanly to structured fact-preserving heuristic reduction.
+    back cleanly to structured fact-preserving heuristic reduction when
+    distillation is not implemented. Typed provider errors are propagated
+    to the retry and failover policy.
     """
     if provider is not None and hasattr(provider, "distill_text"):
         if usage and budget:
@@ -109,7 +124,7 @@ def distill_chunk(
             usage.check_budget(budget)
         try:
             return provider.distill_text(chunk, chunk_index=chunk_index, total_chunks=total_chunks)
-        except Exception:
+        except NotImplementedError:
             pass
 
     lines = [f"### SECTION {chunk_index + 1}/{total_chunks}"]

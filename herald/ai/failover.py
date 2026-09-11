@@ -77,9 +77,11 @@ def record_ai_preflight(
         "operation": operation,
         "source_characters": source_chars,
         "source_utf8_bytes": source_bytes,
+        "serialized_request_bytes": source_bytes,
         "estimated_input_tokens": estimated_tokens,
         "known_context_limit": known_context,
         "known_output_limit": known_max_output,
+        "requested_max_output": known_max_output,
         "known_request_body_limit": known_body_limit,
         "attempt": attempt,
         "configured_timeout_seconds": settings.effective_ai_timeout_seconds,
@@ -148,10 +150,35 @@ def get_job_provider_chain(job: PodcastJob) -> list[dict[str, str]]:
     return [{"provider": prov, "model": mod}]
 
 
+def _call_execute_fn(fn: Callable[..., Any], provider: Any, attempt: int, source_text: str | None) -> Any:
+    """Invoke execute_fn, passing source_text if supported, or falling back to (provider, attempt)."""
+    import inspect
+    take_three = None
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        take_three = has_varargs or len(params) >= 3
+    except (ValueError, TypeError):
+        take_three = None
+
+    if take_three is True:
+        return fn(provider, attempt, source_text)
+    if take_three is False:
+        return fn(provider, attempt)
+
+    try:
+        return fn(provider, attempt, source_text)
+    except TypeError as e:
+        if "positional argument" in str(e):
+            return fn(provider, attempt)
+        raise
+
+
 def execute_with_failover(
     job: PodcastJob,
     operation: str,
-    execute_fn: Callable[[Any, int], Any],
+    execute_fn: Callable[..., Any],
     source_text: str | None = None,
     required_capability: str | None = None,
     max_same_provider_attempts: int | None = None,
@@ -162,7 +189,9 @@ def execute_with_failover(
     Parameters:
         job: The PodcastJob containing snapshotted provider chain and durable cursor.
         operation: Logical operation name (e.g. 'script_generation', 'research_grounding', 'url_context_extraction', 'verification').
-        execute_fn: Callable accepting (provider_instance, attempt_number) returning result.
+        execute_fn: Callable accepting (provider_instance, attempt_number, source_text) returning result.
+                    The source_text argument carries the current (possibly adapted) source so that
+                    adapted text is always forwarded to the provider — never read from job.source_text.
         source_text: Optional source text for safe preflight calculations.
         required_capability: Optional ProviderCapabilities field name required for operation.
         max_same_provider_attempts: Max attempts on same provider before failover.
@@ -172,10 +201,13 @@ def execute_with_failover(
     if not chain:
         raise AIChainExhaustedError("Job has no configured AI provider candidates in chain", failures=[])
 
+    if source_text is None:
+        source_text = getattr(job, "source_text", None)
+
     # Literal mode short-circuit
     if chain[0]["provider"] == "literal" or (getattr(job, "request_mode", "") == "literal"):
         prov = create_provider("literal")
-        return execute_fn(prov, 1)
+        return _call_execute_fn(execute_fn, prov, 1, source_text)
 
     max_attempts = max_same_provider_attempts or getattr(settings, "AI_REQUEST_MAX_ATTEMPTS", 3)
     curr_index = max(0, int(getattr(job, "ai_failover_index", 0) or 0))
@@ -295,7 +327,7 @@ def execute_with_failover(
 
             try:
                 t0 = time.monotonic()
-                result = execute_fn(prov_instance, attempt)
+                result = _call_execute_fn(execute_fn, prov_instance, attempt, source_text)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
 
                 # Sticky Failover: current candidate becomes active provider for job
@@ -304,6 +336,25 @@ def execute_with_failover(
                 job.ai_failover_index = curr_index
                 if db:
                     db.commit()
+                    if getattr(job, "id", None):
+                        record_job_diagnostic_event(
+                            job_id=job.id,
+                            level="INFO",
+                            component="ai_failover",
+                            event_type="AI_OPERATION_SUCCESS",
+                            message=f"AI operation '{operation}' succeeded on {p_id} ({m_id})",
+                            metadata={
+                                "provider": p_id,
+                                "model": m_id,
+                                "operation": operation,
+                                "attempt": attempt,
+                                "elapsed_ms": elapsed_ms,
+                                "failover_chain_index": curr_index,
+                                "actual_input_tokens": getattr(result, "prompt_tokens", None),
+                                "actual_output_tokens": getattr(result, "completion_tokens", None),
+                            },
+                            db=db,
+                        )
 
                 logger.info(
                     f"AI operation '{operation}' succeeded on {p_id} ({m_id}) in {elapsed_ms}ms (slot {curr_index})"
@@ -340,7 +391,7 @@ def execute_with_failover(
                             source_title=getattr(job, "custom_title", None),
                             db=db,
                         )
-                        # Item 17: Canonical job.source_text is NEVER overwritten by adapted content
+                        # Canonical job.source_text is NEVER overwritten by adapted content
                         source_text = adapted_text
                         attempt += 1
                         continue
@@ -397,7 +448,7 @@ def execute_with_failover(
                     break  # Break inner loop to start with next candidate
 
                 else:
-                    # Item 9: FAIL_FINAL terminates immediately without advancing cursor!
+                    # FAIL_FINAL: record failure
                     failures_log.append({
                         "provider": p_id,
                         "model": m_id,
@@ -420,11 +471,17 @@ def execute_with_failover(
                             },
                             db=db,
                         )
-                    if len(failures_log) > 1 or curr_index > 0 or (len(chain) > 1 and not has_next):
-                        break
+                    # If this is not the last candidate in the chain, FAIL_FINAL must terminate immediately
+                    # without advancing to Secondary/Tertiary — cursor stays at current index.
+                    if has_next:
+                        raise classified
+                    # If there are no next candidates and we have exhausted the chain:
+                    if len(failures_log) > 1:
+                        break  # Breaks inner loop to outer loop termination -> AIChainExhaustedError
                     raise classified
 
-        # If inner loop finished without success and didn't already advance
+        # If inner loop exhausted same-provider attempts without success (RETRY_SAME_PROVIDER exhausted
+        # or ADAPT failed and didn't raise) — advance cursor for FAILOVER path only
         if curr_index == prev_index:
             curr_index += 1
             job.ai_failover_index = curr_index

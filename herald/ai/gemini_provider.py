@@ -417,3 +417,112 @@ class GeminiProvider(AIProvider):
                 "model": model,
                 "error": f"network error: {err_str}",
             }
+
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """Distill key narrative facts from source chunk using Gemini."""
+        if not self.is_configured():
+            from herald.ai.errors import AIAuthFailedError
+            raise AIAuthFailedError("Gemini API key is not configured", provider="gemini")
+
+        from herald.ai.adaptation import DISTILLATION_SYSTEM_PROMPT
+        from herald.ai.errors import (
+            AIClientTimeoutError,
+            AIModelUnavailableError,
+            AIProviderError,
+            AIProviderUnavailableError,
+            AIRateLimitedError,
+        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.configured_model}:generateContent"
+        headers = {
+            "x-goog-api-key": settings.GEMINI_API_KEY.strip(),
+            "Content-Type": "application/json",
+        }
+        user_prompt = (
+            f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+            f"<SOURCE_CHUNK>\n{chunk}\n</SOURCE_CHUNK>\n\n"
+            "Distill this chunk into concise, structured factual points preserving all entities, "
+            "metrics, dates, citations, and qualifiers in logical order."
+        )
+        payload = {
+            "system_instruction": {"parts": [{"text": DISTILLATION_SYSTEM_PROMPT}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code == 429:
+                raise AIRateLimitedError("Gemini rate limit exceeded", provider="gemini", model=self.configured_model, operation="distillation")
+            if resp.status_code == 404:
+                raise AIModelUnavailableError(f"Gemini model {self.configured_model} not found", provider="gemini", model=self.configured_model, operation="distillation")
+            if resp.status_code >= 500:
+                raise AIProviderUnavailableError(f"Gemini server error HTTP {resp.status_code}", provider="gemini", model=self.configured_model, operation="distillation")
+            if resp.status_code != 200:
+                raise AIProviderError(f"Gemini distillation error HTTP {resp.status_code}: {resp.text[:200]}", provider="gemini", model=self.configured_model, operation="distillation")
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if "text" in p]
+                return "".join(text_parts).strip()
+            return ""
+        except httpx.TimeoutException:
+            raise AIClientTimeoutError("Gemini timeout during distillation", provider="gemini", model=self.configured_model, operation="distillation")
+        except Exception as e:
+            if isinstance(e, AIProviderError):
+                raise
+            if isinstance(e, httpx.NetworkError):
+                raise AIProviderUnavailableError(f"Gemini network error during distillation: {e}", provider="gemini", model=self.configured_model, operation="distillation")
+            raise AIProviderError(f"Gemini distillation error: {e}", provider="gemini", model=self.configured_model, operation="distillation")
+
+    def discover_models(self) -> list[Any]:
+        """Discover available Gemini models via Google AI API."""
+        if not self.is_configured():
+            return []
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = {"x-goog-api-key": settings.GEMINI_API_KEY.strip()}
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            models_list = data.get("models", [])
+            from herald.ai.capabilities import AIModelCapabilities
+            from herald.ai.registry import get_descriptor
+            desc = get_descriptor("gemini")
+            known_map = {m.model_id: m for m in (desc.catalog_models if desc else [])}
+            results: list[AIModelCapabilities] = []
+            for item in models_list:
+                if not isinstance(item, dict):
+                    continue
+                m_name = item.get("name", "")
+                m_id = m_name.replace("models/", "").strip()
+                if not m_id:
+                    continue
+                if m_id in known_map:
+                    results.append(known_map[m_id])
+                elif "gemini" in m_id.lower():
+                    results.append(
+                        AIModelCapabilities(
+                            provider_id="gemini",
+                            model_id=m_id,
+                            display_name=item.get("displayName") or m_id,
+                            context_window=None,
+                            max_output=None,
+                            selectable=True,
+                        )
+                    )
+            return results
+        except Exception as e:
+            logger.debug(f"Gemini live model discovery error: {e}")
+            return []
+

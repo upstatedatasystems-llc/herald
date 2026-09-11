@@ -76,13 +76,18 @@ def get_server_default_chain(cfg: Any = None) -> list[str]:
     """
     conf = cfg or global_settings
     primary = (getattr(conf, "AI_PROVIDER", "gemini") or "gemini").lower().strip()
+    if primary == "none":
+        primary = "literal"
     secondary = getattr(conf, "AI_SECONDARY_PROVIDER", None)
+    if secondary and secondary.lower().strip() == "none":
+        secondary = None
     tertiary = getattr(conf, "AI_TERTIARY_PROVIDER", None)
+    if tertiary and tertiary.lower().strip() == "none":
+        tertiary = None
 
-    is_valid, _ = validate_server_default_chain(primary, secondary, tertiary)
+    is_valid, err_msg = validate_server_default_chain(primary, secondary, tertiary)
     if not is_valid:
-        # Fallback strictly to primary
-        return [primary]
+        raise ValueError(f"Invalid server default AI provider chain: {err_msg}")
 
     chain = [primary]
     if secondary:
@@ -197,7 +202,7 @@ def resolve_job_settings(
             )
         cleaned_providers = ["literal"]
 
-    # Item 27: If mode was not explicitly requested or set in user preferences,
+    # If mode was not explicitly requested or set in user preferences,
     # resolve default mode from the resolved provider chain.
     if mode_cand is None:
         if cleaned_providers and cleaned_providers[0] != "literal":

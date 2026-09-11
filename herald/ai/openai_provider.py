@@ -129,8 +129,8 @@ class OpenAIProvider(AIProvider):
                                 provider_id=p_id,
                                 model_id=m_id,
                                 display_name=m_id,
-                                context_window=8192,
-                                max_output=4096,
+                                context_window=None,
+                                max_output=None,
                                 selectable=True,
                             )
                         )
@@ -655,3 +655,74 @@ Generate the podcast script JSON response now.
                     model=self._model,
                     operation="script_repair",
                 )
+
+    def distill_text(
+        self,
+        chunk: str,
+        *,
+        chunk_index: int = 0,
+        total_chunks: int = 1,
+        job_id: str | None = None,
+    ) -> str:
+        """
+        Distill key narrative facts and information from a source chunk using AI.
+        Preserves names, dates, numbers, attribution, qualifiers, uncertainty, and order.
+        """
+        if not self.is_configured():
+            raise AIAuthFailedError(f"{self.provider_name} is not configured", provider=self.provider_name.lower())
+
+        from herald.ai.adaptation import DISTILLATION_SYSTEM_PROMPT
+        url = f"{self._api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            **self._custom_headers,
+        }
+        user_prompt = (
+            f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+            f"<SOURCE_CHUNK>\n{chunk}\n</SOURCE_CHUNK>\n\n"
+            "Distill this chunk into concise, structured factual points preserving all entities, "
+            "metrics, dates, citations, and qualifiers in logical order."
+        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": DISTILLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+        }
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                self._classify_http_error(resp, operation="distillation")
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+            return ""
+        except httpx.TimeoutException:
+            raise AIClientTimeoutError(
+                f"{self.provider_name} timeout during distillation",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="distillation",
+            )
+        except Exception as e:
+            if isinstance(e, AIProviderError):
+                raise
+            if isinstance(e, httpx.NetworkError):
+                raise AIProviderUnavailableError(
+                    f"{self.provider_name} network error during distillation: {e}",
+                    provider=self.provider_name.lower(),
+                    model=self._model,
+                    operation="distillation",
+                )
+            raise AIProviderError(
+                f"{self.provider_name} distillation error: {e}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation="distillation",
+            )

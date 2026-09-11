@@ -40,7 +40,10 @@ def register_provider(descriptor: ProviderDescriptor) -> None:
 def get_descriptor(provider_id: str | None) -> ProviderDescriptor | None:
     if not provider_id:
         return None
-    return _REGISTRY.get(provider_id.lower().strip())
+    p_id = provider_id.lower().strip()
+    if p_id == "none":
+        p_id = "literal"
+    return _REGISTRY.get(p_id)
 
 
 get_provider_descriptor = get_descriptor
@@ -58,7 +61,10 @@ def list_registered_providers() -> dict[str, ProviderDescriptor]:
 def is_provider_registered(provider_id: str | None) -> bool:
     if not provider_id:
         return False
-    return provider_id.lower().strip() in _REGISTRY
+    p_id = provider_id.lower().strip()
+    if p_id == "none":
+        p_id = "literal"
+    return p_id in _REGISTRY
 
 
 
@@ -100,7 +106,7 @@ def create_provider(provider_id: str | None, model_id: str | None = None) -> AIP
     if not provider_id:
         raise ValueError("Provider ID cannot be empty or None")
     p_id = provider_id.lower().strip()
-    if p_id == "literal":
+    if p_id in ("literal", "none"):
         from herald.ai.literal_provider import LiteralProvider
         return LiteralProvider()
 
@@ -122,8 +128,14 @@ def validate_server_default_chain(
     Returns (is_valid, error_message).
     """
     p_clean = (primary or "").lower().strip()
+    if p_clean == "none":
+        p_clean = "literal"
     s_clean = (secondary or "").lower().strip() if secondary else None
+    if s_clean == "none":
+        s_clean = None
     t_clean = (tertiary or "").lower().strip() if tertiary else None
+    if t_clean == "none":
+        t_clean = None
 
     if not p_clean:
         return False, "Primary AI provider cannot be empty"
@@ -325,7 +337,7 @@ register_provider(
             and settings.CLOUDFLARE_ACCOUNT_ID
             and settings.CLOUDFLARE_ACCOUNT_ID.strip()
         ),
-        supports_model_discovery=True,
+        supports_model_discovery=False,
         catalog_models=[
             AIModelCapabilities(
                 provider_id="cloudflare",

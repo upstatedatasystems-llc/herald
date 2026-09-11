@@ -131,14 +131,6 @@ class Settings(BaseSettings):
     AI_TERTIARY_PROVIDER: str | None = None
     RESEARCH_PROVIDER: str = "gemini"  # Dedicated research provider (legacy fallback)
 
-    # Large-Source Adaptation Bounds
-    ADAPTATION_MAX_CHUNKS: int = 12
-    ADAPTATION_MAX_DEPTH: int = 2
-    ADAPTATION_MAX_AI_CALLS: int = 15
-    ADAPTATION_MAX_RETRY_CALLS: int = 3
-    ADAPTATION_MAX_ESTIMATED_WORK: int = 500_000
-    ADAPTATION_MAX_ELAPSED_SECONDS: float = 600.0
-
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     OPENROUTER_API_KEY: str = ""
@@ -167,30 +159,38 @@ class Settings(BaseSettings):
     DIAGNOSTICS_MAX_BYTES: int = 8 * 1024 * 1024
 
     def is_ai_configured(self) -> bool:
-        prov = (self.AI_PROVIDER or "").lower().strip()
-        if prov in ("none", "literal", ""):
-            return False
-        if prov == "gemini":
-            return bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip())
-        if prov == "groq":
-            return bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip())
-        if prov == "openrouter":
-            return bool(self.OPENROUTER_API_KEY and self.OPENROUTER_API_KEY.strip())
-        if prov == "mistral":
-            return bool(self.MISTRAL_API_KEY and self.MISTRAL_API_KEY.strip())
-        if prov in ("cloudflare", "cloudflare_workers_ai"):
-            return bool(
+        """Return True if any provider in the server default chain (Primary, Secondary, Tertiary) is configured."""
+        candidates = [self.AI_PROVIDER]
+        if self.AI_SECONDARY_PROVIDER:
+            candidates.append(self.AI_SECONDARY_PROVIDER)
+        if self.AI_TERTIARY_PROVIDER:
+            candidates.append(self.AI_TERTIARY_PROVIDER)
+
+        for p in candidates:
+            prov = (p or "").lower().strip()
+            if prov in ("none", "literal", ""):
+                continue
+            if prov == "gemini" and bool(self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip()):
+                return True
+            if prov == "groq" and bool(self.GROQ_API_KEY and self.GROQ_API_KEY.strip()):
+                return True
+            if prov == "openrouter" and bool(self.OPENROUTER_API_KEY and self.OPENROUTER_API_KEY.strip()):
+                return True
+            if prov == "mistral" and bool(self.MISTRAL_API_KEY and self.MISTRAL_API_KEY.strip()):
+                return True
+            if prov in ("cloudflare", "cloudflare_workers_ai") and bool(
                 self.CLOUDFLARE_API_TOKEN
                 and self.CLOUDFLARE_API_TOKEN.strip()
                 and self.CLOUDFLARE_ACCOUNT_ID
                 and self.CLOUDFLARE_ACCOUNT_ID.strip()
-            )
-        if prov == "anthropic":
-            return bool(self.ANTHROPIC_API_KEY and self.ANTHROPIC_API_KEY.strip())
-        if prov == "openai":
-            return bool(self.OPENAI_API_KEY and self.OPENAI_API_KEY.strip())
-        if prov == "ollama":
-            return bool(self.OLLAMA_BASE_URL and self.OLLAMA_BASE_URL.strip())
+            ):
+                return True
+            if prov == "anthropic" and bool(self.ANTHROPIC_API_KEY and self.ANTHROPIC_API_KEY.strip()):
+                return True
+            if prov == "openai" and bool(self.OPENAI_API_KEY and self.OPENAI_API_KEY.strip()):
+                return True
+            if prov == "ollama" and bool(self.OLLAMA_BASE_URL and self.OLLAMA_BASE_URL.strip()):
+                return True
         return False
 
     def is_research_configured(self) -> bool:

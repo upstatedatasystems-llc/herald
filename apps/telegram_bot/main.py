@@ -100,6 +100,18 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN is not set in environment or .env. Exiting.")
         sys.exit(1)
 
+    # Validate server default AI provider chain at startup boundary
+    from herald.ai.registry import validate_server_default_chain
+    is_valid, err = validate_server_default_chain(
+        settings.AI_PROVIDER,
+        settings.AI_SECONDARY_PROVIDER,
+        settings.AI_TERTIARY_PROVIDER,
+    )
+    if not is_valid:
+        logger.error("Invalid server default AI provider chain: %s", err)
+        if settings.HERALD_ENV.lower() == "production":
+            raise RuntimeError(f"Invalid server default AI provider chain: {err}")
+
     client = TelegramClient()
     print_startup_banner()
     register_bot_commands(client)

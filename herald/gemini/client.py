@@ -1692,7 +1692,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         }
 
         from herald.concurrency import get_semaphores
-        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+        with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
             resp = client.post(url, json=payload, headers=headers)
 
         t1 = datetime.now(UTC)
@@ -1836,7 +1836,7 @@ Return the corrected PodcastScriptResponse JSON now.
     interaction_recorded = False
     try:
         from herald.concurrency import get_semaphores
-        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+        with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
             resp = client.post(url, json=payload, headers=headers)
 
         t1 = datetime.now(UTC)
@@ -1986,7 +1986,7 @@ If has_material_issues is true, provide concrete repair_instructions.
         }
 
         from herald.concurrency import get_semaphores
-        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+        with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
             resp = client.post(url, json=payload, headers=headers)
 
         t1 = datetime.now(UTC)
@@ -2125,7 +2125,7 @@ Return the corrected PodcastScriptResponse JSON now.
     interaction_recorded = False
     try:
         from herald.concurrency import get_semaphores
-        with get_semaphores().script, httpx.Client(timeout=settings.GEMINI_TIMEOUT_SECONDS) as client:
+        with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
             resp = client.post(url, json=payload, headers=headers)
 
         t1 = datetime.now(UTC)
