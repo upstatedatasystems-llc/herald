@@ -1671,6 +1671,7 @@ def handle_telegram_callback_query(
 
         if action == "m":
             job.content_mode = val
+            job.resolved_default = False
             if val in ("source", "literal"):
                 job.research_depth = None
             elif not job.research_depth:
@@ -1692,6 +1693,7 @@ def handle_telegram_callback_query(
 
         elif action == "len":
             job.target_minutes = val
+            job.resolved_default = False
             db.commit()
             client.answer_callback_query(
                 cb_id,
@@ -1719,6 +1721,7 @@ def handle_telegram_callback_query(
                 )
                 return
             job.research_depth = val
+            job.resolved_default = False
             db.commit()
             client.answer_callback_query(cb_id, text=f"Research depth set to {val.capitalize()}.")
             text, reply_markup = format_podcast_config_card(job, prefs)
@@ -1755,16 +1758,25 @@ def handle_telegram_callback_query(
             else:
                 job.research_depth = None
             job.resolved_default = True
+            if not job.telegram_config_message_id:
+                job.telegram_config_message_id = msg_id
+            from herald.db.state_machine import transition_job_state
+            transition_job_state(
+                db,
+                job,
+                JobState.SCRIPTING.value,
+                component="telegram-config",
+                message="Started generation with default preferences",
+            )
             db.commit()
-            client.answer_callback_query(cb_id, text="Applied saved preferences.")
-            text, reply_markup = format_podcast_config_card(job, prefs)
+            client.answer_callback_query(cb_id, text="Starting with saved defaults...")
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=text,
+                    text="🎙️ <b>Generating Podcast...</b>\n\nQueued for script generation.",
                     parse_mode="HTML",
-                    reply_markup=reply_markup,
+                    reply_markup=None,
                 )
             except Exception:
                 pass
@@ -1772,17 +1784,28 @@ def handle_telegram_callback_query(
 
         elif action == "btn" and val == "lit":
             job.content_mode = "literal"
+            job.target_minutes = "auto"
             job.research_depth = None
+            job.resolved_default = False
+            if not job.telegram_config_message_id:
+                job.telegram_config_message_id = msg_id
+            from herald.db.state_machine import transition_job_state
+            transition_job_state(
+                db,
+                job,
+                JobState.SCRIPTING.value,
+                component="telegram-config",
+                message="Started generation in Literal Reader mode",
+            )
             db.commit()
-            client.answer_callback_query(cb_id, text="Mode set to Literal Reader.")
-            text, reply_markup = format_podcast_config_card(job, prefs)
+            client.answer_callback_query(cb_id, text="Starting Literal Reader...")
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=text,
+                    text="🎙️ <b>Generating Podcast...</b>\n\nQueued for script generation.",
                     parse_mode="HTML",
-                    reply_markup=reply_markup,
+                    reply_markup=None,
                 )
             except Exception:
                 pass
@@ -1813,84 +1836,29 @@ def handle_telegram_callback_query(
             return
 
         elif action == "btn" and val == "start":
+            if not job.telegram_config_message_id:
+                job.telegram_config_message_id = msg_id
+            from herald.db.state_machine import transition_job_state
+            transition_job_state(
+                db,
+                job,
+                JobState.SCRIPTING.value,
+                component="telegram-config",
+                message="Started generation from configuration card",
+            )
+            db.commit()
             client.answer_callback_query(cb_id, text="Starting podcast generation...")
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text="🎙️ <b>Generating Podcast...</b>\n\nCreating script according to your configuration.",
+                    text="🎙️ <b>Generating Podcast...</b>\n\nQueued for script generation.",
                     parse_mode="HTML",
                     reply_markup=None,
                 )
             except Exception:
                 pass
-
-            from herald.core.pipeline import execute_script_generation
-
-            confirm_tts = bool(prefs.get("confirm_before_tts", False))
-
-            with TelegramTypingNotifier(client=client, chat_id=chat_id):
-                gen_resp = execute_script_generation(
-                    db=db,
-                    job=job,
-                    hold_for_approval=confirm_tts,
-                    is_duplicate=bool(job.rerun_of_job_id),
-                    rerun_of_job_id=job.rerun_of_job_id,
-                )
-            db.refresh(job)
-
-            if gen_resp.status == JobState.AWAITING_APPROVAL.value:
-                eta_info = calculate_job_eta(db, job)
-                app_text, reply_markup = format_approval(job, job.script_json, eta_info)
-                try:
-                    client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=app_text,
-                        reply_markup=reply_markup,
-                        parse_mode="HTML",
-                    )
-                    job.telegram_approval_message_id = msg_id
-                    job.approval_requested_at = datetime.now(UTC)
-                    db.commit()
-                except Exception as e:
-                    logger.debug(f"Failed to edit message to approval card: {e}")
-                return
-
-            elif gen_resp.status == JobState.QUEUED_TTS.value:
-                eta_info = calculate_job_eta(db, job)
-                queued_text = format_queued(job, job.script_json, eta_info)
-                try:
-                    client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=queued_text,
-                        parse_mode="HTML",
-                        reply_markup=None,
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to edit message to queued card: {e}")
-                return
-
-            else:
-                fail_card = format_generation_failure_card(
-                    job=job,
-                    job_id=job.id,
-                    status=gen_resp.status or JobState.FAILED_FINAL.value,
-                    error_message=gen_resp.message or job.error_message,
-                    db=db,
-                )
-                try:
-                    client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=fail_card,
-                        parse_mode="HTML",
-                        reply_markup=None,
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to edit message to failure card: {e}")
-                return
+            return
 
     elif raw_data.startswith("h2:rerun_approve:"):
         job_id = raw_data[len("h2:rerun_approve:") :]

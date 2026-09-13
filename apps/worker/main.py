@@ -1,3 +1,4 @@
+import html
 import logging
 import shutil
 import threading
@@ -129,7 +130,11 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
     stale_jobs = (
         db.query(PodcastJob)
         .filter(
-            PodcastJob.status.in_([JobState.SYNTHESIZING.value, JobState.ENCODING.value]),
+            PodcastJob.status.in_([
+                JobState.SYNTHESIZING.value,
+                JobState.ENCODING.value,
+                JobState.SCRIPTING.value,
+            ]),
         )
         .with_for_update(skip_locked=True)
         .all()
@@ -150,14 +155,27 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
             is_expired = last_active is not None and last_active < cutoff
 
         if is_expired:
-            logger.warning(f"Recovering stale worker claim for job '{job.id}' (last active: {last_active}, lease: {lease_exp})")
             pre_recovery_status = job.status
+            logger.warning(f"Recovering stale worker claim for job '{job.id}' in state {job.status} (last active: {last_active}, lease: {lease_exp})")
             job.claimed_at = None
             job.claim_owner = None
             job.claimed_by = None
             job.lease_expires_at = None
             job.last_heartbeat_at = None
             job.heartbeat_at = None
+
+            if job.status == JobState.SCRIPTING.value:
+                # Keep in SCRIPTING state so a worker can claim and resume from section_progress_json
+                record_job_diagnostic_event(
+                    job.id,
+                    "WARNING",
+                    "recovery",
+                    "STALE_SCRIPTING_CLAIM_RECOVERED",
+                    "Recovered stale scripting claim after worker crash or timeout. Job ready to resume.",
+                    db=db,
+                )
+                db.commit()
+                continue
 
             target_state = (
                 JobState.FAILED_FINAL.value if (job.synthesis_attempt_count or 0) >= 3 else JobState.QUEUED_TTS.value
@@ -281,6 +299,170 @@ def claim_next_job(db: Session, worker_id: str = "herald-worker", lease_seconds:
     db.commit()
     db.refresh(job)
     return job
+
+
+def claim_next_scripting_job(db: Session, worker_id: str = "herald-worker", lease_seconds: int = 600) -> PodcastJob | None:
+    """
+    Claim 1 pending SCRIPTING job atomically using SELECT ... FOR UPDATE SKIP LOCKED.
+    Only claims jobs in SCRIPTING state where claimed_by is NULL.
+    """
+    now = datetime.now(UTC)
+    job = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.status == JobState.SCRIPTING.value,
+            PodcastJob.claimed_by.is_(None),
+        )
+        .order_by(PodcastJob.created_at.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if not job:
+        return None
+
+    job.claimed_at = now
+    job.claim_owner = worker_id
+    job.claimed_by = worker_id
+    job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+    job.last_heartbeat_at = now
+    job.heartbeat_at = now
+
+    record_job_diagnostic_event(
+        job.id,
+        "INFO",
+        "scripting",
+        "SCRIPTING_CLAIMED",
+        f"Claimed scripting job atomically by '{worker_id}'",
+        db=db,
+    )
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def process_next_scripting_job(db: Session, worker_id: str = "herald-worker") -> bool:
+    """
+    Acquire 1 unclaimed SCRIPTING job, execute long-running script pipeline asynchronously
+    with Telegram progress notifier, and transition to AWAITING_APPROVAL or QUEUED_TTS.
+    """
+    job = claim_next_scripting_job(db, worker_id=worker_id)
+    if not job:
+        return False
+
+    logger.info(f"Worker '{worker_id}' starting background script execution for job '{job.id}'")
+
+    chat_id = job.telegram_chat_id
+    msg_id = job.telegram_config_message_id
+
+    def telegram_status_notifier(status_msg: str):
+        if not chat_id or not msg_id:
+            return
+        try:
+            from herald.telegram.client import TelegramClient
+            t_client = TelegramClient()
+            if t_client.is_configured:
+                t_client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"🎙️ <b>Generating Podcast...</b>\n\n<i>{html.escape(status_msg)}</i>",
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.debug(f"Non-fatal status notifier update failure: {e}")
+
+    from herald.telegram.auth import get_effective_user_preferences
+    prefs = get_effective_user_preferences(db, job.telegram_user_id) if job.telegram_user_id else {}
+    confirm_tts = bool(prefs.get("confirm_before_tts", False))
+
+    with WorkerLeaseHeartbeat(job.id, worker_id, lease_seconds=600, interval_seconds=30):
+        try:
+            from herald.core.pipeline import execute_script_generation
+            gen_resp = execute_script_generation(
+                db=db,
+                job=job,
+                hold_for_approval=confirm_tts,
+                is_duplicate=bool(job.rerun_of_job_id),
+                rerun_of_job_id=job.rerun_of_job_id,
+                status_notifier=telegram_status_notifier,
+            )
+            db.refresh(job)
+
+            # Update Telegram card to Approval or Queued
+            if chat_id and msg_id:
+                try:
+                    from herald.telegram.client import TelegramClient
+                    t_client = TelegramClient()
+                    if t_client.is_configured:
+                        if job.status == JobState.AWAITING_APPROVAL.value:
+                            from herald.services.eta_calculator import calculate_job_eta
+                            from herald.telegram.formatters import format_approval
+                            eta_info = calculate_job_eta(db, job)
+                            app_text, reply_markup = format_approval(job, job.script_json, eta_info)
+                            t_client.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=msg_id,
+                                text=app_text,
+                                reply_markup=reply_markup,
+                                parse_mode="HTML",
+                            )
+                            job.telegram_approval_message_id = msg_id
+                            job.approval_requested_at = datetime.now(UTC)
+                            db.commit()
+                        elif job.status == JobState.QUEUED_TTS.value:
+                            from herald.services.eta_calculator import calculate_job_eta
+                            from herald.telegram.formatters import format_queued
+                            eta_info = calculate_job_eta(db, job)
+                            queued_text = format_queued(job, job.script_json, eta_info)
+                            t_client.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=msg_id,
+                                text=queued_text,
+                                parse_mode="HTML",
+                                reply_markup=None,
+                            )
+                except Exception as t_err:
+                    logger.debug(f"Failed to update final Telegram card: {t_err}")
+
+            job.claimed_at = None
+            job.claim_owner = None
+            job.claimed_by = None
+            job.lease_expires_at = None
+            job.last_heartbeat_at = None
+            job.heartbeat_at = None
+            db.commit()
+            return True
+
+        except Exception as exc:
+            logger.exception(f"Scripting execution failed for job '{job.id}': {exc}")
+            job.claimed_at = None
+            job.claim_owner = None
+            job.claimed_by = None
+            job.lease_expires_at = None
+            job.last_heartbeat_at = None
+            job.heartbeat_at = None
+            transition_job_state(
+                db,
+                job,
+                JobState.FAILED_FINAL.value,
+                component="herald-worker-scripting",
+                message=f"Script generation failed: {exc}",
+                force=True,
+                commit=True,
+            )
+            if chat_id and msg_id:
+                try:
+                    from herald.telegram.client import TelegramClient
+                    t_client = TelegramClient()
+                    if t_client.is_configured:
+                        t_client.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=msg_id,
+                            text=f"❌ <b>Script Generation Failed</b>\n\nJob <code>{html.escape(job.id[:8])}</code> encountered an error: {html.escape(str(exc)[:200])}",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
+            return False
 
 
 def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = "herald-worker") -> bool:
@@ -461,6 +643,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     intro_text = render_intro_narration(
                         topic=title,
                         target_minutes=getattr(job, "target_minutes", None),
+                        actual_body_duration_seconds=program_dur_sec,
                     )
                     intro_wav_path = chunks_dir / f"branding_intro_{job.id}.wav"
                     intro_res = synthesize_branding_segment(
@@ -470,6 +653,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         voice=voice,
                         speed=speed,
                         segment_name="intro branding",
+                        timeout=synthesis_timeout,
+                        global_semaphore=semaphores.global_tts,
                     )
                     intro_dur_sec = intro_res.get("duration_seconds", 0.0)
                     final_chunk_paths.insert(0, intro_wav_path)
@@ -489,6 +674,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         voice=voice,
                         speed=speed,
                         segment_name="outro branding",
+                        timeout=synthesis_timeout,
+                        global_semaphore=semaphores.global_tts,
                     )
                     outro_dur_sec = outro_res.get("duration_seconds", 0.0)
                     if final_is_section_end:
@@ -734,7 +921,9 @@ def run_single_worker_loop(worker_id: str = "herald-worker"):
             try:
                 check_periodic_diagnostics_maintenance(db)
                 recover_stale_claims(db)
-                job_processed = process_next_job(db, kokoro_client, worker_id=worker_id)
+                job_processed = process_next_scripting_job(db, worker_id=worker_id)
+                if not job_processed:
+                    job_processed = process_next_job(db, kokoro_client, worker_id=worker_id)
             finally:
                 db.close()
 

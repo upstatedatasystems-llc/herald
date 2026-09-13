@@ -286,6 +286,7 @@ def generate_grounded_research(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    research_plan: dict | None = None,
 ) -> dict:
     """
     Stage 1a: Call GEMINI_RESEARCH_MODEL with Google Search grounding to retrieve external evidence.
@@ -298,14 +299,31 @@ def generate_grounded_research(
     if not key:
         raise GeminiAuthError("Gemini API key is not configured.")
 
-    depth = (research_depth or "medium").lower()
+    depth_raw = (research_depth or "medium").lower().strip()
+    if depth_raw not in ("low", "medium", "high"):
+        depth_raw = getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium").lower().strip()
+        if depth_raw not in ("low", "medium", "high"):
+            depth_raw = "medium"
+    depth = depth_raw
+
     rounds = 1 if depth == "low" else (2 if depth == "medium" else 3)
     target_queries = 4 if depth == "low" else (8 if depth == "medium" else 18)
+
+    plan_section = ""
+    if research_plan and isinstance(research_plan, dict):
+        areas = research_plan.get("focus_areas", [])
+        if areas:
+            plan_section = f"""
+<STRUCTURED_RESEARCH_PLAN>
+{json.dumps(areas, indent=2)}
+</STRUCTURED_RESEARCH_PLAN>
+Investigate the specific focus areas and queries defined above systematically.
+"""
 
     prompt = f"""
 Perform grounded research for the following primary source material.
 RESEARCH DEPTH: {depth.upper()} (Target soft search ceiling: ~{target_queries} queries across up to {rounds} round(s)).
-
+{plan_section}
 Your goal:
 1. Verify major factual claims, numbers, statistics, and dates.
 2. Search for authoritative primary and original sources (government agencies, standards bodies, academic papers, official technical documentation).
@@ -1264,10 +1282,12 @@ def generate_podcast_script(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    generation_instructions: str | None = None,
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
     Brief/Standard use ONLY source_text. Research mode uses source_text + research_dossier.
+    Trusted generation instructions are isolated outside SOURCE_DATA so security boundaries are preserved.
     """
     key = api_key or settings.GEMINI_API_KEY
     model = model_name or settings.GEMINI_MODEL
@@ -1277,6 +1297,14 @@ def generate_podcast_script(
 
     system_prompt = load_system_prompt()
     mode_clean = (request_mode or "standard").lower()
+
+    instructions_block = ""
+    if generation_instructions and generation_instructions.strip():
+        instructions_block = f"""
+<TRUSTED_GENERATION_INSTRUCTIONS>
+{generation_instructions.strip()}
+</TRUSTED_GENERATION_INSTRUCTIONS>
+"""
 
     if mode_clean == "research" and research_dossier:
         input_context = f"""
@@ -1298,7 +1326,7 @@ def generate_podcast_script(
     user_prompt = f"""
 REQUESTED MODE: {mode_clean.upper()}
 SOURCE TITLE: {source_title or 'N/A'}
-
+{instructions_block}
 {input_context}
 
 Generate the podcast script JSON response adhering to spoken prose rules and output schema now.

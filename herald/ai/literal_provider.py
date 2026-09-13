@@ -47,6 +47,8 @@ class LiteralProvider(AIProvider):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
         job_id: str | None = None,
+        generation_instructions: str | None = None,
+        **kwargs: Any,
     ) -> PodcastScriptResponse:
         from herald.literal.script_generator import generate_literal_script
 

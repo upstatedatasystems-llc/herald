@@ -138,18 +138,25 @@ def format_help() -> str:
     """Format comprehensive help and command reference message."""
     return (
         "📖 <b>Herald Usage Guide</b>\n\n"
-        "<b>Ways to generate audio:</b>\n"
-        "• Send an article URL (e.g. <code>https://example.com/article</code>)\n"
-        "• Paste or forward an article, document, or newsletter\n\n"
-        "<b>Modes (top of message):</b>\n"
-        "• <code>literal</code> — Local deterministic reading (no AI required)\n"
-        "• <code>brief</code> — Concise AI summary\n"
-        "• <code>standard</code> — Full AI podcast narration\n"
-        "• <code>research high</code> — Deep-dive grounded research podcast (requires provider with research grounding)\n\n"
+        "<b>Ways to generate podcasts:</b>\n"
+        "• Send a web link (e.g. <code>https://example.com/article</code>)\n"
+        "• Paste an article, document, or newsletter\n"
+        "• Send a research topic seed (e.g. <code>The History of Bell Labs</code>)\n\n"
+        "<b>Interactive Configuration:</b>\n"
+        "When you send content, Herald presents an interactive podcast card:\n"
+        "• <b>Modes:</b>\n"
+        "  - <code>Source</code> — Strictly source-bounded narration\n"
+        "  - <code>Expanded</code> — Source foundation + external web research\n"
+        "  - <code>Topic</code> — Full research synthesis from a topic seed\n"
+        "  - <code>Literal</code> — Verbatim reading (zero AI narration)\n"
+        "• <b>Target Length:</b> Auto, 10m, 20m, 30m, 45m, 60m\n"
+        "• <b>Research Depth:</b> Low, Medium, High (Expanded & Topic)\n"
+        "• <b>Shortcuts:</b> ⚡ Use Default, 📖 Literal Reader\n\n"
         "<b>Directives (top of message):</b>\n"
         "• <code>Voice: af_bella</code> (af_heart, af_bella, af_sarah, am_adam, am_michael)\n"
         "• <code>Speed: 1.1</code> (0.8 to 1.2)\n"
-        "• <code>Title: Custom Title</code>\n\n"
+        "• <code>Title: Custom Title</code>\n"
+        "• <code>Mode: expanded</code> / <code>Length: 30</code> / <code>Research: high</code>\n\n"
         "<b>Commands:</b>\n"
         "/start — Quick-start guide\n"
         "/help — Full usage and directive reference\n"
@@ -158,7 +165,7 @@ def format_help() -> str:
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"
-        "/settings — Preferences, voice selection, and pre-TTS confirmation toggle\n"
+        "/settings — Preferences, voice, AI providers, and defaults\n"
         "/readme — Project documentation"
     )
 
@@ -257,10 +264,6 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
                 {
                     "text": "⚡ Speed",
                     "callback_data": "h3:settings:speed",
-                },
-                {
-                    "text": "🧭 Legacy Mode",
-                    "callback_data": "h3:settings:mode",
                 },
             ],
             [
@@ -561,12 +564,11 @@ def format_research_depth_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
         "🔬 <b>Default Research Depth</b>\n\n"
         f"Current default: <code>{html.escape(curr_rd.capitalize())}</code>\n\n"
         "Select your default research depth for Expanded and Topic modes:\n"
-        "• <b>None:</b> Zero external research queries\n"
         "• <b>Low:</b> 2-3 focused search queries\n"
         "• <b>Medium:</b> 4-6 balanced search queries\n"
         "• <b>High:</b> 8-12 comprehensive queries & cross-checking\n"
     )
-    depths = [("none", "None"), ("low", "Low"), ("medium", "Medium"), ("high", "High")]
+    depths = [("low", "Low"), ("medium", "Medium"), ("high", "High")]
     keyboard = []
     row = []
     for d_id, d_label in depths:
@@ -629,6 +631,29 @@ def get_job_display_title(job: PodcastJob) -> str:
     return "Herald Episode"
 
 
+def format_job_mode_display(job: PodcastJob) -> str:
+    """
+    Format truthful mode display string for job cards.
+    If job has canonical content_mode set, formats canonical settings:
+    e.g. 'Expanded, Target: 45 min, Research: High' or 'Source, Target: Auto'.
+    Falls back to legacy job.request_mode.
+    """
+    if getattr(job, "content_mode", None):
+        cm = str(job.content_mode).capitalize()
+        t_min = getattr(job, "target_minutes", None)
+        target_str = f"{t_min} min" if t_min and t_min != "auto" else "Auto"
+        parts = [f"{cm}", f"Target: {target_str}"]
+        rd = getattr(job, "research_depth", None)
+        if str(job.content_mode).lower() in ("expanded", "topic") and rd:
+            parts.append(f"Research: {rd.capitalize()}")
+        return html.escape(", ".join(parts))
+
+    mode_str = html.escape((job.request_mode or "standard").capitalize())
+    if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
+        mode_str += f" ({html.escape(job.research_depth.capitalize())})"
+    return mode_str
+
+
 def format_approval(
     job: PodcastJob,
     script_json: dict | None,
@@ -647,9 +672,7 @@ def format_approval(
     desc = script_obj.get("episode_description") or ""
     desc_clean = html.escape(desc[:150] + "..." if len(desc) > 150 else desc)
 
-    mode_str = html.escape((job.request_mode or "standard").capitalize())
-    if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
-        mode_str += f" ({html.escape(job.research_depth.capitalize())})"
+    mode_str = format_job_mode_display(job)
 
     source_words = len((job.source_text or "").split())
     dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
@@ -793,10 +816,7 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
     title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
     desc = script_obj.get("episode_description") or ""
     desc_clean = html.escape(desc[:150] + "..." if len(desc) > 150 else desc)
-
-    mode_str = html.escape((job.request_mode or "standard").capitalize())
-    if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
-        mode_str += f" ({html.escape(job.research_depth.capitalize())})"
+    mode_str = format_job_mode_display(job)
 
     source_words = len((job.source_text or "").split())
     dur_data = calculate_script_duration(script_obj, job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
@@ -854,9 +874,7 @@ def format_completion(
     title = html.escape(title_raw[:100] + "..." if len(title_raw) > 100 else title_raw)
     desc = script_obj.get("episode_description") or ""
 
-    mode_str = html.escape((job.request_mode or "standard").capitalize())
-    if job.request_mode == RequestMode.RESEARCH.value and job.research_depth:
-        mode_str += f" ({html.escape(job.research_depth.capitalize())})"
+    mode_str = format_job_mode_display(job)
 
     dur_str = format_duration_sec(job.audio_duration_seconds)
     size_mb_str = f"{file_size_bytes / (1024 * 1024):.1f} MB" if file_size_bytes else ""
@@ -1325,7 +1343,7 @@ def format_podcast_config_card(
     # 3. Research Depth Row
     if research_applicable:
         rd_row = []
-        for d_id, d_label in [("none", "None"), ("low", "Low"), ("medium", "Med"), ("high", "High")]:
+        for d_id, d_label in [("low", "Low"), ("medium", "Med"), ("high", "High")]:
             mark = "✅ " if research_depth == d_id else ""
             rd_row.append({"text": f"{mark}{d_label}", "callback_data": f"h4:c:{job.id}:rd:{d_id}"})
         keyboard.append(rd_row)

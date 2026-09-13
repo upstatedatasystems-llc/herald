@@ -135,6 +135,7 @@ class AnthropicProvider(AIProvider):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
         job_id: str | None = None,
+        generation_instructions: str | None = None,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
             raise RuntimeError("Anthropic API key is not configured.")
@@ -148,10 +149,18 @@ class AnthropicProvider(AIProvider):
             "Do not include commentary outside the JSON block."
         )
 
+        instructions_block = ""
+        if generation_instructions and generation_instructions.strip():
+            instructions_block = f"""
+<TRUSTED_GENERATION_INSTRUCTIONS>
+{generation_instructions.strip()}
+</TRUSTED_GENERATION_INSTRUCTIONS>
+"""
+
         user_content = f"""
 REQUESTED MODE: {mode_clean.upper()}
 SOURCE TITLE: {source_title or 'N/A'}
-
+{instructions_block}
 <SOURCE_DATA>
 {source_text}
 </SOURCE_DATA>

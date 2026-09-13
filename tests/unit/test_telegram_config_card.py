@@ -73,7 +73,9 @@ def test_format_podcast_config_card_expanded_and_topic():
     assert "High" in text
 
     flat_data = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
-    assert f"h4:c:{job_expanded.id}:rd:none" in flat_data
+    assert f"h4:c:{job_expanded.id}:rd:none" not in flat_data
+    assert f"h4:c:{job_expanded.id}:rd:low" in flat_data
+    assert f"h4:c:{job_expanded.id}:rd:medium" in flat_data
     assert f"h4:c:{job_expanded.id}:rd:high" in flat_data
 
     # Check Literal mode
@@ -83,7 +85,7 @@ def test_format_podcast_config_card_expanded_and_topic():
         source_text="Read verbatim please.",
         content_mode="literal",
         target_minutes="auto",
-        research_depth="none",
+        research_depth=None,
         status=JobState.AWAITING_CONFIGURATION.value,
     )
     text_lit, markup_lit = format_podcast_config_card(job_literal)
@@ -119,6 +121,11 @@ def test_default_settings_submenus():
     r_text, r_markup = format_research_depth_menu(prefs)
     assert "Default Research Depth" in r_text
     assert "High" in r_text
+    r_callbacks = [btn["callback_data"] for row in r_markup["inline_keyboard"] for btn in row]
+    assert "h4:s:set_rd:none" not in r_callbacks
+    assert "h4:s:set_rd:low" in r_callbacks
+    assert "h4:s:set_rd:medium" in r_callbacks
+    assert "h4:s:set_rd:high" in r_callbacks
     for row in r_markup["inline_keyboard"]:
         for btn in row:
             assert len(btn["callback_data"].encode("utf-8")) <= 64
@@ -136,3 +143,4 @@ def test_default_settings_submenus():
     assert "h4:s:mode" in s_callbacks
     assert "h4:s:length" in s_callbacks
     assert "h4:s:research" in s_callbacks
+    assert "h3:settings:mode" not in s_callbacks

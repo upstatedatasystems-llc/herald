@@ -955,6 +955,7 @@ def execute_script_generation(
     hold_for_approval: bool,
     is_duplicate: bool = False,
     rerun_of_job_id: str | None = None,
+    status_notifier: Callable[[str], None] | None = None,
 ) -> HeraldResponse:
     """
     Execute script generation, verification, and transition to either AWAITING_APPROVAL or QUEUED_TTS.
@@ -985,7 +986,8 @@ def execute_script_generation(
                 db=db,
             )
 
-    transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
+    if job.status != JobState.SCRIPTING.value:
+        transition_job_state(db, job, JobState.SCRIPTING.value, component="herald-core")
     record_job_diagnostic_event(
         job.id,
         "INFO",
@@ -1001,8 +1003,19 @@ def execute_script_generation(
     target_mins = str(getattr(job, "target_minutes", "auto") or "auto").lower().strip()
     is_fixed_dur = target_mins not in ("auto", "none", "", "0")
 
+    # Canonical content_mode precedence over legacy request_mode
+    if c_mode:
+        is_literal = (c_mode == "literal")
+        is_long_form = c_mode in ("expanded", "topic") or (c_mode == "source" and is_fixed_dur)
+        is_source_auto = (c_mode == "source" and not is_fixed_dur)
+    else:
+        # Fallback for historical jobs lacking content_mode
+        is_literal = (mode_val == RequestMode.LITERAL.value)
+        is_long_form = False
+        is_source_auto = False
+
     try:
-        if c_mode == "literal" or mode_val == RequestMode.LITERAL.value:
+        if is_literal:
             active_operation = "literal_script"
             logger.info(f"Generating Literal script for job '{job.id}' (zero AI requests)")
             t_script0 = datetime.now(UTC)
@@ -1021,7 +1034,7 @@ def execute_script_generation(
                 status="success",
                 input_chars=len(job.source_text or ""),
             )
-        elif c_mode in ("expanded", "topic") or (c_mode == "source" and is_fixed_dur):
+        elif is_long_form:
             # Unified Staged Long-Form Pipeline across Expanded, Topic, and Source with Fixed Duration
             from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
 
@@ -1056,6 +1069,7 @@ def execute_script_generation(
                 research_depth=eff_depth,
                 source_text=job.source_text,
                 source_title=job.custom_title,
+                status_notifier=status_notifier,
             )
             job.script_json = script_resp.model_dump()
             db.commit()

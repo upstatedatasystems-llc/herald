@@ -104,6 +104,7 @@ class GeminiProvider(AIProvider):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
         job_id: str | None = None,
+        generation_instructions: str | None = None,
     ) -> PodcastScriptResponse:
         return generate_podcast_script(
             source_text=source_text,
@@ -112,6 +113,7 @@ class GeminiProvider(AIProvider):
             source_title=source_title,
             job_id=job_id,
             model_name=self.configured_model,
+            generation_instructions=generation_instructions,
         )
 
     def generate_grounded_research(

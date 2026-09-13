@@ -160,6 +160,45 @@ def build_manifest_dict(
         else ("topic" if getattr(job, "content_mode", "") == "topic" else "text")
     )
 
+    res_prov = getattr(job, "research_provider", None)
+    res_mod = getattr(job, "research_model", None)
+    if not res_prov or not res_mod:
+        try:
+            research_ai = (
+                db.query(AIInteraction)
+                .filter(AIInteraction.job_id == job.id, AIInteraction.operation == "grounded_research")
+                .order_by(AIInteraction.created_at.desc())
+                .first()
+            )
+            if research_ai:
+                if not res_prov:
+                    res_prov = research_ai.provider
+                if not res_mod:
+                    res_mod = research_ai.model
+        except Exception:
+            pass
+    if not res_prov and job.request_mode == "research":
+        res_prov = getattr(job, "ai_provider", None)
+
+    sec_progress = getattr(job, "section_progress_json", None) or {}
+    if not isinstance(sec_progress, dict):
+        sec_progress = {}
+
+    sec_words = []
+    if sec_progress.get("sections"):
+        for s in sec_progress["sections"]:
+            if isinstance(s, dict):
+                sec_words.append(s.get("word_count") or len((s.get("narration") or "").split()))
+    elif script_obj.get("segments"):
+        for seg in script_obj["segments"]:
+            if isinstance(seg, dict):
+                sec_words.append(len((seg.get("narration") or "").split()))
+
+    audit_status = None
+    fid_audit = getattr(job, "fidelity_audit_json", None)
+    if isinstance(fid_audit, dict):
+        audit_status = fid_audit.get("status")
+
     return {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "herald_version": getattr(settings, "HERALD_VERSION", "2.0.0"),
@@ -170,6 +209,12 @@ def build_manifest_dict(
         "request_mode": job.request_mode,
         "content_mode": getattr(job, "content_mode", None),
         "target_minutes": getattr(job, "target_minutes", None),
+        "requested_target_minutes": getattr(job, "target_minutes", None),
+        "effective_evidence_target_words": sec_progress.get("planned_total_words") or sec_progress.get("effective_evidence_target"),
+        "planned_words": sec_progress.get("planned_total_words"),
+        "actual_words": narration_words,
+        "section_words": sec_words,
+        "audit_status": audit_status,
         "research_depth": job.research_depth,
         "resolved_default": bool(getattr(job, "resolved_default", False)),
         "input_type": input_type,
@@ -177,8 +222,8 @@ def build_manifest_dict(
         "ai_provider": prov_name or "None (Literal)",
         "ai_model": model_name or "local-literal",
         "script_provider": getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None) or prov_name,
-        "research_provider": getattr(job, "research_provider", None) or getattr(job, "ai_provider", None),
-        "research_model": getattr(job, "research_model", None),
+        "research_provider": res_prov,
+        "research_model": res_mod,
         "branding_intro_seconds": getattr(job, "branding_intro_seconds", 0.0),
         "branding_outro_seconds": getattr(job, "branding_outro_seconds", 0.0),
         "program_duration_seconds": getattr(job, "program_duration_seconds", None),

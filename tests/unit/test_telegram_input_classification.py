@@ -138,19 +138,7 @@ def test_config_card_callbacks(db_session, authorized_user):
     db_session.refresh(job)
     assert job.research_depth == "high"
 
-    # 4. Shortcut: Literal mode
-    mock_client.reset_mock()
-    cb_lit = {
-        "id": "cb-4",
-        "from": {"id": 99999},
-        "message": {"message_id": 20, "chat": {"id": 99999, "type": "private"}},
-        "data": f"h4:c:{job.id}:btn:lit",
-    }
-    handle_telegram_callback_query(db_session, mock_client, cb_lit)
-    db_session.refresh(job)
-    assert job.content_mode == "literal"
-
-    # 5. Cancel podcast
+    # 4. Cancel podcast
     mock_client.reset_mock()
     cb_cancel = {
         "id": "cb-5",
@@ -161,6 +149,37 @@ def test_config_card_callbacks(db_session, authorized_user):
     handle_telegram_callback_query(db_session, mock_client, cb_cancel)
     db_session.refresh(job)
     assert job.status == JobState.CANCELLED.value
+
+    # 5. Shortcut: Literal mode (immediate start on separate job)
+    job_lit = PodcastJob(
+        id="c0000000-0000-0000-0000-000000000009",
+        transport="telegram",
+        telegram_user_id=99999,
+        telegram_chat_id=99999,
+        telegram_message_id=12,
+        telegram_config_message_id=29,
+        source_type="pasted_text",
+        source_hash="test-hash-lit-shortcut",
+        source_text="Test source text for callback checks.",
+        content_mode="source",
+        target_minutes="auto",
+        research_depth="medium",
+        status=JobState.AWAITING_CONFIGURATION.value,
+    )
+    db_session.add(job_lit)
+    db_session.commit()
+
+    mock_client.reset_mock()
+    cb_lit = {
+        "id": "cb-4",
+        "from": {"id": 99999},
+        "message": {"message_id": 20, "chat": {"id": 99999, "type": "private"}},
+        "data": f"h4:c:{job_lit.id}:btn:lit",
+    }
+    handle_telegram_callback_query(db_session, mock_client, cb_lit)
+    db_session.refresh(job_lit)
+    assert job_lit.content_mode == "literal"
+    assert job_lit.status == JobState.SCRIPTING.value
 
 
 def test_settings_defaults_callbacks(db_session, authorized_user):
@@ -233,6 +252,16 @@ def test_config_card_start_generation(db_session, authorized_user):
     handle_telegram_callback_query(db_session, mock_client, cb_start)
     db_session.refresh(job)
 
+    # Fast Telegram acknowledgment queues job for worker
+    assert job.status == JobState.SCRIPTING.value
+
+    # Worker executes script generation asynchronously
+    from apps.worker.main import process_next_scripting_job
+
+    success = process_next_scripting_job(db_session, worker_id="test-worker")
+    assert success is True
+
+    db_session.refresh(job)
     # Should have generated script and queued for TTS (confirm_before_tts is False by default)
     assert job.status == JobState.QUEUED_TTS.value
     assert job.script_json is not None

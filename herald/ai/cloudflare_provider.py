@@ -319,6 +319,7 @@ class CloudflareProvider(AIProvider):
         mode: str = "standard",
         job_id: str | None = None,
         timeout: float | None = None,
+        generation_instructions: str | None = None,
         **kwargs: Any,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
@@ -331,8 +332,17 @@ class CloudflareProvider(AIProvider):
         mode_clean = mode.lower().strip()
         system_prompt = load_system_prompt()
         json_instruction = "\n\nCRITICAL: You MUST respond ONLY with valid JSON matching the requested schema. No markdown formatting, no code fences, no commentary."
-        user_content = f"""Please convert the following source text into a structured podcast script JSON:
 
+        instructions_block = ""
+        if generation_instructions and generation_instructions.strip():
+            instructions_block = f"""
+<TRUSTED_GENERATION_INSTRUCTIONS>
+{generation_instructions.strip()}
+</TRUSTED_GENERATION_INSTRUCTIONS>
+"""
+
+        user_content = f"""Please convert the following source text into a structured podcast script JSON:
+{instructions_block}
 === SOURCE TEXT ===
 {source_text}
 === END SOURCE TEXT ===

@@ -315,6 +315,7 @@ class OpenAIProvider(AIProvider):
         source_title: str | None = None,
         job_id: str | None = None,
         attempt: int = 1,
+        generation_instructions: str | None = None,
         **kwargs: Any,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
@@ -328,10 +329,18 @@ class OpenAIProvider(AIProvider):
             '"source_title" (str), "segments" (array of {"order": int, "heading": str, "narration": str}), "warnings" (array of str).'
         )
 
+        instructions_block = ""
+        if generation_instructions and generation_instructions.strip():
+            instructions_block = f"""
+<TRUSTED_GENERATION_INSTRUCTIONS>
+{generation_instructions.strip()}
+</TRUSTED_GENERATION_INSTRUCTIONS>
+"""
+
         user_content = f"""
 REQUESTED MODE: {mode_clean.upper()}
 SOURCE TITLE: {source_title or 'N/A'}
-
+{instructions_block}
 <SOURCE_DATA>
 {source_text}
 </SOURCE_DATA>

@@ -40,8 +40,54 @@ def sweep_unpresented_approval_cards(db: Session, client: TelegramClient) -> int
         .limit(10)
         .all()
     )
+    unpresented_config_jobs = (
+        db.query(PodcastJob)
+        .filter(
+            PodcastJob.transport == "telegram",
+            PodcastJob.status == JobState.AWAITING_CONFIGURATION.value,
+            PodcastJob.telegram_config_message_id.is_(None),
+            PodcastJob.telegram_chat_id.isnot(None),
+            PodcastJob.attempt_count < 3,
+        )
+        .order_by(PodcastJob.created_at.asc())
+        .limit(10)
+        .all()
+    )
 
     delivered = 0
+
+    if unpresented_config_jobs:
+        from herald.telegram.auth import get_effective_user_preferences
+        from herald.telegram.formatters import format_podcast_config_card
+
+        for c_job in unpresented_config_jobs:
+            try:
+                c_reply_id = int(c_job.telegram_message_id) if c_job.telegram_message_id else None
+                c_prefs = get_effective_user_preferences(db, c_job.telegram_user_id) if c_job.telegram_user_id else {}
+                c_text, c_markup = format_podcast_config_card(c_job, c_prefs)
+                sent_msg = client.send_message(
+                    chat_id=c_job.telegram_chat_id,
+                    text=c_text,
+                    reply_markup=c_markup,
+                    reply_to_message_id=c_reply_id,
+                    parse_mode="HTML",
+                )
+                if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                    c_job.telegram_config_message_id = sent_msg["message_id"]
+                    db.commit()
+                    delivered += 1
+                    logger.info(
+                        f"Successfully delivered recovered configuration card for job '{c_job.id}' (msg_id: {sent_msg['message_id']})"
+                    )
+                else:
+                    c_job.attempt_count = (c_job.attempt_count or 0) + 1
+                    db.commit()
+            except Exception as ce:
+                c_job.attempt_count = (c_job.attempt_count or 0) + 1
+                db.commit()
+                logger.warning(
+                    f"Failed retry to deliver configuration card for job '{c_job.id}' (attempt {c_job.attempt_count}): {ce}"
+                )
     for job in unpresented_jobs:
         try:
             reply_id = int(job.telegram_message_id) if job.telegram_message_id else None

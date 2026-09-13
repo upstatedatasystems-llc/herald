@@ -48,8 +48,9 @@ class AIProvider(ABC):
         research_dossier: dict[str, Any] | None = None,
         source_title: str | None = None,
         job_id: str | None = None,
+        generation_instructions: str | None = None,
     ) -> PodcastScriptResponse:
-        """Generate structured podcast script from source text."""
+        """Generate structured podcast script from source text and trusted generation instructions."""
 
     @abstractmethod
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:

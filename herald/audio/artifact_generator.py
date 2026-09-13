@@ -186,8 +186,11 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
         f"- **Status**: `{job.status}`",
         f"- **Request Mode**: `{job.request_mode}`",
     ]
-    if is_research:
-        lines.append(f"- **Research Depth**: `{job.research_depth or 'medium'}`")
+    if getattr(job, "content_mode", None):
+        lines.append(f"- **Content Mode**: `{job.content_mode}`")
+        lines.append(f"- **Target Minutes**: `{job.target_minutes or 'auto'}`")
+    if job.research_depth:
+        lines.append(f"- **Research Depth**: `{job.research_depth}`")
     lines.extend([
         f"- **Source Type**: `{job.source_type}`",
         f"- **Source Title / URL**: {job.source_url or job.custom_title or 'N/A'}",
@@ -208,8 +211,12 @@ def ensure_details_artifact(job: PodcastJob, target_dir: Path, db: Session | Non
     else:
         lines.append("- **AI Provider**: `None (Literal / Deterministic Chunker)`")
 
-    if is_research and getattr(job, "research_model", None):
-        lines.append(f"- **AI Research Model**: `{job.research_model}`")
+    res_prov = getattr(job, "research_provider", None)
+    res_mod = getattr(job, "research_model", None)
+    if res_prov:
+        lines.append(f"- **AI Research Provider**: `{res_prov}`")
+    if res_mod:
+        lines.append(f"- **AI Research Model**: `{res_mod}`")
 
     tts_chunks_count = getattr(job, "completed_chunk_index", 0) or 0
     if db is not None:

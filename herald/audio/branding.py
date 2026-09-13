@@ -9,6 +9,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from herald.audio.ffmpeg_builder import inspect_pcm_wav_file, validate_audio_file
 from herald.config import settings
@@ -17,27 +18,52 @@ from herald.tts.kokoro_client import KokoroClient
 logger = logging.getLogger("herald.audio.branding")
 
 INTRO_FIXED_TEMPLATE = (
-    "This is Herald, an open-source podcast generation platform. "
+    "This is {platform_name}, an open-source podcast generation platform. "
     "You're listening to an approximately {target_minutes}-minute podcast about {topic}. Enjoy."
 )
 
 INTRO_GENERAL_TEMPLATE = (
-    "This is Herald, an open-source podcast generation platform. "
+    "This is {platform_name}, an open-source podcast generation platform. "
     "You're listening to a podcast about {topic}. Enjoy."
 )
 
-OUTRO_TEMPLATE = "You've been listening to Herald, the open-source podcast generation platform."
+OUTRO_TEMPLATE = "You've been listening to {platform_name}, the open-source podcast generation platform."
 
 
 def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
     """
     Sanitize and normalize a topic string for natural-sounding speech in the intro.
-    Strips markdown, HTML tags, excess whitespace, URL protocols, and trailing punctuation.
+    Strips raw URLs, protocols, domains, query strings, file extensions,
+    markdown formatting, HTML tags, excess whitespace, and trailing punctuation.
     """
     if not raw_topic:
         return "today's topic"
 
     clean = raw_topic.strip()
+
+    # Check if raw_topic looks like a URL
+    if clean.startswith("http://") or clean.startswith("https://") or clean.startswith("www."):
+        try:
+            parsed = urlparse(clean if "://" in clean else f"https://{clean}")
+            path = parsed.path.strip("/")
+            # If path exists, try to extract meaningful slug/words
+            if path:
+                # Remove common file extensions like .html, .htm, .php
+                path_clean = re.sub(r"\.[a-zA-Z0-9]+$", "", path)
+                # Split path by slashes to get path components
+                path_segments = [p for p in path_clean.strip("/").split("/") if p and not p.isdigit()]
+                if path_segments:
+                    # Take the final meaningful path segment (the article slug)
+                    slug = path_segments[-1]
+                    words = [w for w in re.split(r"[-_]+", slug) if w]
+                    clean = " ".join(words).title()
+                else:
+                    clean = parsed.netloc.replace("www.", "").split(".")[0].title()
+            else:
+                clean = parsed.netloc.replace("www.", "").split(".")[0].title()
+        except Exception:
+            clean = "today's topic"
+
     # Remove HTML tags if present
     clean = re.sub(r"<[^>]+>", "", clean)
     clean = html.unescape(clean)
@@ -49,7 +75,7 @@ def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
     # Collapse multiple whitespace
     clean = re.sub(r"\s+", " ", clean).strip()
 
-    if not clean:
+    if not clean or clean.lower() in ("http", "https", "www"):
         return "today's topic"
 
     if len(clean) > max_chars:
@@ -60,24 +86,49 @@ def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
     return clean or "today's topic"
 
 
-def render_intro_narration(topic: str | None, target_minutes: str | int | None) -> str:
+def render_intro_narration(
+    topic: str | None,
+    target_minutes: str | int | None,
+    actual_body_duration_seconds: float | None = None,
+) -> str:
     """
     Render deterministic intro narration string.
     Uses INTRO_FIXED_TEMPLATE when target_minutes is a specific duration (e.g. 10, 20, 30, 45, 60),
     and INTRO_GENERAL_TEMPLATE for 'auto', 'literal', or unspecified duration.
+
+    Truthfulness guarantee:
+    If actual synthesized body duration materially underfilled the requested duration
+    (e.g. requested 60m but source only supported an 8m episode), announces the actual
+    rounded duration instead of misleading the listener.
     """
+    platform_name = getattr(settings, "BRANDING_PLATFORM_NAME", "Herald")
     clean_topic = sanitize_branding_topic(topic)
     t_str = str(target_minutes).lower().strip() if target_minutes is not None else ""
 
     if t_str and t_str.isdigit() and int(t_str) > 0:
-        return INTRO_FIXED_TEMPLATE.format(target_minutes=t_str, topic=clean_topic)
+        req_mins = int(t_str)
+        effective_mins = req_mins
 
-    return INTRO_GENERAL_TEMPLATE.format(topic=clean_topic)
+        if actual_body_duration_seconds is not None and actual_body_duration_seconds > 0:
+            act_mins = max(1, round(actual_body_duration_seconds / 60.0))
+            # If actual duration is materially under target (less than 60% of target),
+            # use actual duration so the intro claim is truthful.
+            if act_mins < req_mins * 0.6:
+                effective_mins = act_mins
+
+        return INTRO_FIXED_TEMPLATE.format(
+            platform_name=platform_name,
+            target_minutes=effective_mins,
+            topic=clean_topic,
+        )
+
+    return INTRO_GENERAL_TEMPLATE.format(platform_name=platform_name, topic=clean_topic)
 
 
 def render_outro_narration() -> str:
     """Render deterministic outro narration string."""
-    return OUTRO_TEMPLATE
+    platform_name = getattr(settings, "BRANDING_PLATFORM_NAME", "Herald")
+    return OUTRO_TEMPLATE.format(platform_name=platform_name)
 
 
 def synthesize_branding_segment(
@@ -87,23 +138,58 @@ def synthesize_branding_segment(
     voice: str,
     speed: float = 1.0,
     segment_name: str = "branding",
+    timeout: float | None = None,
+    global_semaphore: Any = None,
 ) -> dict[str, Any]:
     """
     Synthesize an intro or outro narration segment into a validated WAV file using Kokoro.
-    Adheres to normal WAV validation rules and returns duration metadata.
+    Reuses KokoroClient.synthesize_chunk, respects global TTS concurrency semaphore,
+    supports restart-safe idempotency, and validates resulting audio.
     """
     output_wav_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Restart-safe check: reuse existing valid WAV file if already present
+    if output_wav_path.exists() and output_wav_path.stat().st_size > 0:
+        try:
+            validate_audio_file(output_wav_path)
+            info = inspect_pcm_wav_file(output_wav_path)
+            if info and info.get("duration_seconds", 0) > 0:
+                logger.info(
+                    f"Reusing existing valid {segment_name} audio chunk ({info['duration_seconds']:.1f}s) at {output_wav_path}"
+                )
+                return {
+                    "path": output_wav_path,
+                    "duration_seconds": float(info["duration_seconds"]),
+                    "text": text,
+                    "voice": voice,
+                    "speed": speed,
+                }
+        except Exception:
+            logger.debug(f"Existing {segment_name} audio invalid or unreadable, re-synthesizing...")
+
     logger.info(f"Synthesizing {segment_name} narration segment ({len(text)} chars)")
 
-    res = kokoro_client.synthesize_wav(
-        text=text,
-        output_path=output_wav_path,
-        voice=voice,
-        speed=speed,
-    )
+    if global_semaphore is not None:
+        with global_semaphore:
+            kokoro_client.synthesize_chunk(
+                text=text,
+                output_path=output_wav_path,
+                voice=voice,
+                speed=speed,
+                timeout=timeout,
+            )
+    else:
+        kokoro_client.synthesize_chunk(
+            text=text,
+            output_path=output_wav_path,
+            voice=voice,
+            speed=speed,
+            timeout=timeout,
+        )
+
     validate_audio_file(output_wav_path)
     info = inspect_pcm_wav_file(output_wav_path)
-    dur = info["duration_seconds"] if info else getattr(res, "audio_duration", 0.0)
+    dur = info["duration_seconds"] if info else 0.0
 
     return {
         "path": output_wav_path,
