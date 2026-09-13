@@ -166,15 +166,14 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
 
             if job.status == JobState.SCRIPTING.value:
                 # Keep in SCRIPTING state so a worker can claim and resume from section_progress_json
+                db.commit()
                 record_job_diagnostic_event(
                     job.id,
                     "WARNING",
                     "recovery",
                     "STALE_SCRIPTING_CLAIM_RECOVERED",
                     "Recovered stale scripting claim after worker crash or timeout. Job ready to resume.",
-                    db=db,
                 )
-                db.commit()
                 continue
 
             target_state = (
@@ -187,7 +186,7 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 component="herald-worker-recovery",
                 message="Recovered stale worker claim after crash or timeout",
                 force=True,
-                commit=False,
+                commit=True,
             )
             record_stage_metric(
                 job_id=job.id,
@@ -198,7 +197,6 @@ def recover_stale_claims(db: Session, stale_minutes: int = 15):
                 metadata_json={"recovered_from": pre_recovery_status, "attempts": job.synthesis_attempt_count},
                 is_attempt_metric=True,
             )
-            db.commit()
             if target_state == JobState.FAILED_FINAL.value:
                 try:
                     from herald.services.diagnostics_export import (
@@ -327,16 +325,16 @@ def claim_next_scripting_job(db: Session, worker_id: str = "herald-worker", leas
     job.last_heartbeat_at = now
     job.heartbeat_at = now
 
+    db.commit()
+    db.refresh(job)
+
     record_job_diagnostic_event(
         job.id,
         "INFO",
         "scripting",
         "SCRIPTING_CLAIMED",
         f"Claimed scripting job atomically by '{worker_id}'",
-        db=db,
     )
-    db.commit()
-    db.refresh(job)
     return job
 
 

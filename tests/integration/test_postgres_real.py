@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from apps.worker.main import (
     claim_next_job,
+    claim_next_scripting_job,
     recover_stale_claims,
     requeue_due_tts_retries,
 )
@@ -1025,5 +1026,174 @@ def test_postgres_provisional_recovery_and_stale_intake_concurrency(
         assert job_data.get("error_code") == "INTAKE_TIMEOUT"
 
     VerifySession.close()
+
+
+def test_postgres_scripting_claim_no_self_deadlock(pg_session_factory, monkeypatch):
+    """
+    Regression test proving that claim_next_scripting_job does not self-deadlock
+    against its isolated diagnostic event recorder under real PostgreSQL row-level locks.
+
+    Under PostgreSQL, inserting into job_diagnostic_events acquires a FOR KEY SHARE lock
+    on the referenced podcast_jobs row. If claim_next_scripting_job held an uncommitted
+    FOR UPDATE row lock while the isolated session attempted the insert, the worker
+    would hang indefinitely in a self-deadlock.
+
+    The fix commits the parent row mutation first, then records telemetry.
+    """
+    from herald.db.models import JobDiagnosticEvent
+    import herald.services.diagnostic_recorder
+
+    # Route isolated SessionLocal to the PostgreSQL test database
+    monkeypatch.setattr(herald.services.diagnostic_recorder, "SessionLocal", pg_session_factory)
+
+    Session = pg_session_factory()
+    VerifySession = pg_session_factory()
+
+    try:
+        job = PodcastJob(
+            id=str(uuid.uuid4()),
+            transport="telegram",
+            telegram_chat_id=99001,
+            telegram_message_id=99002,
+            request_mode="standard",
+            source_type="url",
+            source_hash="hash-pg-script-claim",
+            source_text="Real postgres claim deadlock test",
+            status=JobState.SCRIPTING.value,
+            content_mode="literal",
+            claimed_by=None,
+            claim_owner=None,
+        )
+        Session.add(job)
+        Session.commit()
+        job_id = job.id
+
+        # Invoke claim_next_scripting_job. Under the bug, this would deadlock/hang.
+        # Run with a bounded timeout thread to verify it completes promptly.
+        claimed = None
+        exception = None
+
+        def do_claim():
+            nonlocal claimed, exception
+            try:
+                claimed = claim_next_scripting_job(Session, worker_id="pg-worker-deadlock-test", lease_seconds=300)
+            except Exception as ex:
+                exception = ex
+
+        t = threading.Thread(target=do_claim, daemon=True)
+        t.start()
+        t.join(timeout=10.0)
+
+        assert not t.is_alive(), "claim_next_scripting_job timed out (PostgreSQL self-deadlock detected!)"
+        assert exception is None, f"claim_next_scripting_job raised exception: {exception}"
+        assert claimed is not None
+        assert claimed.id == job_id
+        assert claimed.claimed_by == "pg-worker-deadlock-test"
+        assert claimed.claim_owner == "pg-worker-deadlock-test"
+
+        # Verify parent row is committed in PostgreSQL
+        VerifySession.expire_all()
+        committed_job = VerifySession.query(PodcastJob).filter_by(id=job_id).first()
+        assert committed_job.claimed_by == "pg-worker-deadlock-test"
+
+        # Verify SCRIPTING_CLAIMED event was persisted in PostgreSQL by isolated session
+        diag_evt = (
+            VerifySession.query(JobDiagnosticEvent)
+            .filter_by(job_id=job_id, event_type="SCRIPTING_CLAIMED")
+            .first()
+        )
+        assert diag_evt is not None
+        assert "pg-worker-deadlock-test" in diag_evt.message
+
+        # Verify another SKIP LOCKED query behaves normally and finds no available jobs
+        CompetingSession = pg_session_factory()
+        competing_claim = claim_next_scripting_job(CompetingSession, worker_id="competing-worker")
+        CompetingSession.close()
+        assert competing_claim is None
+    finally:
+        Session.close()
+        VerifySession.close()
+
+
+def test_postgres_stale_scripting_recovery_no_self_deadlock(pg_session_factory, monkeypatch):
+    """
+    Regression test proving that recover_stale_claims does not self-deadlock
+    when recovering stale SCRIPTING jobs under real PostgreSQL row locks.
+    """
+    from herald.db.models import JobDiagnosticEvent
+    import herald.services.diagnostic_recorder
+
+    monkeypatch.setattr(herald.services.diagnostic_recorder, "SessionLocal", pg_session_factory)
+
+    Session = pg_session_factory()
+    VerifySession = pg_session_factory()
+
+    try:
+        old_time = datetime.now(UTC) - timedelta(minutes=45)
+        stale_job = PodcastJob(
+            id=str(uuid.uuid4()),
+            transport="telegram",
+            telegram_chat_id=99003,
+            telegram_message_id=99004,
+            request_mode="standard",
+            source_type="url",
+            source_hash="hash-pg-stale-script",
+            source_text="Real postgres stale recovery test",
+            status=JobState.SCRIPTING.value,
+            content_mode="literal",
+            claimed_by="crashed-worker",
+            claim_owner="crashed-worker",
+            claimed_at=old_time,
+            last_heartbeat_at=old_time,
+            heartbeat_at=old_time,
+            lease_expires_at=old_time + timedelta(seconds=300),
+        )
+        Session.add(stale_job)
+        Session.commit()
+        stale_id = stale_job.id
+
+        exception = None
+
+        def do_recovery():
+            nonlocal exception
+            try:
+                recover_stale_claims(Session, stale_minutes=15)
+            except Exception as ex:
+                exception = ex
+
+        t = threading.Thread(target=do_recovery, daemon=True)
+        t.start()
+        t.join(timeout=10.0)
+
+        assert not t.is_alive(), "recover_stale_claims timed out (PostgreSQL self-deadlock detected!)"
+        assert exception is None, f"recover_stale_claims raised exception: {exception}"
+
+        # Verify state in PostgreSQL
+        VerifySession.expire_all()
+        refreshed = VerifySession.query(PodcastJob).filter_by(id=stale_id).first()
+        assert refreshed.status == JobState.SCRIPTING.value
+        assert refreshed.claimed_by is None
+        assert refreshed.claim_owner is None
+        assert refreshed.lease_expires_at is None
+
+        # Verify diagnostic event recorded
+        diag_evt = (
+            VerifySession.query(JobDiagnosticEvent)
+            .filter_by(job_id=stale_id, event_type="STALE_SCRIPTING_CLAIM_RECOVERED")
+            .first()
+        )
+        assert diag_evt is not None
+
+        # Verify job is immediately claimable again
+        ClaimSession = pg_session_factory()
+        reclaimed = claim_next_scripting_job(ClaimSession, worker_id="replacement-worker")
+        ClaimSession.close()
+        assert reclaimed is not None
+        assert reclaimed.id == stale_id
+        assert reclaimed.claimed_by == "replacement-worker"
+    finally:
+        Session.close()
+        VerifySession.close()
+
 
 
