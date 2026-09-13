@@ -644,6 +644,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         topic=title,
                         target_minutes=getattr(job, "target_minutes", None),
                         actual_body_duration_seconds=program_dur_sec,
+                        content_mode=getattr(job, "content_mode", None),
                     )
                     intro_wav_path = chunks_dir / f"branding_intro_{job.id}.wav"
                     intro_res = synthesize_branding_segment(

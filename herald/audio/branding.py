@@ -90,6 +90,7 @@ def render_intro_narration(
     topic: str | None,
     target_minutes: str | int | None,
     actual_body_duration_seconds: float | None = None,
+    content_mode: str | None = None,
 ) -> str:
     """
     Render deterministic intro narration string.
@@ -103,6 +104,10 @@ def render_intro_narration(
     """
     platform_name = getattr(settings, "BRANDING_PLATFORM_NAME", "Herald")
     clean_topic = sanitize_branding_topic(topic)
+
+    if content_mode and str(content_mode).lower().strip() == "literal":
+        return INTRO_GENERAL_TEMPLATE.format(platform_name=platform_name, topic=clean_topic)
+
     t_str = str(target_minutes).lower().strip() if target_minutes is not None else ""
 
     if t_str and t_str.isdigit() and int(t_str) > 0:

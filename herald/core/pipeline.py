@@ -854,8 +854,25 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
     # Case E: Interactive Configuration Mode
     if req.interactive_config:
         c_mode = req.content_mode
-        if not c_mode:
-            if source_type == SourceType.URL.value:
+        if c_mode:
+            c_mode = str(c_mode).lower().strip()
+            if c_mode in ("research", "detailed"):
+                c_mode = "expanded"
+        else:
+            explicit_user_mode = None
+            if telegram_user is not None:
+                from herald.db.models import TelegramUser
+                db_user = db.query(TelegramUser).filter(TelegramUser.telegram_user_id == telegram_user).first()
+                if db_user and db_user.default_mode:
+                    explicit_user_mode = db_user.default_mode.strip().lower()
+
+            if explicit_user_mode in ("brief", "standard"):
+                c_mode = "source"
+            elif explicit_user_mode in ("research", "detailed"):
+                c_mode = "expanded"
+            elif explicit_user_mode == "literal":
+                c_mode = "literal"
+            elif source_type == SourceType.URL.value:
                 c_mode = "source"
             elif deduped_text and len(deduped_text) > 300:
                 c_mode = "source"
@@ -863,18 +880,13 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 c_mode = "topic"
 
         target_mins = str(req.target_minutes or "auto").lower().strip()
-        rd_depth = (req.research_depth or "medium").lower().strip()
+        rd_depth = (req.research_depth or (user_prefs.get("default_research_depth") if user_prefs else None) or "medium")
+        rd_depth_clean = str(rd_depth).lower().strip()
 
         job.content_mode = c_mode
         job.target_minutes = target_mins
-        if job.request_mode in (
-            RequestMode.LITERAL.value,
-            RequestMode.BRIEF.value,
-            RequestMode.STANDARD.value,
-        ):
-            job.research_depth = None
-        elif c_mode in ("expanded", "topic") or job.request_mode == RequestMode.RESEARCH.value:
-            job.research_depth = rd_depth
+        if c_mode in ("expanded", "topic"):
+            job.research_depth = rd_depth_clean if rd_depth_clean in ("low", "medium", "high") else "medium"
         else:
             job.research_depth = None
 

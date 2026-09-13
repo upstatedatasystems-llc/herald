@@ -107,7 +107,7 @@ def test_auto_mode_has_no_fixed_word_quota():
     )
     assert outline["is_auto"] is True
     # Word budget is naturally proportioned to evidence, not forced to 1500-2500
-    assert outline["section_count"] >= 3
+    assert outline["section_count"] >= 2
 
 
 def test_assemble_and_smooth_script_anti_compression():
@@ -243,4 +243,175 @@ def test_prompt_injection_trust_boundary(monkeypatch):
     # 3. Trusted instructions must NOT be nested inside <SOURCE_DATA>
     source_block = prompt.split("<SOURCE_DATA>")[1].split("</SOURCE_DATA>")[0]
     assert "<TRUSTED_GENERATION_INSTRUCTIONS>" not in source_block
+
+
+def test_outline_evidence_distribution_four_chunks_eleven_nominal_sections():
+    """
+    Regression test for Item 3:
+    4 evidence chunks with nominal 60-minute target (which initially maps to 11 sections).
+    Verify that:
+    1. The outline reduces the number of sections to what the evidence can support.
+    2. The 4th evidence chunk is NOT blindly assigned to sections 4-11.
+    """
+    packet = {
+        "topic": "Advanced Propulsion",
+        "scope": "source_only",
+        "items": [
+            {"evidence_id": "ev_src_1", "snippet": "Propulsion intro"},
+            {"evidence_id": "ev_src_2", "snippet": "Ion drives"},
+            {"evidence_id": "ev_src_3", "snippet": "Nuclear thermal"},
+            {"evidence_id": "ev_src_4", "snippet": "Fusion thrusters"},
+        ],
+    }
+    outline = build_episode_outline(
+        topic="Advanced Propulsion",
+        evidence_packet=packet,
+        target_minutes="60",
+        scope=EvidenceScope.SOURCE_ONLY,
+        source_ledger={"headings": ["Intro", "Ion", "Nuclear", "Fusion"], "clean_text": "Propulsion details " * 200},
+    )
+    sections = outline["sections"]
+    # Verify section count was reduced to fit available evidence (e.g. <= 5 sections instead of 11)
+    assert len(sections) < 11
+    # Verify that the fourth evidence chunk is NOT assigned to a cascade of trailing sections
+    fourth_ev_count = sum(1 for s in sections if "ev_src_4" in s.get("relevant_evidence_ids", []))
+    assert fourth_ev_count <= 2
+    # Verify every evidence chunk is represented
+    all_assigned = [ev for s in sections for ev in s.get("relevant_evidence_ids", [])]
+    for ev_id in ["ev_src_1", "ev_src_2", "ev_src_3", "ev_src_4"]:
+        assert ev_id in all_assigned
+
+
+def test_gemini_provider_real_contract_receives_research_plan(monkeypatch):
+    """
+    Regression test for Item 1:
+    Prove that execute_unified_long_form_pipeline invokes the REAL GeminiProvider adapter,
+    which invokes the underlying Gemini client, successfully receiving the research plan.
+    Must NOT use a MagicMock provider accepting **kwargs.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from herald.db.models import Base, PodcastJob
+    from herald.ai.gemini_provider import GeminiProvider
+    import herald.gemini.client as gem_client
+    from herald.ai.long_form import execute_unified_long_form_pipeline
+    from herald.gemini.schema import PodcastScriptResponse, PodcastSegment
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    captured_research_plan = None
+
+    def mock_gemini_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None):
+        nonlocal captured_research_plan
+        captured_research_plan = research_plan
+        return {
+            "raw_text": "Grounded research notes",
+            "search_count": 2,
+            "source_count": 2,
+            "research_sources": [
+                {"title": "Source 1", "snippet": "Fact 1", "url": "https://example.com/1"},
+            ],
+            "grounding_supports": [],
+        }
+
+    monkeypatch.setattr(gem_client, "generate_grounded_research", mock_gemini_grounded_research)
+    monkeypatch.setattr("herald.config.settings.GEMINI_API_KEY", "fake-test-key")
+
+    # Use REAL GeminiProvider adapter
+    real_provider = GeminiProvider(model="gemini-2.5-flash", research_model="gemini-2.5-flash")
+    dummy_resp = PodcastScriptResponse(
+        episode_title="Test",
+        episode_description="Desc",
+        segments=[PodcastSegment(order=1, heading="H1", narration="Narration content " * 100)],
+        warnings=[],
+    )
+    monkeypatch.setattr(real_provider, "generate_script", lambda *args, **kwargs: dummy_resp)
+
+    import herald.ai.failover as failover_mod
+    monkeypatch.setattr(failover_mod, "create_provider", lambda *args, **kwargs: real_provider)
+
+    job = PodcastJob(
+        id="job-gem-contract-1",
+        source_hash="hash-gem-1",
+        source_text="Test seed for research",
+        status="SCRIPTING",
+        content_mode="expanded",
+        target_minutes="10",
+        ai_provider_chain_json=[{"provider": "gemini", "model": "gemini-2.5-flash"}],
+    )
+    session.add(job)
+    session.commit()
+
+    execute_unified_long_form_pipeline(
+        db=session,
+        job=job,
+        topic="Artificial Intelligence",
+        scope=EvidenceScope.SOURCE_PLUS_RESEARCH,
+        target_minutes="10",
+        research_depth="medium",
+        source_text="Test seed for research",
+    )
+
+    assert captured_research_plan is not None
+    assert "focus_areas" in captured_research_plan
+    assert captured_research_plan.get("research_depth") == "medium"
+    session.close()
+
+
+def test_failover_content_mode_precedence_over_legacy_request_mode(monkeypatch):
+    """
+    Regression test for Item 5:
+    When request_mode is 'literal' but content_mode is 'expanded',
+    execute_with_failover must NOT route to LiteralProvider.
+    """
+    from herald.ai.failover import execute_with_failover
+    from herald.db.models import PodcastJob
+    from herald.ai.literal_provider import LiteralProvider
+
+    job = PodcastJob(
+        id="job-mode-prec-1",
+        source_hash="hash-prec-1",
+        source_text="Sample text",
+        request_mode="literal",
+        content_mode="expanded",
+        ai_provider_chain_json=[{"provider": "gemini", "model": "gemini-2.5-flash"}],
+    )
+
+    invoked_providers = []
+
+    def mock_exec_fn(p, attempt, src):
+        invoked_providers.append(p.provider_name)
+        return {"status": "ok"}
+
+    from herald.ai.base import AIProvider
+    class FakeGemini(AIProvider):
+        @property
+        def provider_name(self):
+            return "Gemini"
+        @property
+        def configured_model(self):
+            return "gemini-2.5-flash"
+        def is_configured(self):
+            return True
+        def generate_script(self, *args, **kwargs):
+            return None
+        def check_connection(self, *args, **kwargs):
+            return {}
+
+    monkeypatch.setattr("herald.ai.failover.create_provider", lambda p, **kwargs: FakeGemini() if p == "gemini" else LiteralProvider())
+    monkeypatch.setattr("herald.ai.failover.is_provider_configured", lambda p: True)
+
+    res = execute_with_failover(
+        job=job,
+        operation="grounded_research",
+        execute_fn=mock_exec_fn,
+        source_text="Sample text",
+    )
+
+    assert res == {"status": "ok"}
+    assert "Literal" not in invoked_providers
+    assert "Gemini" in invoked_providers
 

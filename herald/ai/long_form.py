@@ -410,30 +410,45 @@ def build_episode_outline(
     if is_auto:
         # In Auto mode, derive natural scope from evidence without fixed quota
         if scope == EvidenceScope.SOURCE_ONLY and source_ledger:
-            sec_count = max(2, min(len(source_ledger.get("headings", [])) or 3, 6))
+            sec_count = max(2, min(len(source_ledger.get("headings", [])) or len(items) or 3, 6))
         elif research_plan and research_plan.get("focus_areas"):
             sec_count = max(2, len(research_plan["focus_areas"]))
         else:
-            sec_count = max(3, min(len(items), 6))
+            sec_count = max(2, min(len(items), 6))
         section_word_budget = None  # Soft/unbudgeted in Auto mode
         effective_total_words = None
     else:
         effective_total_words = evidence_supported_target
         if evidence_supported_target <= 1500:
-            sec_count = 3
+            nominal_sec_count = 3
         elif evidence_supported_target <= 3000:
-            sec_count = 5
+            nominal_sec_count = 5
         elif evidence_supported_target <= 4500:
-            sec_count = 7
+            nominal_sec_count = 7
         elif evidence_supported_target <= 6000:
-            sec_count = 9
+            nominal_sec_count = 9
         else:
-            sec_count = 11
+            nominal_sec_count = 11
+
+        # Deliberate section count reduction:
+        # If available evidence cannot support the planned number of distinct sections,
+        # reduce the number of sections rather than manufacturing repetitive sections.
+        if evidence_ids:
+            if scope == EvidenceScope.SOURCE_ONLY:
+                max_supported_secs = max(2, min(len(evidence_ids), len(source_ledger.get("headings", [])) or len(evidence_ids)))
+            elif research_plan and research_plan.get("focus_areas"):
+                max_supported_secs = max(len(research_plan["focus_areas"]), min(len(evidence_ids), nominal_sec_count))
+            else:
+                max_supported_secs = max(2, min(len(evidence_ids) + 1, nominal_sec_count))
+            sec_count = min(nominal_sec_count, max_supported_secs)
+        else:
+            sec_count = nominal_sec_count
+
         section_word_budget = evidence_supported_target // sec_count
 
     sections = []
 
-    # Build topic-specific section headings and purposes
+    # Build topic-specific section headings and distinct narrative purposes
     headings_pool = []
     if scope == EvidenceScope.SOURCE_ONLY and source_ledger and source_ledger.get("headings"):
         for h in source_ledger["headings"]:
@@ -442,29 +457,36 @@ def build_episode_outline(
         for fa in research_plan["focus_areas"]:
             headings_pool.append((fa["name"], fa["focus"]))
 
+    distinct_narrative_facets = [
+        ("The Central Premise and Key Facts", "Establish core stakes and central narrative premise."),
+        ("Context, Background, and Evolution", "Analyze background roots, context, and development."),
+        ("Technical Mechanics and Architecture", "Examine structural design, mechanisms, and specifications."),
+        ("Operational Challenges and Nuance", "Address controversies, obstacles, and complex tradeoffs."),
+        ("Real-World Impact and Future Horizons", "Synthesize long-term meaning, lessons, and implications."),
+        ("Strategic Tradeoffs and Critical Analysis", "Deep-dive into tradeoffs, edge cases, and critical evaluations."),
+    ]
+
     if not headings_pool:
-        headings_pool = [
-            ("The Central Premise and Key Facts", "Establish core stakes and central narrative premise."),
-            ("Context, Background, and Evolution", "Analyze background roots, context, and development."),
-            ("Technical Mechanics and Architecture", "Examine structural design, mechanisms, and specifications."),
-            ("Operational Challenges and Nuance", "Address controversies, obstacles, and complex tradeoffs."),
-            ("Real-World Impact and Future Horizons", "Synthesize long-term meaning, lessons, and implications."),
-        ]
+        headings_pool = distinct_narrative_facets
 
     for i in range(sec_count):
         idx = i + 1
         if i < len(headings_pool):
             heading, purpose = headings_pool[i]
         else:
-            h_base, p_base = headings_pool[i % len(headings_pool)]
-            heading = f"{h_base} (Part {idx})"
-            purpose = f"Further detailed exploration of {p_base}"
+            facet_heading, facet_purpose = distinct_narrative_facets[i % len(distinct_narrative_facets)]
+            base_heading = headings_pool[i % len(headings_pool)][0]
+            heading = f"{base_heading}: {facet_heading}"
+            purpose = f"Examine {base_heading} through the lens of: {facet_purpose}"
 
-        # Assign relevant evidence: ensure sequential distribution across all sections
-        if len(evidence_ids) <= sec_count:
-            # Distribute evidence so later sections receive later evidence chunks
-            ev_idx = min(i, len(evidence_ids) - 1)
-            assigned_ev = [evidence_ids[ev_idx]]
+        # Assign relevant evidence deliberately:
+        # Guarantee all meaningful source chunks receive coverage without mechanically repeating the last chunk
+        if not evidence_ids:
+            assigned_ev = []
+        elif len(evidence_ids) <= sec_count:
+            # Proportional mapping across sections so chunks are distributed evenly
+            chunk_idx = (i * len(evidence_ids)) // sec_count
+            assigned_ev = [evidence_ids[chunk_idx]]
         else:
             start_ev = (i * len(evidence_ids)) // sec_count
             end_ev = ((i + 1) * len(evidence_ids)) // sec_count
@@ -564,10 +586,14 @@ Requirements:
     narration_parts = [seg.narration for seg in res.segments]
     full_narration = "\n\n".join(narration_parts)
     actual_words = len(full_narration.split())
-
     # Duration enforcement: if budget is fixed and section is materially short (< 80% of budget),
     # run one bounded continuation/expansion pass (for Expanded/Topic, or Source if evidence permits).
-    if budget and actual_words < int(budget * 0.8) and scope != EvidenceScope.SOURCE_ONLY:
+    evidence_words = len(evidence_text.split())
+    can_expand_section = (
+        scope != EvidenceScope.SOURCE_ONLY
+        or (scope == EvidenceScope.SOURCE_ONLY and evidence_words >= int(budget * 0.6))
+    )
+    if budget and actual_words < int(budget * 0.8) and can_expand_section:
         logger.info(
             f"Section {sec_idx} undershot target budget ({actual_words} words vs {budget} budget). "
             "Executing bounded section expansion pass."
@@ -620,17 +646,158 @@ def audit_and_repair_fidelity(
     evidence_packet: dict[str, Any],
     scope: EvidenceScope,
     db: Any = None,
+    source_text: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
-    Perform actionable semantic fidelity audit and bounded repair.
-    Reuses provider audit capabilities (audit_script_fidelity / audit_research_script) where supported,
-    with supplementary coverage ledger verification.
-    Distinguishes: issue detected, repair attempted, repair succeeded, unresolved issue remains.
+    Perform authoritative semantic fidelity audit and bounded repair.
+    SOURCE mode:
+        complete cleaned source/evidence -> generated script -> provider semantic fidelity audit ->
+        one bounded repair if required -> final semantic re-audit.
+    EXPANDED mode:
+        seed-source fidelity audit AND research/evidence support audit.
+    TOPIC mode:
+        research/evidence support audit.
+
+    Persists audit status as one of:
+        clean, issue_detected, repair_attempted, repair_succeeded, unresolved_issue_remains.
     """
+    primary_source_text = (
+        source_text
+        or (source_ledger.get("clean_text") if source_ledger else None)
+        or "\n\n".join(it.get("snippet", "") for it in evidence_packet.get("items", []))
+    )
+    dossier_data = evidence_packet or {}
+
+    def _build_script_dict(secs: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "episode_title": job.custom_title or "Herald Episode",
+            "episode_description": "Herald Podcast Episode",
+            "source_title": job.custom_title or "Source Material",
+            "segments": [
+                {"order": idx, "heading": s.get("heading", f"Section {idx}"), "narration": s.get("narration", "")}
+                for idx, s in enumerate(secs, 1)
+            ],
+            "warnings": [],
+        }
+
+    def _run_semantic_audit(curr_script: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+        findings: dict[str, Any] = {}
+        issues_detected = False
+        repair_instructions_parts: list[str] = []
+
+        if scope == EvidenceScope.SOURCE_ONLY:
+            try:
+                def _audit_source_fn(p_inst: Any, attempt: int, src: str) -> Any:
+                    return p_inst.audit_script_fidelity(
+                        source_text=src,
+                        script_dict=curr_script,
+                        job_id=job.id,
+                    )
+
+                res = execute_with_failover(
+                    job=job,
+                    operation="verification",
+                    execute_fn=_audit_source_fn,
+                    db=db,
+                    source_text=primary_source_text,
+                    required_capability="verification",
+                )
+                if hasattr(res, "has_material_issues") and res.has_material_issues:
+                    issues_detected = True
+                    if getattr(res, "repair_instructions", None):
+                        repair_instructions_parts.append(res.repair_instructions)
+                findings["source_audit"] = res.model_dump() if hasattr(res, "model_dump") else str(res)
+            except Exception as e:
+                logger.warning(f"Semantic source fidelity audit skipped/failed non-fatally: {e}")
+
+        elif scope == EvidenceScope.SOURCE_PLUS_RESEARCH:
+            # Expanded mode: Perform BOTH seed-source audit AND research/evidence support audit
+            if primary_source_text:
+                try:
+                    def _audit_source_fn(p_inst: Any, attempt: int, src: str) -> Any:
+                        return p_inst.audit_script_fidelity(
+                            source_text=src,
+                            script_dict=curr_script,
+                            job_id=job.id,
+                        )
+
+                    res_s = execute_with_failover(
+                        job=job,
+                        operation="verification",
+                        execute_fn=_audit_source_fn,
+                        db=db,
+                        source_text=primary_source_text,
+                        required_capability="verification",
+                    )
+                    if hasattr(res_s, "has_material_issues") and res_s.has_material_issues:
+                        issues_detected = True
+                        if getattr(res_s, "repair_instructions", None):
+                            repair_instructions_parts.append(f"Source fidelity: {res_s.repair_instructions}")
+                    findings["source_audit"] = res_s.model_dump() if hasattr(res_s, "model_dump") else str(res_s)
+                except Exception as e:
+                    logger.warning(f"Semantic source fidelity audit in expanded mode skipped/failed: {e}")
+
+            try:
+                def _audit_res_fn(p_inst: Any, attempt: int, src: str) -> Any:
+                    return p_inst.audit_research_script(
+                        source_text=src,
+                        research_dossier=dossier_data,
+                        script_dict=curr_script,
+                        job_id=job.id,
+                    )
+
+                res_r = execute_with_failover(
+                    job=job,
+                    operation="research_audit",
+                    execute_fn=_audit_res_fn,
+                    db=db,
+                    source_text=primary_source_text or "Topic research",
+                    required_capability="verification",
+                )
+                if hasattr(res_r, "has_material_issues") and res_r.has_material_issues:
+                    issues_detected = True
+                    if getattr(res_r, "repair_instructions", None):
+                        repair_instructions_parts.append(f"Research fidelity: {res_r.repair_instructions}")
+                findings["research_audit"] = res_r.model_dump() if hasattr(res_r, "model_dump") else str(res_r)
+            except Exception as e:
+                logger.warning(f"Semantic research support audit in expanded mode skipped/failed: {e}")
+
+        elif scope == EvidenceScope.RESEARCH:
+            # Topic mode: Perform research/evidence support audit
+            try:
+                def _audit_topic_fn(p_inst: Any, attempt: int, src: str) -> Any:
+                    return p_inst.audit_research_script(
+                        source_text=src,
+                        research_dossier=dossier_data,
+                        script_dict=curr_script,
+                        job_id=job.id,
+                    )
+
+                res_t = execute_with_failover(
+                    job=job,
+                    operation="research_audit",
+                    execute_fn=_audit_topic_fn,
+                    db=db,
+                    source_text=primary_source_text or "Topic research",
+                    required_capability="verification",
+                )
+                if hasattr(res_t, "has_material_issues") and res_t.has_material_issues:
+                    issues_detected = True
+                    if getattr(res_t, "repair_instructions", None):
+                        repair_instructions_parts.append(res_t.repair_instructions)
+                findings["research_audit"] = res_t.model_dump() if hasattr(res_t, "model_dump") else str(res_t)
+            except Exception as e:
+                logger.warning(f"Semantic topic research audit skipped/failed non-fatally: {e}")
+
+        return issues_detected, " ".join(repair_instructions_parts), findings
+
+    # 1. Initial Authoritative Semantic Audit
+    current_script_dict = _build_script_dict(sections)
+    has_material_issues, repair_instructions, audit_findings = _run_semantic_audit(current_script_dict)
+
+    # 2. Supplementary Coverage Ledger Check (Inexpensive signal)
     combined_narration = "\n\n".join(s.get("narration", "") for s in sections)
     lower_narration = combined_narration.lower()
-
-    # Supplementary coverage ledger check
     omitted_numbers = []
     omitted_entities = []
     if source_ledger:
@@ -641,91 +808,134 @@ def audit_and_repair_fidelity(
             if ent.lower() not in lower_narration:
                 omitted_entities.append(ent)
 
-    has_material_issues = len(omitted_numbers) > 3 or len(omitted_entities) > 3
+    # If semantic audit didn't flag an issue but coverage ledger found severe omissions, note it
+    ledger_issue = len(omitted_numbers) > 4 or len(omitted_entities) > 4
+    if ledger_issue and not has_material_issues and not audit_findings:
+        has_material_issues = True
+        repair_instructions = (
+            f"Restore missing key factual figures and entities from the source: "
+            f"{', '.join(omitted_numbers[:4] + omitted_entities[:4])}."
+        )
+
     repair_attempted = False
     repair_succeeded = False
     unresolved_issue = False
 
-    audit_status = "clean"
-    if has_material_issues:
-        audit_status = "issue_detected"
-
-    script_dict = {
-        "episode_title": job.custom_title or "Herald Episode",
-        "segments": [{"order": idx, "heading": s.get("heading", ""), "narration": s.get("narration", "")} for idx, s in enumerate(sections, 1)],
-    }
-
-    # Bounded semantic repair pass (max 1 repair attempt)
+    # 3. Bounded Semantic Repair Pass (max 1 repair attempt)
     if has_material_issues and (job.verify_repair_count or 0) == 0:
-        logger.info(f"Fidelity audit detected omissions for job {job.id}. Triggering bounded repair.")
+        logger.info(f"Fidelity audit detected material issues for job {job.id}. Executing bounded repair with actual source/evidence.")
         repair_attempted = True
         record_job_diagnostic_event(
             job.id,
             "INFO",
             "fidelity",
             "FIDELITY_REPAIR_BEGIN",
-            "Executing bounded semantic repair to restore omitted source claims and context.",
+            "Executing bounded semantic repair using primary source/evidence and audit instructions.",
             db=db,
         )
 
-        missing_summary = ", ".join(omitted_numbers[:4] + omitted_entities[:4])
-        # Find the most relevant section to incorporate missing information
-        target_idx = min(len(sections) - 1, 1) if len(sections) > 1 else 0
-        target_sec = sections[target_idx]
-
-        repair_instructions = (
-            f"Incorporate the following material factual details and figures into the narrative naturally without "
-            f"distorting facts or creating repetitive summaries: {missing_summary}."
-        )
+        audit_payload = {
+            "has_material_issues": True,
+            "repair_instructions": repair_instructions or "Restore omitted material facts and correct factual inaccuracies.",
+            "omitted_numbers": omitted_numbers[:8],
+            "omitted_entities": omitted_entities[:8],
+        }
 
         try:
-            def _do_repair(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
-                return p_inst.generate_script(
-                    source_text=target_sec["narration"],
-                    request_mode="standard",
-                    source_title=job.custom_title,
-                    job_id=job.id,
-                    generation_instructions=repair_instructions,
+            if scope == EvidenceScope.SOURCE_ONLY:
+                def _do_repair_src(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
+                    return p_inst.repair_script_fidelity(
+                        source_text=src,
+                        script_dict=current_script_dict,
+                        audit_result=audit_payload,
+                        job_id=job.id,
+                    )
+
+                repaired_res: PodcastScriptResponse = execute_with_failover(
+                    job=job,
+                    operation="verification_repair",
+                    execute_fn=_do_repair_src,
+                    db=db,
+                    source_text=primary_source_text,
+                    required_capability="verification",
+                )
+            else:
+                def _do_repair_res(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
+                    return p_inst.repair_research_script(
+                        source_text=src,
+                        research_dossier=dossier_data,
+                        script_dict=current_script_dict,
+                        audit_result=audit_payload,
+                        job_id=job.id,
+                    )
+
+                repaired_res: PodcastScriptResponse = execute_with_failover(
+                    job=job,
+                    operation="research_repair",
+                    execute_fn=_do_repair_res,
+                    db=db,
+                    source_text=primary_source_text or "Topic research",
+                    required_capability="verification",
                 )
 
-            repaired_res: PodcastScriptResponse = execute_with_failover(
-                job=job,
-                operation="fidelity_repair",
-                execute_fn=_do_repair,
-                db=db,
-                source_text=target_sec["narration"],
-            )
-            repaired_text = "\n\n".join(seg.narration for seg in repaired_res.segments)
-            if len(repaired_text.split()) >= int(target_sec["word_count"] * 0.75):
-                target_sec["narration"] = repaired_text
-                target_sec["word_count"] = len(repaired_text.split())
-                job.verify_repair_count = 1
+            if repaired_res and repaired_res.segments:
+                for idx, seg in enumerate(repaired_res.segments):
+                    if idx < len(sections):
+                        sections[idx]["narration"] = seg.narration
+                        sections[idx]["word_count"] = len(seg.narration.split())
+                    else:
+                        sections.append({
+                            "section_index": idx + 1,
+                            "heading": seg.heading,
+                            "narration": seg.narration,
+                            "word_count": len(seg.narration.split()),
+                            "target_word_budget": None,
+                            "completed": True,
+                        })
+                job.verify_repair_count = (job.verify_repair_count or 0) + 1
                 repair_succeeded = True
-                audit_status = "repair_succeeded"
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
                     "fidelity",
                     "FIDELITY_REPAIR_SUCCESS",
-                    "Bounded semantic fidelity repair succeeded.",
+                    "Bounded semantic fidelity repair completed.",
                     db=db,
                 )
-            else:
-                unresolved_issue = True
-                audit_status = "unresolved_issue_remains"
         except Exception as rep_err:
-            logger.warning(f"Fidelity repair attempt failed non-fatally: {rep_err}")
+            logger.warning(f"Semantic fidelity repair attempt failed non-fatally: {rep_err}")
             unresolved_issue = True
+
+        # 4. Final Semantic Re-Audit (Bounded: exactly 1 verification pass, no loop)
+        if repair_succeeded:
+            repaired_script_dict = _build_script_dict(sections)
+            re_issues, _, re_findings = _run_semantic_audit(repaired_script_dict)
+            audit_findings["final_re_audit"] = re_findings
+            if not re_issues:
+                audit_status = "repair_succeeded"
+            else:
+                audit_status = "unresolved_issue_remains"
+                unresolved_issue = True
+        else:
             audit_status = "unresolved_issue_remains"
+            unresolved_issue = True
+    elif repair_attempted:
+        audit_status = "repair_attempted"
+    elif has_material_issues:
+        audit_status = "issue_detected"
+    else:
+        audit_status = "clean"
 
     audit_result = {
         "status": audit_status,
         "has_material_issues": has_material_issues,
-        "omitted_numbers": omitted_numbers[:10],
-        "omitted_entities": omitted_entities[:10],
+        "repair_instructions": repair_instructions,
         "repair_attempted": repair_attempted,
         "repair_succeeded": repair_succeeded,
         "unresolved_issue": unresolved_issue,
+        "findings": audit_findings,
+        "omitted_numbers": omitted_numbers[:10],
+        "omitted_entities": omitted_entities[:10],
     }
 
     return sections, audit_result
@@ -864,8 +1074,11 @@ def execute_unified_long_form_pipeline(
             job.research_grounding_json = grounded_data
             job.research_search_count = grounded_data.get("search_count", 0)
             job.research_source_count = grounded_data.get("source_count", 0)
-            if hasattr(job, "research_provider"):
-                job.research_provider = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None)
+            job.research_provider = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None)
+            if job.research_provider == "gemini":
+                job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", None) or getattr(job, "ai_effective_model", None)
+            else:
+                job.research_model = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None)
             db.commit()
 
             evidence_packet = normalize_evidence_packet(
@@ -937,6 +1150,90 @@ def execute_unified_long_form_pipeline(
         job.section_progress_json = completed_sections
         db.commit()
 
+    # Fixed duration enforcement: check for material underfill across all sections
+    requested_budget = get_target_word_budget(target_minutes)
+    planned_target = outline.get("target_total_words") or requested_budget
+    total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
+
+    if planned_target and planned_target > 500 and total_generated_words < int(planned_target * 0.75):
+        if scope != EvidenceScope.SOURCE_ONLY:
+            # Expanded/Topic: execute bounded evidence-backed continuation pass
+            if status_notifier:
+                status_notifier("Performing evidence-backed continuation to meet target duration...")
+            logger.info(
+                f"Long-form underfilled target budget ({total_generated_words} words vs {planned_target} planned). "
+                "Executing bounded evidence-backed continuation strategy."
+            )
+            deficit = planned_target - total_generated_words
+            continuation_sec_def = {
+                "section_index": len(completed_sections) + 1,
+                "heading": "Comprehensive Analysis and Evidence Synthesis",
+                "purpose": "Synthesize grounded research findings, historical/technical parallels, and systemic ramifications.",
+                "word_budget": deficit,
+                "relevant_evidence_ids": [it["evidence_id"] for it in evidence_packet.get("items", [])],
+                "transition_intent": "Deepen the analysis with evidence synthesis",
+            }
+            prev_narr = completed_sections[-1]["narration"] if completed_sections else ""
+            cont_sec = generate_single_section(
+                job=job,
+                section_info=continuation_sec_def,
+                topic=topic,
+                evidence_packet=evidence_packet,
+                previous_summary=prev_narr[:250],
+                scope=scope,
+                db=db,
+            )
+            if cont_sec.get("word_count", 0) > 100:
+                completed_sections.append(cont_sec)
+                job.section_progress_json = completed_sections
+                total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
+                db.commit()
+        else:
+            # Source mode: only expand if source contains sufficient material; otherwise preserve faithful brevity
+            src_words = len((source_ledger.get("clean_text", "") if source_ledger else (source_text or "")).split())
+            if src_words >= int(planned_target * 0.75):
+                if status_notifier:
+                    status_notifier("Deepening source narration to meet target duration...")
+                logger.info(f"Source has {src_words} words; expanding shortest sections to fulfill target budget.")
+                shortest_idx = min(range(len(completed_sections)), key=lambda i: completed_sections[i].get("word_count", 99999))
+                shortest_sec = completed_sections[shortest_idx]
+                expansion_instructions = (
+                    f"Target Word Budget: approximately {shortest_sec.get('target_word_budget', 500)} words. "
+                    "Elaborate thoroughly on the provided source evidence with natural spoken detail, explaining mechanisms. "
+                    "Do not invent facts outside the source."
+                )
+                try:
+                    def _do_src_elab(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
+                        return p_inst.generate_script(
+                            source_text=src,
+                            request_mode="standard",
+                            source_title=topic,
+                            job_id=job.id,
+                            generation_instructions=expansion_instructions,
+                        )
+
+                    elab_res = execute_with_failover(
+                        job=job,
+                        operation="section_generation",
+                        execute_fn=_do_src_elab,
+                        db=db,
+                        source_text=source_text or source_ledger.get("clean_text", ""),
+                    )
+                    elab_narr = "\n\n".join(seg.narration for seg in elab_res.segments)
+                    if len(elab_narr.split()) > shortest_sec.get("word_count", 0):
+                        shortest_sec["narration"] = elab_narr
+                        shortest_sec["word_count"] = len(elab_narr.split())
+                        job.section_progress_json = completed_sections
+                        total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
+                        db.commit()
+                except Exception as elab_err:
+                    logger.warning(f"Source-grounded expansion failed non-fatally: {elab_err}")
+            else:
+                logger.info(
+                    f"Source word count ({src_words}) cannot legitimately support {planned_target} words. "
+                    "Preserving faithful shorter result and recording duration telemetry."
+                )
+
     # 5. Semantic Fidelity Audit & Bounded Repair
     if status_notifier:
         status_notifier("Verifying source coverage and factual fidelity...")
@@ -948,21 +1245,32 @@ def execute_unified_long_form_pipeline(
         evidence_packet=evidence_packet,
         scope=scope,
         db=db,
+        source_text=source_text,
     )
     job.fidelity_audit_json = audit_res
+
+    # Record duration telemetry
+    cfg_state = job.configuration_state_json or {}
+    if not isinstance(cfg_state, dict):
+        cfg_state = {}
+    cfg_state.update({
+        "requested_target_words": requested_budget,
+        "evidence_supported_target_words": planned_target,
+        "actual_words": sum(s.get("word_count", 0) for s in repaired_sections),
+    })
+    job.configuration_state_json = cfg_state
     db.commit()
 
     # 6. Final Coherence Pass & Assembly
     if status_notifier:
         status_notifier("Assembling final podcast script...")
 
-    planned_words = outline.get("target_total_words")
     final_script = assemble_and_smooth_script(
         episode_title=topic,
         episode_description=outline.get("episode_description", f"Episode about {topic}"),
         sections=repaired_sections,
         source_title=source_title,
-        planned_target_words=planned_words,
+        planned_target_words=planned_target,
     )
     job.script_json = final_script.model_dump()
     db.commit()

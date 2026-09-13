@@ -1,7 +1,7 @@
 """Unit tests for Alembic Migration 019 (Long-form telemetry and crash recovery).
 Tests:
-- Upgrade 018 -> 019 adds research_provider and research_model columns to podcast_jobs
-- Clean downgrade to 018 drops the columns
+- Upgrade 018 -> 019 adds research_provider column to podcast_jobs (research_model already existed from Migration 006)
+- Clean downgrade to 018 drops the research_provider column
 - Full upgrade to head succeeds
 """
 

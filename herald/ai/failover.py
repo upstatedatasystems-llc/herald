@@ -166,19 +166,30 @@ def get_job_provider_chain(job: PodcastJob) -> list[dict[str, str]]:
     Falls back cleanly to primary provider/model columns or isolated legacy recovery.
     Never returns ambiguous provider in executable chain.
     """
+    c_mode = getattr(job, "content_mode", None)
+    if c_mode:
+        is_literal = str(c_mode).lower().strip() == "literal"
+    else:
+        is_literal = str(getattr(job, "request_mode", "") or "").lower().strip() == "literal"
+
+    if is_literal:
+        return [{"provider": "literal", "model": "none"}]
+
     raw_chain = getattr(job, "ai_provider_chain_json", None)
     if raw_chain and isinstance(raw_chain, list) and len(raw_chain) > 0:
         candidates = [
             {"provider": str(c.get("provider", "")).lower().strip(), "model": str(c.get("model", "")).strip()}
             for c in raw_chain
-            if isinstance(c, dict) and c.get("provider") and str(c.get("provider", "")).lower().strip() != "ambiguous"
+            if isinstance(c, dict)
+            and c.get("provider")
+            and str(c.get("provider", "")).lower().strip() not in ("ambiguous", "literal")
         ]
         if candidates:
             return candidates
 
     # Fallback from primary columns for legacy jobs
     prov = getattr(job, "ai_provider", None)
-    if prov and str(prov).lower().strip() != "ambiguous":
+    if prov and str(prov).lower().strip() not in ("ambiguous", "literal"):
         p_clean = str(prov).lower().strip()
         mod = getattr(job, "ai_model", None) or ""
         return [{"provider": p_clean, "model": mod}]
@@ -187,7 +198,7 @@ def get_job_provider_chain(job: PodcastJob) -> list[dict[str, str]]:
     from herald.ai.legacy_compat import resolve_legacy_job_identity
 
     leg_prov, leg_model = resolve_legacy_job_identity(job)
-    if leg_prov and leg_model:
+    if leg_prov and leg_model and str(leg_prov).lower().strip() != "literal":
         return [{"provider": leg_prov, "model": leg_model}]
 
     # Server default chain recovery for ambiguous / missing chains
@@ -218,10 +229,8 @@ def _call_execute_fn(fn: Callable[..., Any], provider: Any, attempt: int, source
 
     try:
         return fn(provider, attempt, source_text)
-    except TypeError as e:
-        if "positional argument" in str(e):
-            return fn(provider, attempt)
-        raise
+    except TypeError:
+        return fn(provider, attempt)
 
 
 def execute_with_failover(
@@ -253,8 +262,14 @@ def execute_with_failover(
     if source_text is None:
         source_text = getattr(job, "source_text", None)
 
-    # Literal mode short-circuit
-    if chain[0]["provider"] == "literal" or (getattr(job, "request_mode", "") == "literal"):
+    # Literal mode short-circuit: canonical content_mode takes strict precedence over legacy request_mode
+    c_mode = getattr(job, "content_mode", None)
+    if c_mode:
+        literal = str(c_mode).lower().strip() == "literal"
+    else:
+        literal = str(getattr(job, "request_mode", "") or "").lower().strip() == "literal"
+
+    if literal:
         prov = create_provider("literal")
         return _call_execute_fn(execute_fn, prov, 1, source_text)
 

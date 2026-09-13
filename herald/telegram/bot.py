@@ -1672,7 +1672,10 @@ def handle_telegram_callback_query(
         if action == "m":
             job.content_mode = val
             job.resolved_default = False
-            if val in ("source", "literal"):
+            if val == "literal":
+                job.target_minutes = "auto"
+                job.research_depth = None
+            elif val == "source":
                 job.research_depth = None
             elif not job.research_depth:
                 job.research_depth = prefs.get("default_research_depth", "medium")
@@ -1692,6 +1695,13 @@ def handle_telegram_callback_query(
             return
 
         elif action == "len":
+            if (job.content_mode or "").lower() == "literal":
+                client.answer_callback_query(
+                    cb_id,
+                    text="Target length is not applicable in Literal mode (reads full source verbatim).",
+                    show_alert=True,
+                )
+                return
             job.target_minutes = val
             job.resolved_default = False
             db.commit()

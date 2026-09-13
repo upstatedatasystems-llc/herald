@@ -1,6 +1,6 @@
 """Migration 019: Long-form telemetry and crash recovery enhancements.
 
-Adds research_provider and research_model columns to podcast_jobs table.
+Adds research_provider column to podcast_jobs table (research_model was previously created in Migration 006).
 
 Revision ID: 019_longform_fixes_recovery
 Revises: 018_interactive_params_longform

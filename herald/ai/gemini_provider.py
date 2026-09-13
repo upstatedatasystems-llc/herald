@@ -91,6 +91,8 @@ class GeminiProvider(AIProvider):
             script_standard=True,
             structured_output=True,
             research_grounding=True,
+            url_context_extraction=True,
+            verification=True,
             usage_metrics=True,
         )
 
@@ -121,6 +123,7 @@ class GeminiProvider(AIProvider):
         source_text: str,
         research_depth: str = "medium",
         job_id: str | None = None,
+        research_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from herald.gemini.client import generate_grounded_research as _ggr
         return _ggr(
@@ -128,6 +131,7 @@ class GeminiProvider(AIProvider):
             research_depth=research_depth,
             model_name=self.research_model,
             job_id=job_id,
+            research_plan=research_plan,
         )
 
     def normalize_research_dossier(

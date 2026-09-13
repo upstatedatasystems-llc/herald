@@ -1286,15 +1286,19 @@ def format_podcast_config_card(
     }
     mode_desc = mode_descriptions.get(mode, "Podcast narration")
 
-    len_display_map = {
-        "auto": "Auto (~proportional)",
-        "10": "10 min (~1,300 words)",
-        "20": "20 min (~2,600 words)",
-        "30": "30 min (~3,900 words)",
-        "45": "45 min (~5,850 words)",
-        "60": "60 min (~7,800 words)",
-    }
-    len_display = len_display_map.get(target_len, f"{target_len} min")
+    if mode == "literal":
+        target_len = "auto"
+        len_display = "<i>N/A (Reads full source verbatim)</i>"
+    else:
+        len_display_map = {
+            "auto": "Auto (~proportional)",
+            "10": "10 min (~1,300 words)",
+            "20": "20 min (~2,600 words)",
+            "30": "30 min (~3,900 words)",
+            "45": "45 min (~5,850 words)",
+            "60": "60 min (~7,800 words)",
+        }
+        len_display = len_display_map.get(target_len, f"{target_len} min")
 
     research_applicable = mode in ("expanded", "topic")
     if research_applicable:
@@ -1327,18 +1331,21 @@ def format_podcast_config_card(
     keyboard.append(mode_row_1)
     keyboard.append(mode_row_2)
 
-    # 2. Length Rows (3 per row: Auto, 10m, 20m / 30m, 45m, 60m)
-    len_row_1 = []
-    for l_id, l_label in [("auto", "Auto"), ("10", "10m"), ("20", "20m")]:
-        mark = "✅ " if target_len == l_id else ""
-        len_row_1.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
-    keyboard.append(len_row_1)
+    # 2. Length Rows
+    if mode == "literal":
+        keyboard.append([{"text": "🔒 Length: N/A for Literal (Full Source)", "callback_data": f"h4:c:{job.id}:noop:len"}])
+    else:
+        len_row_1 = []
+        for l_id, l_label in [("auto", "Auto"), ("10", "10m"), ("20", "20m")]:
+            mark = "✅ " if target_len == l_id else ""
+            len_row_1.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
+        keyboard.append(len_row_1)
 
-    len_row_2 = []
-    for l_id, l_label in [("30", "30m"), ("45", "45m"), ("60", "60m")]:
-        mark = "✅ " if target_len == l_id else ""
-        len_row_2.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
-    keyboard.append(len_row_2)
+        len_row_2 = []
+        for l_id, l_label in [("30", "30m"), ("45", "45m"), ("60", "60m")]:
+            mark = "✅ " if target_len == l_id else ""
+            len_row_2.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
+        keyboard.append(len_row_2)
 
     # 3. Research Depth Row
     if research_applicable:
