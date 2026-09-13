@@ -310,11 +310,55 @@ def get_effective_user_preferences(db: Session, user_id: int | str) -> dict[str,
 
     primary_disp = (chain_json[0].capitalize() if chain_json else None) or getattr(settings, "AI_PROVIDER", None) or "None (Literal only)"
 
+    content_val = None
+    target_val = None
+    depth_val = None
+    if user:
+        try:
+            content_val = user.default_content_mode
+        except Exception:
+            content_val = None
+        try:
+            target_val = user.default_target_minutes
+        except Exception:
+            target_val = None
+        try:
+            depth_val = user.default_research_depth
+        except Exception:
+            depth_val = None
+
+    content_mode = (
+        (content_val.strip().lower())
+        if content_val
+        else getattr(settings, "DEFAULT_CONTENT_MODE", "source")
+    )
+    if content_mode not in ("source", "expanded", "topic", "literal"):
+        content_mode = "source"
+
+    target_minutes = (
+        (str(target_val).strip().lower())
+        if target_val
+        else getattr(settings, "DEFAULT_TARGET_MINUTES", "auto")
+    )
+    if target_minutes not in ("auto", "10", "20", "30", "45", "60"):
+        target_minutes = "auto"
+
+    research_depth = (
+        (depth_val.strip().lower())
+        if depth_val
+        else getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium")
+    )
+    if research_depth not in ("low", "medium", "high", "none"):
+        research_depth = "medium"
+
     return {
         "confirm_before_tts": confirm,
         "default_voice": voice,
         "default_speed": speed,
         "default_mode": mode,
+        "default_content_mode": content_mode,
+        "default_target_minutes": target_minutes,
+        "default_research_depth": research_depth,
         "ai_provider": primary_disp,
         "ai_provider_chain_json": chain_json,
         "ai_models_by_provider_json": models_json,
@@ -480,6 +524,84 @@ def set_user_default_mode(
     user.updated_at = datetime.now(UTC)
     db.commit()
     logger.info(f"User default mode updated: {user.default_mode}")
+    return True
+
+
+def set_user_default_content_mode(
+    db: Session,
+    user_id: int | str,
+    mode: str | None,
+    chat_id: int | str | None = None,
+) -> bool:
+    """Set default_content_mode preference ('source', 'expanded', 'topic', 'literal')."""
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    if mode is not None:
+        m_clean = mode.lower().strip()
+        if m_clean not in ("source", "expanded", "topic", "literal"):
+            raise ValueError(f"Invalid content mode '{mode}'")
+        user.default_content_mode = m_clean
+    else:
+        user.default_content_mode = "source"
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    logger.info(f"User default content mode updated: {user.default_content_mode}")
+    return True
+
+
+def set_user_default_target_minutes(
+    db: Session,
+    user_id: int | str,
+    minutes: str | int | None,
+    chat_id: int | str | None = None,
+) -> bool:
+    """Set default_target_minutes preference ('auto', '10', '20', '30', '45', '60')."""
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    if minutes is not None:
+        mins_clean = str(minutes).lower().strip()
+        if mins_clean not in ("auto", "10", "20", "30", "45", "60"):
+            raise ValueError(f"Invalid target minutes '{minutes}'")
+        user.default_target_minutes = mins_clean
+    else:
+        user.default_target_minutes = "auto"
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    logger.info(f"User default target minutes updated: {user.default_target_minutes}")
+    return True
+
+
+def set_user_default_research_depth(
+    db: Session,
+    user_id: int | str,
+    depth: str | None,
+    chat_id: int | str | None = None,
+) -> bool:
+    """Set default_research_depth preference ('low', 'medium', 'high')."""
+    cid = chat_id if chat_id is not None else user_id
+    user = ensure_telegram_user(db, user_id, cid)
+    if not user:
+        return False
+
+    if depth is not None:
+        d_clean = depth.lower().strip()
+        if d_clean not in ("low", "medium", "high", "none"):
+            raise ValueError(f"Invalid research depth '{depth}'")
+        user.default_research_depth = d_clean
+    else:
+        user.default_research_depth = "medium"
+
+    user.updated_at = datetime.now(UTC)
+    db.commit()
+    logger.info(f"User default research depth updated: {user.default_research_depth}")
     return True
 
 

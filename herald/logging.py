@@ -149,6 +149,9 @@ def setup_service_logging(
         elif h_id is not None and h_id.startswith("herald_file_"):
             # Handler for another service in tests
             handlers_to_keep.append(h)
+        elif h.__class__.__name__ == "LogCaptureHandler":
+            # Preserve pytest caplog handler
+            handlers_to_keep.append(h)
         else:
             # Remove untagged handler (e.g. from basicConfig)
             root.removeHandler(h)

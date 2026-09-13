@@ -7,7 +7,6 @@ from typing import Any
 
 from herald.ai.base import AIProvider, ProviderCapabilities
 from herald.ai.schema import PodcastScriptResponse
-from herald.literal.script_generator import generate_literal_script
 
 
 class LiteralProvider(AIProvider):
@@ -49,6 +48,8 @@ class LiteralProvider(AIProvider):
         source_title: str | None = None,
         job_id: str | None = None,
     ) -> PodcastScriptResponse:
+        from herald.literal.script_generator import generate_literal_script
+
         # Literal mode makes ZERO external AI interactions
         return generate_literal_script(
             source_text=source_text,

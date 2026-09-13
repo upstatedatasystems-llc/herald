@@ -42,8 +42,11 @@ from herald.telegram.auth import (
     set_user_ai_model_for_provider,
     set_user_ai_provider_chain,
     set_user_confirm_before_tts,
+    set_user_default_content_mode,
     set_user_default_mode,
+    set_user_default_research_depth,
     set_user_default_speed,
+    set_user_default_target_minutes,
     set_user_default_voice,
     verify_and_claim_pairing_code,
 )
@@ -57,15 +60,19 @@ from herald.telegram.formatters import (
     format_ai_models_menu,
     format_ai_providers_menu,
     format_approval,
+    format_content_mode_menu,
     format_generation_failure_card,
     format_help,
+    format_length_menu,
     format_mode_menu,
     format_models_catalog,
+    format_podcast_config_card,
     format_provider_models_select,
     format_provider_slot_select,
     format_queued,
     format_quickstart,
     format_rerun_confirmation,
+    format_research_depth_menu,
     format_settings,
     format_speed_menu,
     format_voices_browser,
@@ -798,6 +805,9 @@ def handle_telegram_content_message(
         tts_chunk_chars=parsed["chunk_chars"],
         verify_final_script=parsed["verify"],
         hold_for_approval=confirm_tts,
+        interactive_config=bool(getattr(settings, "ENABLE_INTERACTIVE_CONFIG", True)),
+        content_mode=parsed.get("explicit_mode"),
+        target_minutes=user_prefs.get("default_target_minutes", "auto"),
     )
 
     try:
@@ -1017,6 +1027,24 @@ def handle_telegram_content_message(
         if response.rerun_of_job_id
         else None
     )
+
+    # Case E: Interactive podcast configuration card presentation
+    if response.status == JobState.AWAITING_CONFIGURATION.value and job:
+        config_text, reply_markup = format_podcast_config_card(job, user_prefs)
+        try:
+            sent_msg = client.send_message(
+                chat_id=chat_id,
+                text=config_text,
+                reply_markup=reply_markup,
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            if sent_msg and isinstance(sent_msg, dict) and sent_msg.get("message_id"):
+                job.telegram_config_message_id = sent_msg["message_id"]
+                db.commit()
+        except Exception as e:
+            logger.error(f"Failed to deliver Telegram configuration card for job '{job.id}': {e}")
+        return
 
     # Case D: Duplicate content match with confirmation OFF -> prompt for rerun confirmation before scripting
     if response.status == JobState.AWAITING_RERUN_CONFIRMATION.value and job and prior_job:
@@ -1497,6 +1525,372 @@ def handle_telegram_callback_query(
         client.answer_callback_query(cb_id, text="Testing AI connections...")
         perform_ai_check(db=db, client=client, chat_id=chat_id, user_id=user_id)
         return
+
+    elif raw_data == "h4:s:mode":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_content_mode_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show content mode menu: {e}")
+        return
+
+    elif raw_data.startswith("h4:s:set_mode:"):
+        mode_val = raw_data.split(":")[-1]
+        set_user_default_content_mode(db, user_id=user_id, mode=mode_val, chat_id=chat_id)
+        client.answer_callback_query(cb_id, text=f"Default content mode set to {mode_val.capitalize()}.")
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_content_mode_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update content mode menu: {e}")
+        return
+
+    elif raw_data == "h4:s:length":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_length_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show length menu: {e}")
+        return
+
+    elif raw_data.startswith("h4:s:set_len:"):
+        len_val = raw_data.split(":")[-1]
+        set_user_default_target_minutes(db, user_id=user_id, minutes=len_val, chat_id=chat_id)
+        client.answer_callback_query(
+            cb_id,
+            text=f"Default length set to {len_val} min." if len_val != "auto" else "Default length set to Auto.",
+        )
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_length_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update length menu: {e}")
+        return
+
+    elif raw_data == "h4:s:research":
+        client.answer_callback_query(cb_id)
+        prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_research_depth_menu(prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to show research depth menu: {e}")
+        return
+
+    elif raw_data.startswith("h4:s:set_rd:"):
+        rd_val = raw_data.split(":")[-1]
+        set_user_default_research_depth(db, user_id=user_id, depth=rd_val, chat_id=chat_id)
+        client.answer_callback_query(cb_id, text=f"Default research depth set to {rd_val.capitalize()}.")
+        new_prefs = get_effective_user_preferences(db, user_id)
+        text, reply_markup = format_research_depth_menu(new_prefs)
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to update research depth menu: {e}")
+        return
+
+    elif raw_data.startswith("h4:c:"):
+        parts = raw_data.split(":")
+        if len(parts) < 4:
+            client.answer_callback_query(cb_id, text="Invalid callback data.")
+            return
+
+        job_id = parts[2]
+        action = parts[3]
+        val = parts[4] if len(parts) > 4 else ""
+
+        job = db.query(PodcastJob).filter(PodcastJob.id == job_id).first()
+        if not job or job.telegram_user_id != user_id or job.telegram_chat_id != chat_id:
+            client.answer_callback_query(cb_id, text="Unauthorized: Access denied.", show_alert=True)
+            return
+
+        if job.status != JobState.AWAITING_CONFIGURATION.value:
+            if job.status in (
+                JobState.SCRIPTING.value,
+                JobState.SCRIPT_READY.value,
+                JobState.QUEUED_TTS.value,
+                JobState.SYNTHESIZING.value,
+                JobState.COMPLETE.value,
+            ):
+                client.answer_callback_query(cb_id, text="Podcast generation has already started.")
+            elif job.status == JobState.CANCELLED.value:
+                client.answer_callback_query(cb_id, text="Job was cancelled.")
+            else:
+                client.answer_callback_query(cb_id, text=f"Job is in state {job.status}.")
+            return
+
+        prefs = get_effective_user_preferences(db, user_id)
+
+        if action == "m":
+            job.content_mode = val
+            if val in ("source", "literal"):
+                job.research_depth = None
+            elif not job.research_depth:
+                job.research_depth = prefs.get("default_research_depth", "medium")
+            db.commit()
+            client.answer_callback_query(cb_id, text=f"Mode set to {val.capitalize()}.")
+            text, reply_markup = format_podcast_config_card(job, prefs)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "len":
+            job.target_minutes = val
+            db.commit()
+            client.answer_callback_query(
+                cb_id,
+                text=f"Target length set to {val} min." if val != "auto" else "Target length set to Auto.",
+            )
+            text, reply_markup = format_podcast_config_card(job, prefs)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "rd":
+            if (job.content_mode or "").lower() not in ("expanded", "topic"):
+                client.answer_callback_query(
+                    cb_id,
+                    text="Research depth only applies to Expanded and Topic modes.",
+                    show_alert=True,
+                )
+                return
+            job.research_depth = val
+            db.commit()
+            client.answer_callback_query(cb_id, text=f"Research depth set to {val.capitalize()}.")
+            text, reply_markup = format_podcast_config_card(job, prefs)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "noop":
+            client.answer_callback_query(
+                cb_id, text="Research depth is not used in Source or Literal mode."
+            )
+            return
+
+        elif action == "btn" and val == "def":
+            def_cm = prefs.get(
+                "default_content_mode", getattr(settings, "DEFAULT_CONTENT_MODE", "source")
+            )
+            job.content_mode = def_cm
+            job.target_minutes = prefs.get(
+                "default_target_minutes", getattr(settings, "DEFAULT_TARGET_MINUTES", "auto")
+            )
+            if def_cm in ("expanded", "topic"):
+                job.research_depth = prefs.get(
+                    "default_research_depth", getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium")
+                )
+            else:
+                job.research_depth = None
+            job.resolved_default = True
+            db.commit()
+            client.answer_callback_query(cb_id, text="Applied saved preferences.")
+            text, reply_markup = format_podcast_config_card(job, prefs)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "btn" and val == "lit":
+            job.content_mode = "literal"
+            job.research_depth = None
+            db.commit()
+            client.answer_callback_query(cb_id, text="Mode set to Literal Reader.")
+            text, reply_markup = format_podcast_config_card(job, prefs)
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "btn" and val == "cancel":
+            from herald.db.state_machine import transition_job_state
+
+            transition_job_state(
+                db,
+                job,
+                JobState.CANCELLED.value,
+                component="telegram-config",
+                message="Cancelled by user from configuration card",
+            )
+            db.commit()
+            client.answer_callback_query(cb_id, text="Podcast generation cancelled.")
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"🚫 <b>Podcast Cancelled</b>\n\nJob <code>{html.escape(job.id[:8])}</code> was cancelled.",
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "btn" and val == "start":
+            client.answer_callback_query(cb_id, text="Starting podcast generation...")
+            try:
+                client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text="🎙️ <b>Generating Podcast...</b>\n\nCreating script according to your configuration.",
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
+            from herald.core.pipeline import execute_script_generation
+
+            confirm_tts = bool(prefs.get("confirm_before_tts", False))
+
+            with TelegramTypingNotifier(client=client, chat_id=chat_id):
+                gen_resp = execute_script_generation(
+                    db=db,
+                    job=job,
+                    hold_for_approval=confirm_tts,
+                    is_duplicate=bool(job.rerun_of_job_id),
+                    rerun_of_job_id=job.rerun_of_job_id,
+                )
+            db.refresh(job)
+
+            if gen_resp.status == JobState.AWAITING_APPROVAL.value:
+                eta_info = calculate_job_eta(db, job)
+                app_text, reply_markup = format_approval(job, job.script_json, eta_info)
+                try:
+                    client.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=app_text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                    job.telegram_approval_message_id = msg_id
+                    job.approval_requested_at = datetime.now(UTC)
+                    db.commit()
+                except Exception as e:
+                    logger.debug(f"Failed to edit message to approval card: {e}")
+                return
+
+            elif gen_resp.status == JobState.QUEUED_TTS.value:
+                eta_info = calculate_job_eta(db, job)
+                queued_text = format_queued(job, job.script_json, eta_info)
+                try:
+                    client.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=queued_text,
+                        parse_mode="HTML",
+                        reply_markup=None,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to edit message to queued card: {e}")
+                return
+
+            else:
+                fail_card = format_generation_failure_card(
+                    job=job,
+                    job_id=job.id,
+                    status=gen_resp.status or JobState.FAILED_FINAL.value,
+                    error_message=gen_resp.message or job.error_message,
+                    db=db,
+                )
+                try:
+                    client.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=fail_card,
+                        parse_mode="HTML",
+                        reply_markup=None,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to edit message to failure card: {e}")
+                return
 
     elif raw_data.startswith("h2:rerun_approve:"):
         job_id = raw_data[len("h2:rerun_approve:") :]

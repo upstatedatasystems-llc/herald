@@ -851,6 +851,64 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     )
             raise e
 
+    # Case E: Interactive Configuration Mode
+    if req.interactive_config:
+        c_mode = req.content_mode
+        if not c_mode:
+            if source_type == SourceType.URL.value:
+                c_mode = "source"
+            elif deduped_text and len(deduped_text) > 300:
+                c_mode = "source"
+            else:
+                c_mode = "topic"
+
+        target_mins = str(req.target_minutes or "auto").lower().strip()
+        rd_depth = (req.research_depth or "medium").lower().strip()
+
+        job.content_mode = c_mode
+        job.target_minutes = target_mins
+        if job.request_mode in (
+            RequestMode.LITERAL.value,
+            RequestMode.BRIEF.value,
+            RequestMode.STANDARD.value,
+        ):
+            job.research_depth = None
+        elif c_mode in ("expanded", "topic") or job.request_mode == RequestMode.RESEARCH.value:
+            job.research_depth = rd_depth
+        else:
+            job.research_depth = None
+
+        transition_job_state(db, job, JobState.VALIDATING.value, component="herald-core")
+        transition_job_state(db, job, JobState.SOURCE_READY.value, component="herald-core")
+        transition_job_state(
+            db, job, JobState.AWAITING_CONFIGURATION.value, component="herald-core"
+        )
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "intake",
+            "AWAITING_CONFIGURATION",
+            f"Job awaiting user podcast configuration in Telegram (mode={c_mode}, target_minutes={target_mins}, research_depth={rd_depth})",
+            metadata={
+                "content_mode": c_mode,
+                "target_minutes": target_mins,
+                "research_depth": rd_depth,
+            },
+            db=db,
+        )
+        db.commit()
+        ep_title = _resolve_response_title(job, custom_title=job.custom_title)
+        return HeraldResponse(
+            job_id=job.id,
+            status=job.status,
+            request_mode=job.request_mode,
+            source_type=job.source_type,
+            is_duplicate=(prior_job is not None),
+            rerun_of_job_id=prior_job.id if prior_job else None,
+            message="Awaiting user podcast configuration.",
+            episode_title=ep_title,
+        )
+
     # Case D: Duplicate content + hold_for_approval == False
     # Prompt the user for rerun confirmation BEFORE running any scripting / AI calls.
     if prior_job is not None and not req.hold_for_approval:
@@ -939,10 +997,12 @@ def execute_script_generation(
 
     active_ai_provider: str | None = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None) or "gemini"
     active_ai_model: str | None = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None) or ""
-    active_operation: str | None = None
+    c_mode = (getattr(job, "content_mode", None) or "").lower().strip()
+    target_mins = str(getattr(job, "target_minutes", "auto") or "auto").lower().strip()
+    is_fixed_dur = target_mins not in ("auto", "none", "", "0")
 
     try:
-        if mode_val == RequestMode.LITERAL.value:
+        if c_mode == "literal" or mode_val == RequestMode.LITERAL.value:
             active_operation = "literal_script"
             logger.info(f"Generating Literal script for job '{job.id}' (zero AI requests)")
             t_script0 = datetime.now(UTC)
@@ -956,6 +1016,82 @@ def execute_script_generation(
             record_stage_metric(
                 job_id=job.id,
                 stage="LITERAL_SCRIPT",
+                started_at=t_script0,
+                finished_at=datetime.now(UTC),
+                status="success",
+                input_chars=len(job.source_text or ""),
+            )
+        elif c_mode in ("expanded", "topic") or (c_mode == "source" and is_fixed_dur):
+            # Unified Staged Long-Form Pipeline across Expanded, Topic, and Source with Fixed Duration
+            from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+
+            if c_mode == "source":
+                scope = EvidenceScope.SOURCE_ONLY
+                topic_label = job.custom_title or "Source Content"
+                eff_depth = "none"
+            elif c_mode == "expanded":
+                scope = EvidenceScope.SOURCE_PLUS_RESEARCH
+                topic_label = job.custom_title or "Source Exploration"
+                eff_depth = getattr(job, "research_depth", "medium") or "medium"
+            else:  # topic
+                scope = EvidenceScope.RESEARCH
+                topic_label = job.custom_title or (
+                    job.source_text.strip()[:80] if job.source_text else "Topic Exploration"
+                )
+                eff_depth = getattr(job, "research_depth", "medium") or "medium"
+
+            active_operation = f"long_form_{c_mode}"
+            t_script0 = datetime.now(UTC)
+            logger.info(
+                f"Executing unified long-form pipeline for job '{job.id}' "
+                f"(mode={c_mode}, scope={scope.value}, target_minutes={target_mins}, depth={eff_depth})"
+            )
+
+            script_resp = execute_unified_long_form_pipeline(
+                db=db,
+                job=job,
+                topic=topic_label,
+                scope=scope,
+                target_minutes=target_mins,
+                research_depth=eff_depth,
+                source_text=job.source_text,
+                source_title=job.custom_title,
+            )
+            job.script_json = script_resp.model_dump()
+            db.commit()
+            record_stage_metric(
+                job_id=job.id,
+                stage="LONG_FORM_SCRIPT",
+                started_at=t_script0,
+                finished_at=datetime.now(UTC),
+                status="success",
+                input_chars=len(job.source_text or ""),
+            )
+        elif c_mode == "source" and not is_fixed_dur:
+            # Source + Auto duration -> Standard script path
+            active_operation = "standard_script"
+            t_script0 = datetime.now(UTC)
+
+            def _do_std_script(p, att, src):
+                return p.generate_script(
+                    source_text=src,
+                    request_mode="standard",
+                    source_title=job.custom_title,
+                    job_id=job.id,
+                )
+
+            script = execute_with_failover(
+                job=job,
+                operation="standard_script",
+                execute_fn=_do_std_script,
+                db=db,
+                source_text=job.source_text,
+            )
+            job.script_json = script.model_dump()
+            db.commit()
+            record_stage_metric(
+                job_id=job.id,
+                stage="STANDARD_SCRIPT",
                 started_at=t_script0,
                 finished_at=datetime.now(UTC),
                 status="success",

@@ -88,10 +88,20 @@ class Settings(BaseSettings):
     KOKORO_HEALTH_GRACE_SECONDS: int = 120
     KOKORO_SYNTHESIS_TIMEOUT_SECONDS: int = 180
 
-    # ETA Calculation
-    NARRATION_WORDS_PER_MINUTE: float = 136.0
+    # ETA Calculation & Narration Rate
+    NARRATION_WORDS_PER_MINUTE: float = 130.0
     TTS_ESTIMATED_REALTIME_FACTOR: float = 2.4
     DELIVERY_ESTIMATED_OVERHEAD_SECONDS: int = 60
+
+    # Deterministic Herald Intro/Outro Branding
+    BRANDING_INTRO_ENABLED: bool = True
+    BRANDING_OUTRO_ENABLED: bool = True
+    BRANDING_PLATFORM_NAME: str = "Herald"
+
+    # Interactive Podcast Parameter Defaults
+    DEFAULT_CONTENT_MODE: str = "source"
+    DEFAULT_TARGET_MINUTES: str = "auto"
+    DEFAULT_RESEARCH_DEPTH: str = "medium"
 
     # Directives Bounds
     ALLOWED_VOICES: str = "af_heart,af_bella,af_sarah,am_adam,am_michael"
@@ -198,6 +208,7 @@ class Settings(BaseSettings):
 
     # Explicit Feature / Transport flags
     ENABLE_TELEGRAM_TRANSPORT: bool = True
+    ENABLE_INTERACTIVE_CONFIG: bool = True
 
     def is_production_valid(self) -> bool:
         if self.HERALD_ENV.lower() == "production":

@@ -154,6 +154,12 @@ def build_manifest_dict(
     except Exception:
         pass
 
+    input_type = (
+        "url"
+        if job.source_url
+        else ("topic" if getattr(job, "content_mode", "") == "topic" else "text")
+    )
+
     return {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "herald_version": getattr(settings, "HERALD_VERSION", "2.0.0"),
@@ -162,11 +168,20 @@ def build_manifest_dict(
         "job_created_at": created_utc.isoformat() if created_utc else None,
         "job_completed_at": completed_utc.isoformat() if completed_utc else None,
         "request_mode": job.request_mode,
+        "content_mode": getattr(job, "content_mode", None),
+        "target_minutes": getattr(job, "target_minutes", None),
         "research_depth": job.research_depth,
+        "resolved_default": bool(getattr(job, "resolved_default", False)),
+        "input_type": input_type,
         "source_type": job.source_type,
         "ai_provider": prov_name or "None (Literal)",
         "ai_model": model_name or "local-literal",
+        "script_provider": getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None) or prov_name,
+        "research_provider": getattr(job, "research_provider", None) or getattr(job, "ai_provider", None),
         "research_model": getattr(job, "research_model", None),
+        "branding_intro_seconds": getattr(job, "branding_intro_seconds", 0.0),
+        "branding_outro_seconds": getattr(job, "branding_outro_seconds", 0.0),
+        "program_duration_seconds": getattr(job, "program_duration_seconds", None),
         "voice": job.kokoro_voice or job.custom_voice or settings.KOKORO_VOICE,
         "speed": job.kokoro_speed or job.custom_speed or settings.KOKORO_SPEED,
         "source_word_count": source_words,
@@ -179,6 +194,7 @@ def build_manifest_dict(
         "status": job.status,
         "error_code": job.error_code,
         "concurrency_profile": conc_profile,
+        "fidelity_audit": getattr(job, "fidelity_audit_json", None),
         "included_files": sorted(included_files),
         "truncated_files": sorted(truncated_files),
         "truncations": truncations_detail or [],
@@ -466,6 +482,42 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     json.dumps(sanitize_content_dict(job.research_audit_json), indent=2), encoding="utf-8"
                 )
                 included_files.append("research/audit.json")
+
+        # 13. Long-form and fidelity artifacts
+        if (
+            getattr(job, "evidence_packet_json", None)
+            or getattr(job, "outline_json", None)
+            or getattr(job, "research_plan_json", None)
+            or getattr(job, "fidelity_audit_json", None)
+            or getattr(job, "section_progress_json", None)
+        ):
+            longform_dir = staging_dir / "longform"
+            longform_dir.mkdir(exist_ok=True)
+            if getattr(job, "research_plan_json", None):
+                (longform_dir / "research-plan.json").write_text(
+                    json.dumps(sanitize_content_dict(job.research_plan_json), indent=2), encoding="utf-8"
+                )
+                included_files.append("longform/research-plan.json")
+            if getattr(job, "evidence_packet_json", None):
+                (longform_dir / "evidence-packet.json").write_text(
+                    json.dumps(sanitize_content_dict(job.evidence_packet_json), indent=2), encoding="utf-8"
+                )
+                included_files.append("longform/evidence-packet.json")
+            if getattr(job, "outline_json", None):
+                (longform_dir / "outline.json").write_text(
+                    json.dumps(sanitize_content_dict(job.outline_json), indent=2), encoding="utf-8"
+                )
+                included_files.append("longform/outline.json")
+            if getattr(job, "section_progress_json", None):
+                (longform_dir / "section-progress.json").write_text(
+                    json.dumps(sanitize_content_dict(job.section_progress_json), indent=2), encoding="utf-8"
+                )
+                included_files.append("longform/section-progress.json")
+            if getattr(job, "fidelity_audit_json", None):
+                (longform_dir / "fidelity-audit.json").write_text(
+                    json.dumps(sanitize_content_dict(job.fidelity_audit_json), indent=2), encoding="utf-8"
+                )
+                included_files.append("longform/fidelity-audit.json")
 
         # Multi-stage progressive size reduction when exceeding budget
         staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())

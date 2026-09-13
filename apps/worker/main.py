@@ -441,13 +441,81 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             t_ffmpeg_start = datetime.now(UTC)
             audio_info = None
 
+            # Calculate program duration from synthesized chunks
+            program_dur_sec = 0.0
+            from herald.audio.ffmpeg_builder import inspect_pcm_wav_file
+            for cp in generated_chunk_paths:
+                winfo = inspect_pcm_wav_file(cp)
+                if winfo and winfo.get("duration_seconds"):
+                    program_dur_sec += float(winfo["duration_seconds"])
+
+            # Intro and Outro Branding Synthesis
+            final_chunk_paths = list(generated_chunk_paths)
+            final_is_section_end = list(is_section_end_list)
+            intro_dur_sec = 0.0
+            outro_dur_sec = 0.0
+
+            if getattr(settings, "BRANDING_INTRO_ENABLED", True):
+                from herald.audio.branding import render_intro_narration, synthesize_branding_segment
+                try:
+                    intro_text = render_intro_narration(
+                        topic=title,
+                        target_minutes=getattr(job, "target_minutes", None),
+                    )
+                    intro_wav_path = chunks_dir / f"branding_intro_{job.id}.wav"
+                    intro_res = synthesize_branding_segment(
+                        text=intro_text,
+                        output_wav_path=intro_wav_path,
+                        kokoro_client=kokoro_client,
+                        voice=voice,
+                        speed=speed,
+                        segment_name="intro branding",
+                    )
+                    intro_dur_sec = intro_res.get("duration_seconds", 0.0)
+                    final_chunk_paths.insert(0, intro_wav_path)
+                    final_is_section_end.insert(0, True)
+                except Exception as b_err:
+                    logger.warning(f"Intro branding synthesis failed non-fatally: {b_err}")
+
+            if getattr(settings, "BRANDING_OUTRO_ENABLED", True):
+                from herald.audio.branding import render_outro_narration, synthesize_branding_segment
+                try:
+                    outro_text = render_outro_narration()
+                    outro_wav_path = chunks_dir / f"branding_outro_{job.id}.wav"
+                    outro_res = synthesize_branding_segment(
+                        text=outro_text,
+                        output_wav_path=outro_wav_path,
+                        kokoro_client=kokoro_client,
+                        voice=voice,
+                        speed=speed,
+                        segment_name="outro branding",
+                    )
+                    outro_dur_sec = outro_res.get("duration_seconds", 0.0)
+                    if final_is_section_end:
+                        final_is_section_end[-1] = True
+                    final_chunk_paths.append(outro_wav_path)
+                    final_is_section_end.append(False)
+                except Exception as b_err:
+                    logger.warning(f"Outro branding synthesis failed non-fatally: {b_err}")
+
+            job.branding_intro_seconds = intro_dur_sec
+            job.branding_outro_seconds = outro_dur_sec
+            job.program_duration_seconds = program_dur_sec
+            db.commit()
+
             record_job_diagnostic_event(
                 job.id,
                 "INFO",
                 "encoding",
                 "FFMPEG_BEGIN",
-                f"Assembling {len(generated_chunk_paths)} audio chunks into normalized MP3",
-                metadata={"chunk_count": len(generated_chunk_paths)},
+                f"Assembling {len(final_chunk_paths)} audio chunks into normalized MP3",
+                metadata={
+                    "chunk_count": len(final_chunk_paths),
+                    "program_chunks": len(generated_chunk_paths),
+                    "branding_intro_seconds": intro_dur_sec,
+                    "branding_outro_seconds": outro_dur_sec,
+                    "program_duration_seconds": program_dur_sec,
+                },
             )
 
             # Execute FFmpeg join (concurrency protected internally within join_and_normalize_audio)
@@ -455,9 +523,9 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                 try:
                     logger.info(f"Worker '{worker_id}' assembling audio with FFmpeg for job '{job.id}' (Attempt {ffmpeg_attempt})...")
                     audio_info = join_and_normalize_audio(
-                        chunk_paths=generated_chunk_paths,
+                        chunk_paths=final_chunk_paths,
                         output_mp3_path=output_mp3_path,
-                        is_section_end_list=is_section_end_list,
+                        is_section_end_list=final_is_section_end,
                         episode_title=title,
                         episode_description=description,
                         job_id=job.id,

@@ -19,6 +19,9 @@ class HeraldRequest(BaseModel):
     transport: str = "telegram"  # "telegram", "email", "api"
     transport_message_id: str | int | None = None
     hold_for_approval: bool = False
+    interactive_config: bool = False
+    content_mode: str | None = None
+    target_minutes: str | None = None
     transport_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

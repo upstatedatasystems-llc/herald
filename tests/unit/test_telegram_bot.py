@@ -55,6 +55,8 @@ def test_unauthorized_user_rejected(db_session):
 def test_text_and_url_request_accepted(db_session, monkeypatch):
     """Point 1, 6, 7: Telegram update -> valid Herald job for text and URL requests."""
     # 1. Authorize owner
+    from herald.config import settings
+    monkeypatch.setattr(settings, "ENABLE_INTERACTIVE_CONFIG", False)
     from herald.telegram.auth import generate_pairing_code
     code = generate_pairing_code(db_session)
     verify_and_claim_pairing_code(db_session, code, user_id=111, chat_id=111, username="alice")

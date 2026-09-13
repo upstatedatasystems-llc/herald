@@ -62,41 +62,51 @@ The installer will:
 
 ## How to Use Herald
 
-Once paired, send messages directly to your Telegram bot:
+Once paired, send an article URL, pasted text, or topic seed directly to your Telegram bot. Herald will extract and analyze the content, then present an **Interactive Podcast Configuration Card**:
 
-### 1. Standard Podcast (AI Scripted)
 ```text
-https://example.com/ai-breakthrough
+🎙️ Configure Your Podcast
+
+Understanding Deep Neural Networks
+• Input: URL (1,450 words)
+• Mode: Source — Strictly source-bounded narration
+• Target Length: Auto (~proportional)
+• Research Depth: N/A (Not used in Source)
+
+[ Source | Expanded | Topic | Literal ]
+[ Auto | 10m | 20m ]
+[ 30m | 45m | 60m ]
+[ ⚡ Use Default ] [ 📖 Literal Reader ]
+[ 🎙️ Create Podcast ] [ ❌ Cancel ]
 ```
 
-### 2. Literal Reading (Zero AI)
-```text
-https://example.com/article
-literal
-```
-or paste raw text:
-```text
-# Architecture Notes
-Distributed consensus algorithms ensure state consistency across replicated nodes...
-literal
-```
+### Content Modes
+- **Source**: Strictly source-bounded narration. Only information present in the source article or text is included, with zero external drift or ungrounded facts.
+- **Expanded**: Source is the foundation, augmented and cross-referenced with web research queries to provide broader context and background.
+- **Topic**: Comprehensive research synthesis from a topic seed, headline, or brief concept prompt.
+- **Literal**: Verbatim reading of the source text with zero AI calls.
 
-### 3. Concise Brief Episode
-```text
-https://example.com/morning-news
-brief
-```
+### Target Lengths (~130 WPM)
+- **Auto**: Proportional to native source length or research breadth.
+- **10 min**: ~1,300 words.
+- **20 min**: ~2,600 words.
+- **30 min**: ~3,900 words.
+- **45 min**: ~5,850 words.
+- **60 min**: ~7,800 words.
+*(Fixed durations use sequential section generation with section budgets, bounded fidelity auditing, and anti-compression pass).*
 
-### 4. Deep-Dive Grounded Research (Research Grounding)
-```text
-https://example.com/complex-topic
-research high
-```
+### Deterministic Herald Intro/Outro Branding
+All generated episodes include application-owned, deterministic intro and outro narration synthesized via Kokoro TTS and padded with natural silence pauses:
+- **Intro**: *"This is Herald, an open-source podcast generation platform. You're listening to an approximately [N]-minute podcast about [Topic]. Enjoy."*
+- **Outro**: *"You've been listening to Herald, the open-source podcast generation platform."*
+*(Can be toggled via `BRANDING_INTRO_ENABLED` and `BRANDING_OUTRO_ENABLED` in `.env`).*
 
-### Optional Directives (Top of message or in body)
+### Directives (Optional top-of-message overrides)
+- `literal` — Quick one-touch shortcut to Literal reader
 - `Voice: af_bella` (Available: `af_heart`, `af_bella`, `af_sarah`, `am_adam`, `am_michael`)
 - `Speed: 1.1` (0.8x to 1.2x)
 - `Title: My Custom Episode Title`
+
 
 ---
 

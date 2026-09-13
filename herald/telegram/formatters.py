@@ -177,6 +177,9 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
     default_voice = html.escape(str(user_prefs.get("default_voice", "af_heart")))
     default_speed = float(user_prefs.get("default_speed", 1.0))
     default_mode = html.escape(str(user_prefs.get("default_mode", "standard")).capitalize())
+    default_content_mode = html.escape(str(user_prefs.get("default_content_mode", getattr(settings, "DEFAULT_CONTENT_MODE", "source"))).capitalize())
+    default_target_minutes = html.escape(str(user_prefs.get("default_target_minutes", getattr(settings, "DEFAULT_TARGET_MINUTES", "auto"))).capitalize())
+    default_research_depth = html.escape(str(user_prefs.get("default_research_depth", getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium"))).capitalize())
 
     confirm_str = "🟢 On" if confirm_on else "⚪ Off"
     button_text = "🔕 Disable Confirm Before TTS" if confirm_on else "🔔 Enable Confirm Before TTS"
@@ -200,7 +203,9 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
 
     text = (
         "⚙️ <b>Herald Preferences & Settings</b>\n\n"
-        f"• <b>Default Mode:</b> <code>{default_mode}</code>\n"
+        f"• <b>Default Content Mode:</b> <code>{default_content_mode}</code>\n"
+        f"• <b>Default Target Length:</b> <code>{default_target_minutes}</code>\n"
+        f"• <b>Default Research Depth:</b> <code>{default_research_depth}</code>\n"
         f"• <b>Default Voice:</b> <code>{default_voice}</code>\n"
         f"• <b>Default Speed:</b> <code>{default_speed:.1f}x</code>\n"
         f"• <b>Confirm Before TTS:</b> {confirm_str}\n"
@@ -224,6 +229,22 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
             ],
             [
                 {
+                    "text": "🧭 Default Mode",
+                    "callback_data": "h4:s:mode",
+                },
+                {
+                    "text": "⏱️ Default Length",
+                    "callback_data": "h4:s:length",
+                },
+            ],
+            [
+                {
+                    "text": "🔬 Default Research Depth",
+                    "callback_data": "h4:s:research",
+                },
+            ],
+            [
+                {
                     "text": "🤖 AI Providers",
                     "callback_data": "h3:settings:providers",
                 },
@@ -238,7 +259,7 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
                     "callback_data": "h3:settings:speed",
                 },
                 {
-                    "text": "🧭 Mode",
+                    "text": "🧭 Legacy Mode",
                     "callback_data": "h3:settings:mode",
                 },
             ],
@@ -470,6 +491,92 @@ def format_mode_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
     if row:
         keyboard.append(row)
 
+    keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_content_mode_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format default content mode selection submenu."""
+    curr_mode = str(user_prefs.get("default_content_mode", getattr(settings, "DEFAULT_CONTENT_MODE", "source"))).lower()
+    text = (
+        "🧭 <b>Default Content Mode</b>\n\n"
+        f"Current default: <code>{html.escape(curr_mode.capitalize())}</code>\n\n"
+        "Select your default content mode:\n"
+        "• <b>Source:</b> Strictly bounded to source text\n"
+        "• <b>Expanded:</b> Source augmented with web research\n"
+        "• <b>Topic:</b> Broad research synthesis from topic/seed\n"
+        "• <b>Literal:</b> Verbatim text reading (zero AI)\n"
+    )
+    modes = [("source", "Source"), ("expanded", "Expanded"), ("topic", "Topic"), ("literal", "Literal")]
+    keyboard = []
+    row = []
+    for m_id, m_label in modes:
+        mark = "✅ " if curr_mode == m_id else ""
+        row.append({"text": f"{mark}{m_label}", "callback_data": f"h4:s:set_mode:{m_id}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_length_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format default target length selection submenu."""
+    curr_len = str(user_prefs.get("default_target_minutes", getattr(settings, "DEFAULT_TARGET_MINUTES", "auto"))).lower()
+    text = (
+        "⏱️ <b>Default Target Length</b>\n\n"
+        f"Current default: <code>{html.escape(curr_len.capitalize())}</code>\n\n"
+        "Select your default target duration for new podcasts:\n"
+        "• <b>Auto:</b> Duration proportional to source/research breadth\n"
+        "• <b>Fixed (10m - 60m):</b> Structured long-form target at ~130 WPM\n"
+    )
+    lengths = [
+        ("auto", "Auto"),
+        ("10", "10 min"),
+        ("20", "20 min"),
+        ("30", "30 min"),
+        ("45", "45 min"),
+        ("60", "60 min"),
+    ]
+    keyboard = []
+    row = []
+    for l_id, l_label in lengths:
+        mark = "✅ " if curr_len == l_id else ""
+        row.append({"text": f"{mark}{l_label}", "callback_data": f"h4:s:set_len:{l_id}"})
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
+    return text, {"inline_keyboard": keyboard}
+
+
+def format_research_depth_menu(user_prefs: dict) -> tuple[str, dict[str, Any]]:
+    """Format default research depth selection submenu."""
+    curr_rd = str(user_prefs.get("default_research_depth", getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium"))).lower()
+    text = (
+        "🔬 <b>Default Research Depth</b>\n\n"
+        f"Current default: <code>{html.escape(curr_rd.capitalize())}</code>\n\n"
+        "Select your default research depth for Expanded and Topic modes:\n"
+        "• <b>None:</b> Zero external research queries\n"
+        "• <b>Low:</b> 2-3 focused search queries\n"
+        "• <b>Medium:</b> 4-6 balanced search queries\n"
+        "• <b>High:</b> 8-12 comprehensive queries & cross-checking\n"
+    )
+    depths = [("none", "None"), ("low", "Low"), ("medium", "Medium"), ("high", "High")]
+    keyboard = []
+    row = []
+    for d_id, d_label in depths:
+        mark = "✅ " if curr_rd == d_id else ""
+        row.append({"text": f"{mark}{d_label}", "callback_data": f"h4:s:set_rd:{d_id}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
     keyboard.append([{"text": "← Back to Settings", "callback_data": "h2:settings:main"}])
     return text, {"inline_keyboard": keyboard}
 
@@ -1104,4 +1211,139 @@ def format_generation_failure_card(
         f"• <b>Reason:</b> {safe_msg}{diag_line}\n\n"
         f"Use <code>/diagnostics {short_id}</code> for support details."
     )
+
+
+def format_podcast_config_card(
+    job: PodcastJob,
+    user_prefs: dict | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Format the interactive podcast configuration card for Telegram.
+    Presents mode, target length, research depth, defaults button, and action controls.
+    Callback data scheme: h4:c:{job.id}:{action}:{val} (<= 64 bytes).
+    """
+    prefs = user_prefs or {}
+
+    # Active selections with fallback to job or preferences
+    mode = (
+        job.content_mode
+        or prefs.get("default_content_mode")
+        or getattr(settings, "DEFAULT_CONTENT_MODE", "source")
+    ).lower().strip()
+    target_len = str(
+        job.target_minutes
+        or prefs.get("default_target_minutes")
+        or getattr(settings, "DEFAULT_TARGET_MINUTES", "auto")
+    ).lower().strip()
+    research_depth = (
+        job.research_depth
+        or prefs.get("default_research_depth")
+        or getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium")
+    ).lower().strip()
+
+    title_raw = get_job_display_title(job)
+    if not title_raw or title_raw == "Herald Episode":
+        if job.source_url:
+            title_raw = job.source_url[:60]
+        elif job.source_text:
+            first_line = job.source_text.strip().split("\n")[0]
+            title_raw = first_line[:60] if first_line else "New Podcast"
+        else:
+            title_raw = "New Podcast"
+    title_esc = html.escape(title_raw[:80] + "..." if len(title_raw) > 80 else title_raw)
+
+    word_count = len(job.source_text.split()) if job.source_text else 0
+    if job.source_url:
+        input_type_desc = f"URL ({word_count:,} words)"
+    elif mode == "topic" or (word_count <= 40 and not job.source_url):
+        input_type_desc = f"Topic Seed ({word_count:,} words)"
+    else:
+        input_type_desc = f"Pasted Text ({word_count:,} words)"
+
+    mode_descriptions = {
+        "source": "Strictly source-bounded narration",
+        "expanded": "Source foundation + web research",
+        "topic": "Broad research synthesis",
+        "literal": "Verbatim reading (zero AI)",
+    }
+    mode_desc = mode_descriptions.get(mode, "Podcast narration")
+
+    len_display_map = {
+        "auto": "Auto (~proportional)",
+        "10": "10 min (~1,300 words)",
+        "20": "20 min (~2,600 words)",
+        "30": "30 min (~3,900 words)",
+        "45": "45 min (~5,850 words)",
+        "60": "60 min (~7,800 words)",
+    }
+    len_display = len_display_map.get(target_len, f"{target_len} min")
+
+    research_applicable = mode in ("expanded", "topic")
+    if research_applicable:
+        rd_display = html.escape(research_depth.capitalize())
+    else:
+        rd_display = f"<i>N/A (Not used in {html.escape(mode.capitalize())})</i>"
+
+    text = (
+        "🎙️ <b>Configure Your Podcast</b>\n\n"
+        f"<b>{title_esc}</b>\n"
+        f"• <b>Input:</b> {input_type_desc}\n"
+        f"• <b>Mode:</b> <b>{html.escape(mode.capitalize())}</b> — <i>{mode_desc}</i>\n"
+        f"• <b>Target Length:</b> <b>{len_display}</b>\n"
+        f"• <b>Research Depth:</b> {rd_display}\n\n"
+        "<i>Tap buttons below to configure, then start:</i>"
+    )
+
+    keyboard: list[list[dict[str, str]]] = []
+
+    # 1. Mode Row (2x2 grid)
+    modes = [("source", "Source"), ("expanded", "Expanded"), ("topic", "Topic"), ("literal", "Literal")]
+    mode_row_1 = []
+    mode_row_2 = []
+    for m_id, m_label in modes[:2]:
+        mark = "✅ " if mode == m_id else ""
+        mode_row_1.append({"text": f"{mark}{m_label}", "callback_data": f"h4:c:{job.id}:m:{m_id}"})
+    for m_id, m_label in modes[2:]:
+        mark = "✅ " if mode == m_id else ""
+        mode_row_2.append({"text": f"{mark}{m_label}", "callback_data": f"h4:c:{job.id}:m:{m_id}"})
+    keyboard.append(mode_row_1)
+    keyboard.append(mode_row_2)
+
+    # 2. Length Rows (3 per row: Auto, 10m, 20m / 30m, 45m, 60m)
+    len_row_1 = []
+    for l_id, l_label in [("auto", "Auto"), ("10", "10m"), ("20", "20m")]:
+        mark = "✅ " if target_len == l_id else ""
+        len_row_1.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
+    keyboard.append(len_row_1)
+
+    len_row_2 = []
+    for l_id, l_label in [("30", "30m"), ("45", "45m"), ("60", "60m")]:
+        mark = "✅ " if target_len == l_id else ""
+        len_row_2.append({"text": f"{mark}{l_label}", "callback_data": f"h4:c:{job.id}:len:{l_id}"})
+    keyboard.append(len_row_2)
+
+    # 3. Research Depth Row
+    if research_applicable:
+        rd_row = []
+        for d_id, d_label in [("none", "None"), ("low", "Low"), ("medium", "Med"), ("high", "High")]:
+            mark = "✅ " if research_depth == d_id else ""
+            rd_row.append({"text": f"{mark}{d_label}", "callback_data": f"h4:c:{job.id}:rd:{d_id}"})
+        keyboard.append(rd_row)
+    else:
+        keyboard.append([{"text": f"🔒 Research: N/A for {mode.capitalize()}", "callback_data": f"h4:c:{job.id}:noop:rd"}])
+
+    # 4. Shortcut row
+    keyboard.append([
+        {"text": "⚡ Use Default", "callback_data": f"h4:c:{job.id}:btn:def"},
+        {"text": "📖 Literal Reader", "callback_data": f"h4:c:{job.id}:btn:lit"},
+    ])
+
+    # 5. Action row
+    keyboard.append([
+        {"text": "🎙️ Create Podcast", "callback_data": f"h4:c:{job.id}:btn:start"},
+        {"text": "❌ Cancel", "callback_data": f"h4:c:{job.id}:btn:cancel"},
+    ])
+
+    return text, {"inline_keyboard": keyboard}
+
 

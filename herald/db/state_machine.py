@@ -15,18 +15,28 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     JobState.VALIDATING.value: {
         JobState.EXTRACTING.value,
         JobState.SOURCE_READY.value,
+        JobState.AWAITING_CONFIGURATION.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,
     },
     JobState.EXTRACTING.value: {
         JobState.SOURCE_READY.value,
+        JobState.AWAITING_CONFIGURATION.value,
+        JobState.FAILED_RETRYABLE.value,
+        JobState.FAILED_FINAL.value,
+        JobState.CANCELLED.value,
+    },
+    JobState.AWAITING_CONFIGURATION.value: {
+        JobState.SCRIPTING.value,
+        JobState.QUEUED_TTS.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,
         JobState.CANCELLED.value,
     },
     JobState.SOURCE_READY.value: {
         JobState.SCRIPTING.value,
+        JobState.AWAITING_CONFIGURATION.value,
         JobState.AWAITING_RERUN_CONFIRMATION.value,
         JobState.FAILED_RETRYABLE.value,
         JobState.FAILED_FINAL.value,

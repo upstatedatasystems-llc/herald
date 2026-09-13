@@ -18,7 +18,9 @@ from herald.telegram.client import TelegramAPIError, TelegramClient
 
 
 @pytest.fixture
-def db_session():
+def db_session(monkeypatch):
+    from herald.config import settings
+    monkeypatch.setattr(settings, "ENABLE_INTERACTIVE_CONFIG", False)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine)

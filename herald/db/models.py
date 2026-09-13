@@ -25,6 +25,7 @@ class JobState(str, enum.Enum):
     RECEIVED = "RECEIVED"
     VALIDATING = "VALIDATING"
     EXTRACTING = "EXTRACTING"
+    AWAITING_CONFIGURATION = "AWAITING_CONFIGURATION"
     SOURCE_READY = "SOURCE_READY"
     SCRIPTING = "SCRIPTING"
     SCRIPT_READY = "SCRIPT_READY"
@@ -50,6 +51,29 @@ class RequestMode(str, enum.Enum):
     DETAILED = "detailed"
 
 
+class ContentMode(str, enum.Enum):
+    LITERAL = "literal"
+    SOURCE = "source"
+    EXPANDED = "expanded"
+    TOPIC = "topic"
+
+
+class TargetMinutes(str, enum.Enum):
+    AUTO = "auto"
+    M10 = "10"
+    M20 = "20"
+    M30 = "30"
+    M45 = "45"
+    M60 = "60"
+
+
+class ResearchDepth(str, enum.Enum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class SourceType(str, enum.Enum):
     EMAIL_BODY = "email_body"
     URL = "url"
@@ -70,6 +94,8 @@ class PodcastJob(Base):
     telegram_user_id = Column(BigInteger, nullable=True, index=True)
 
     request_mode = Column(String(20), nullable=False, default=RequestMode.STANDARD.value)
+    content_mode = Column(String(20), nullable=True)
+    target_minutes = Column(String(20), nullable=True)
     research_depth = Column(String(20), nullable=True)
     source_type = Column(String(20), nullable=False, default=SourceType.EMAIL_BODY.value)
     source_url = Column(Text, nullable=True)
@@ -116,6 +142,19 @@ class PodcastJob(Base):
     research_source_count = Column(Integer, nullable=True)
     research_audit_json = Column(JSON, nullable=True)
     research_repair_count = Column(Integer, nullable=False, default=0)
+
+    # Long-form research & section generation data fields
+    research_plan_json = Column(JSON, nullable=True)
+    evidence_packet_json = Column(JSON, nullable=True)
+    outline_json = Column(JSON, nullable=True)
+    section_progress_json = Column(JSON, nullable=True)
+    fidelity_audit_json = Column(JSON, nullable=True)
+    branding_intro_seconds = Column(Float, nullable=True)
+    branding_outro_seconds = Column(Float, nullable=True)
+    program_duration_seconds = Column(Float, nullable=True)
+    configuration_state_json = Column(JSON, nullable=True)
+    resolved_default = Column(Boolean, nullable=True, default=False)
+    telegram_config_message_id = Column(BigInteger, nullable=True)
 
     # Audio synthesis & telemetry tracking
     completed_chunk_index = Column(Integer, nullable=False, default=0)
@@ -273,6 +312,9 @@ class TelegramUser(Base):
     default_voice = Column(String(50), nullable=True)
     default_speed = Column(Float, nullable=True)
     default_mode = Column(String(20), nullable=True)
+    default_content_mode = deferred(Column(String(20), nullable=True, default="source"))
+    default_target_minutes = deferred(Column(String(20), nullable=True, default="auto"))
+    default_research_depth = deferred(Column(String(20), nullable=True, default="medium"))
     ai_provider_chain_json = deferred(Column(JSON, nullable=True))
     ai_models_by_provider_json = deferred(Column(JSON, nullable=True))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))

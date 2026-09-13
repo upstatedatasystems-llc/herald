@@ -34,6 +34,9 @@ def test_atomic_worker_claim_and_stale_recovery(db_session, monkeypatch):
     db_session.refresh(job)
     assert job.status == JobState.AUDIO_READY.value
     assert job.synthesis_attempt_count >= 1
+    assert job.branding_intro_seconds >= 0.0
+    assert job.branding_outro_seconds >= 0.0
+    assert job.program_duration_seconds >= 0.0
 
 
 def test_stale_claim_recovery_respects_heartbeat(db_session):
