@@ -967,7 +967,7 @@ class TestURLContextFallbackEligibility:
         assert response.status == JobState.FAILED_FINAL.value
 
     def test_case_g_captcha_zero_url_context_calls(self, db_session: Session):
-        """Case G: CAPTCHA marker -> URL Context call count zero."""
+        """Case G: CAPTCHA marker -> URL Context fallback is attempted."""
         from herald.core.models import HeraldRequest
         from herald.core.pipeline import process_herald_request
         from herald.extraction.url_extractor import BlockReason, SourceAccessBlockedError
@@ -978,7 +978,7 @@ class TestURLContextFallbackEligibility:
             patch.object(settings, "GEMINI_API_KEY", "test-api-key"),
             patch.object(settings, "AI_PROVIDER", "gemini"),
             patch("herald.core.pipeline.extract_article_from_url", side_effect=err),
-            patch("herald.gemini.client.extract_article_via_url_context") as mock_url_ctx,
+            patch("herald.gemini.client.extract_article_via_url_context", return_value=None) as mock_url_ctx,
             patch("herald.services.diagnostics_export.ensure_terminal_diagnostics_archive"),
         ):
             req = HeraldRequest(
@@ -991,7 +991,7 @@ class TestURLContextFallbackEligibility:
             )
             response = process_herald_request(db=db_session, req=req)
 
-        assert mock_url_ctx.call_count == 0
+        assert mock_url_ctx.call_count == 1
         assert response.status == JobState.FAILED_FINAL.value
 
     def test_case_h_direct_extraction_success_zero_url_context_calls(self, db_session: Session):

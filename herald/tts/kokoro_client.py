@@ -55,10 +55,11 @@ class KokoroClient(BaseTTSEngine):
             pass
         return False
 
-    def health_check(self) -> dict[str, Any]:
+    def health_check(self, busy_hint: bool = False) -> dict[str, Any]:
         """
         Verify Kokoro container accessibility (/v1/models), FFmpeg availability, and test inference status.
         Supports load-aware busy/degraded state during active synthesis and bounded grace period.
+        Accepts cross-process busy_hint (e.g. from DB SYNTHESIZING jobs or PostgreSQL advisory lock).
         """
         status = {
             "healthy": False,
@@ -95,20 +96,20 @@ class KokoroClient(BaseTTSEngine):
                     status["error"] = f"Kokoro /v1/models probe returned HTTP {resp.status_code}"
         except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
             last_good = KokoroClient._last_successful_probe_at
-            active = KokoroClient.is_synthesizing()
+            active = KokoroClient.is_synthesizing() or busy_hint
             # If probe times out while active synthesis is in progress or within grace period:
             if active or (last_good and (now - last_good).total_seconds() <= grace_seconds):
                 logger.info(
-                    f"Kokoro probe timed out during active inference window (active={active}, {e}), "
+                    f"Kokoro probe timed out during active inference window (active={active}, busy_hint={busy_hint}, {e}), "
                     f"returning degraded healthy state (last successful: {last_good.isoformat() if last_good else 'none'})"
                 )
                 status["kokoro_api"] = True
                 status["degraded"] = True
             else:
-                logger.warning(f"Kokoro probe timed out and grace period expired (active=False, {e})")
+                logger.warning(f"Kokoro probe timed out and grace period expired (active=False, busy_hint=False, {e})")
                 status["error"] = f"Kokoro probe timeout: {e}"
         except httpx.ConnectError as e:
-            # True connection error (refused, no route) -> hard down
+            # True connection error (refused, no route) -> hard down even if busy_hint is True
             logger.warning(f"Kokoro API endpoint '{self.base_url}' connection refused/failed: {e}")
             status["error"] = f"Kokoro connection failed: {e}"
         except Exception as e:
@@ -211,3 +212,57 @@ class KokoroClient(BaseTTSEngine):
         finally:
             with KokoroClient._active_syntheses_lock:
                 KokoroClient._active_syntheses -= 1
+
+
+def is_tts_actively_synthesizing(db: Any | None = None) -> bool:
+    """
+    Check if Kokoro TTS is actively synthesizing across processes.
+    Checks:
+    1. In-process active syntheses counter (KokoroClient.is_synthesizing()).
+    2. Active database job status (PodcastJob.status == JobState.SYNTHESIZING).
+    3. PostgreSQL advisory lock for TTS slot if on PostgreSQL.
+    """
+    if KokoroClient.is_synthesizing():
+        return True
+
+    try:
+        from herald.db.models import JobState, PodcastJob
+
+        if db is not None:
+            active_job = db.query(PodcastJob).filter(
+                PodcastJob.status == JobState.SYNTHESIZING.value
+            ).first()
+            if active_job is not None:
+                return True
+
+            # Check Postgres advisory lock
+            try:
+                bind = db.get_bind()
+                if bind and getattr(bind.dialect, "name", "") == "postgresql":
+                    from sqlalchemy import text as sa_text
+                    from herald.config import settings
+                    from herald.concurrency import TTS_ADVISORY_SLOT_BASE, get_effective_tts_global_slots
+                    base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", TTS_ADVISORY_SLOT_BASE)
+                    num_slots = get_effective_tts_global_slots()
+                    max_key = base_key + num_slots - 1
+                    query = sa_text(
+                        "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND (objid BETWEEN :base_key AND :max_key OR classid BETWEEN :base_key AND :max_key) LIMIT 1"
+                    )
+                    res = db.execute(query, {"base_key": base_key, "max_key": max_key}).scalar()
+                    if res:
+                        return True
+            except Exception as lock_err:
+                logger.debug(f"Error checking pg_locks for TTS advisory locks: {lock_err}")
+        else:
+            from herald.db.connection import get_db
+            with get_db() as session:
+                active_job = session.query(PodcastJob).filter(
+                    PodcastJob.status == JobState.SYNTHESIZING.value
+                ).first()
+                if active_job is not None:
+                    return True
+    except Exception as e:
+        logger.debug(f"Error checking cross-process synthesis state: {e}")
+
+    return False
+

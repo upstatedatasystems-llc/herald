@@ -304,7 +304,7 @@ def test_gemini_provider_real_contract_receives_research_plan(monkeypatch):
 
     captured_research_plan = None
 
-    def mock_gemini_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None):
+    def mock_gemini_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None, **kwargs):
         nonlocal captured_research_plan
         captured_research_plan = research_plan
         return {

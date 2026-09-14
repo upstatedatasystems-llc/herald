@@ -23,7 +23,8 @@ dependencies = [
     "beautifulsoup4>=4.12.3",
     "google-genai>=0.1.1",
     "python-dotenv>=1.0.1",
-    "mutagen>=1.47.0"
+    "mutagen>=1.47.0",
+    "tzdata>=2024.1"
 ]
 
 [project.optional-dependencies]

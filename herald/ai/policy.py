@@ -5,6 +5,7 @@ Ensures identical classification-driven rules across all providers without dupli
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import re
 from typing import Any
 
 import httpx
@@ -160,6 +161,17 @@ def classify_error(
     if isinstance(err, httpx.HTTPStatusError) and err.response is not None:
         status_code = err.response.status_code
         headers = err.response.headers
+    elif hasattr(err, "status_code") and isinstance(getattr(err, "status_code"), int):
+        status_code = getattr(err, "status_code")
+    elif hasattr(err, "http_status") and isinstance(getattr(err, "http_status"), int):
+        status_code = getattr(err, "http_status")
+    else:
+        m_code = re.search(r"(?:status|code|http|\()[:\s]*([45]\d\d)\b", low_msg)
+        if m_code:
+            try:
+                status_code = int(m_code.group(1))
+            except ValueError:
+                pass
 
     # Explicit Quota / Prepayment / Billing Exhaustion (Non-transient)
     quota_billing_markers = (

@@ -527,10 +527,18 @@ def handle_telegram_command(
         work_dir = Path(settings.HERALD_WORK_DIR)
         free_mb = check_free_disk_mb(work_dir)
 
-        # Kokoro health
+        # Kokoro health with cross-process busy hint
+        from herald.tts.kokoro_client import is_tts_actively_synthesizing
+        tts_busy = is_tts_actively_synthesizing(db=db)
         kokoro_client = KokoroClient()
-        kokoro_res = kokoro_client.health_check()
-        kokoro_status = "🟢 Healthy" if kokoro_res.get("healthy") else "🔴 Unreachable"
+        kokoro_res = kokoro_client.health_check(busy_hint=tts_busy)
+        if kokoro_res.get("healthy"):
+            if kokoro_res.get("degraded"):
+                kokoro_status = "🟡 Busy / Healthy"
+            else:
+                kokoro_status = "🟢 Healthy"
+        else:
+            kokoro_status = "🔴 Unreachable"
 
         # AI Provider health check (derived from user preference or server default primary candidate)
         prefs = get_effective_user_preferences(db, user_id) if user_id else None

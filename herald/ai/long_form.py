@@ -1030,17 +1030,21 @@ def execute_unified_long_form_pipeline(
     if source_text and source_text.strip():
         source_ledger = build_source_coverage_ledger(source_text, source_title)
 
+    effective_scope = scope
+    if getattr(job, "research_degraded", False):
+        effective_scope = EvidenceScope.SOURCE_ONLY
+
     # 2. Research Plan & Evidence Gathering
     r_plan = None
     if not job.evidence_packet_json:
-        if scope in (EvidenceScope.RESEARCH, EvidenceScope.SOURCE_PLUS_RESEARCH):
+        if effective_scope in (EvidenceScope.RESEARCH, EvidenceScope.SOURCE_PLUS_RESEARCH):
             if status_notifier:
                 status_notifier("Researching topic and gathering authoritative evidence...")
 
             r_plan = build_research_plan(
                 topic=topic,
                 research_depth=research_depth,
-                scope=scope,
+                scope=effective_scope,
                 seed_summary=source_text[:500] if source_text else None,
             )
             job.research_plan_json = r_plan
@@ -1081,8 +1085,11 @@ def execute_unified_long_form_pipeline(
                 else:
                     job.research_model = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None)
                 db.commit()
+            except (TypeError, AttributeError, AssertionError, KeyError, IndexError, SyntaxError, NameError):
+                # Internal programming errors must never trigger graceful degradation
+                raise
             except Exception as res_err:
-                if scope == EvidenceScope.SOURCE_PLUS_RESEARCH and source_text and len(source_text.strip()) >= 50:
+                if effective_scope == EvidenceScope.SOURCE_PLUS_RESEARCH and source_text and len(source_text.strip()) >= 50:
                     from herald.ai.policy import classify_exception
                     classified_res_err = classify_exception(res_err)
                     degraded_reason = getattr(classified_res_err, "category", "AI_RESEARCH_FAILED")
@@ -1112,13 +1119,13 @@ def execute_unified_long_form_pipeline(
                     job.research_model = None
                     # Reset failover cursor so subsequent script generation uses the full candidate chain from index 0
                     job.ai_failover_index = 0
-                    scope = EvidenceScope.SOURCE_ONLY
+                    effective_scope = EvidenceScope.SOURCE_ONLY
                     grounded_data = None
                     if status_notifier:
                         status_notifier("Supplemental research unavailable; continuing with article-only generation...")
                     db.commit()
                 else:
-                    if scope == EvidenceScope.RESEARCH:
+                    if effective_scope == EvidenceScope.RESEARCH:
                         logger.error(f"Research failed for topic mode; research is required but unavailable: {res_err}")
                         record_job_diagnostic_event(
                             job.id,
@@ -1138,7 +1145,7 @@ def execute_unified_long_form_pipeline(
 
             evidence_packet = normalize_evidence_packet(
                 topic=topic,
-                scope=scope,
+                scope=effective_scope,
                 seed_source_text=source_text,
                 grounded_research_data=grounded_data,
                 seed_source_url=job.source_url,
@@ -1146,7 +1153,7 @@ def execute_unified_long_form_pipeline(
         else:
             evidence_packet = normalize_evidence_packet(
                 topic=topic,
-                scope=scope,
+                scope=effective_scope,
                 seed_source_text=source_text,
                 grounded_research_data=None,
                 seed_source_url=job.source_url,
@@ -1157,6 +1164,10 @@ def execute_unified_long_form_pipeline(
     else:
         evidence_packet = job.evidence_packet_json
         r_plan = job.research_plan_json
+        if getattr(job, "research_degraded", False):
+            effective_scope = EvidenceScope.SOURCE_ONLY
+            if isinstance(evidence_packet, dict):
+                evidence_packet["scope"] = EvidenceScope.SOURCE_ONLY.value
 
     # 3. Episode Outline & Word Budgeting
     if not job.outline_json:
@@ -1167,7 +1178,7 @@ def execute_unified_long_form_pipeline(
             topic=topic,
             evidence_packet=evidence_packet,
             target_minutes=target_minutes,
-            scope=scope,
+            scope=effective_scope,
             source_ledger=source_ledger,
             research_plan=r_plan,
         )
@@ -1198,7 +1209,7 @@ def execute_unified_long_form_pipeline(
             topic=topic,
             evidence_packet=evidence_packet,
             previous_summary=prev_summary,
-            scope=scope,
+            scope=effective_scope,
             db=db,
         )
         completed_sections.append(sec_result)
@@ -1211,7 +1222,7 @@ def execute_unified_long_form_pipeline(
     total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
 
     if planned_target and planned_target > 500 and total_generated_words < int(planned_target * 0.75):
-        if scope != EvidenceScope.SOURCE_ONLY:
+        if effective_scope != EvidenceScope.SOURCE_ONLY:
             # Expanded/Topic: execute bounded evidence-backed continuation pass
             if status_notifier:
                 status_notifier("Performing evidence-backed continuation to meet target duration...")
@@ -1236,7 +1247,7 @@ def execute_unified_long_form_pipeline(
                     topic=topic,
                     evidence_packet=evidence_packet,
                     previous_summary=prev_narr[:250],
-                    scope=scope,
+                    scope=effective_scope,
                     db=db,
                 )
                 if cont_sec.get("word_count", 0) > 100:
@@ -1310,7 +1321,7 @@ def execute_unified_long_form_pipeline(
         sections=completed_sections,
         source_ledger=source_ledger,
         evidence_packet=evidence_packet,
-        scope=scope,
+        scope=effective_scope,
         db=db,
         source_text=source_text,
     )

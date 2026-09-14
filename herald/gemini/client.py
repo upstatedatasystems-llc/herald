@@ -314,6 +314,7 @@ def generate_grounded_research(
     model_name: str | None = None,
     job_id: str | None = None,
     research_plan: dict | None = None,
+    max_attempts: int | None = None,
 ) -> dict:
     """
     Stage 1a: Call GEMINI_RESEARCH_MODEL with Google Search grounding to retrieve external evidence.
@@ -371,14 +372,14 @@ Report your comprehensive grounded findings in detail.
         "tools": [{"googleSearch": {}}],
     }
 
-    max_attempts = settings.GEMINI_RETRY_COUNT
+    effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max_attempts + 1):
         t0 = datetime.now(UTC)
         interaction_recorded = False
         try:
-            logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{max_attempts}")
+            logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{effective_max_attempts}")
             from herald.concurrency import get_semaphores
             with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                 resp = client.post(url, json=payload, headers=headers)
@@ -421,7 +422,7 @@ Report your comprehensive grounded findings in detail.
                 interaction_recorded = True
                 if _is_billing_exhausted_text(resp.text):
                     raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -447,7 +448,7 @@ Report your comprehensive grounded findings in detail.
                     raise GeminiModelUnavailableError(
                         f"Gemini model '{model}' is not available or not found (404): {err_msg}"
                     )
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -592,6 +593,7 @@ def extract_article_via_url_context(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    max_attempts: int | None = None,
 ) -> dict[str, str] | None:
     """
     Use Gemini URL Context tool to extract article content from a URL that blocked direct scraping.
@@ -639,10 +641,11 @@ URL: {url}"""
         else settings.GEMINI_URL_CONTEXT_MAX_OUTPUT_TOKENS
     )
     current_max_tokens = min(settings.GEMINI_URL_CONTEXT_INITIAL_OUTPUT_TOKENS, hard_cap)
-    max_attempts = settings.GEMINI_RETRY_COUNT
+    effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
+    truncation_escalated = False
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max_attempts + 1):
         t0 = datetime.now(UTC)
         try:
             payload = {
@@ -681,7 +684,7 @@ URL: {url}"""
                 logger.warning(f"URL Context extraction failed with HTTP {resp.status_code}")
                 if _is_billing_exhausted_text(resp.text):
                     raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -718,7 +721,7 @@ URL: {url}"""
             # 2. Never accept URL Context MAX_TOKENS as success — check finishReason BEFORE parsing
             if finish_reason == "MAX_TOKENS":
                 logger.warning(
-                    f"URL Context extraction truncated (finishReason=MAX_TOKENS), attempt {attempt}/{max_attempts}, "
+                    f"URL Context extraction truncated (finishReason=MAX_TOKENS), attempt {attempt}/{effective_max_attempts}, "
                     f"current_max_tokens={current_max_tokens}"
                 )
                 _record_gemini_interaction(
@@ -740,11 +743,15 @@ URL: {url}"""
                     error="OUTPUT_TRUNCATED: finishReason=MAX_TOKENS",
                     provider_request_id=req_id,
                 )
-                if current_max_tokens < hard_cap:
+                if current_max_tokens < hard_cap and not truncation_escalated:
                     new_budget = min(current_max_tokens * 2, hard_cap)
                     logger.info(f"Increasing URL Context token budget: {current_max_tokens} -> {new_budget}")
                     current_max_tokens = new_budget
-                if attempt < max_attempts:
+                    truncation_escalated = True
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                if attempt < effective_max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -988,7 +995,7 @@ URL: {url}"""
                 error=e,
             )
             logger.warning(f"URL Context extraction error on attempt {attempt}: {e}")
-            if attempt < max_attempts:
+            if attempt < effective_max_attempts:
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
@@ -1002,23 +1009,25 @@ def normalize_research_dossier(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    max_attempts: int | None = None,
 ) -> ResearchDossierResponse:
     """
-    Stage 1b: Second non-search structured-output call using GEMINI_MODEL.
-    Receives SOURCE_DATA, GROUNDED_RESEARCH_DATA, and canonical research_sources registry.
-    Converts evidence into ResearchDossierResponse and rejects any invalid source_ids.
+    Stage 1b: Distill and normalize raw grounded research into a structured research dossier.
+    Validates that cited source IDs strictly map to canonical sources discovered in Stage 1a.
+    Does NOT hallucinate ungrounded source citations.
     """
     key = api_key or settings.GEMINI_API_KEY
-    model = model_name or settings.GEMINI_MODEL
+    model = model_name or settings.GEMINI_RESEARCH_MODEL
 
     if not key:
         raise GeminiAuthError("Gemini API key is not configured.")
 
     sources_registry = grounded_research_data.get("research_sources", [])
-    valid_source_ids = {s["source_id"] for s in sources_registry}
+    valid_source_ids = {s.get("source_id") for s in sources_registry if s.get("source_id")}
 
     prompt = f"""
-You are a research analyst normalizing grounded evidence into a structured Research Dossier.
+Analyze the following primary source material and grounded external research findings.
+Synthesize an authoritative research dossier.
 
 <PRIMARY_SOURCE>
 {source_text}
@@ -1075,8 +1084,9 @@ Requirements:
         "required": ["source_summary", "verification", "useful_context", "outdated_or_uncertain"],
     }
 
-    max_attempts = settings.GEMINI_RETRY_COUNT
+    effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
+    truncation_escalated = False
 
     model_ceiling = get_gemini_max_output_tokens_ceiling(model)
     hard_cap = (
@@ -1094,11 +1104,12 @@ Requirements:
     elif "gemini-2.5" in model_lower:
         normalization_thinking_config = {"thinkingBudget": 1024}
 
-    for attempt in range(1, max_attempts + 1):
+    attempt = 1
+    while attempt <= effective_max_attempts:
         t0 = datetime.now(UTC)
         interaction_recorded = False
         try:
-            logger.info(f"Sending dossier normalization request to Gemini ({model}), max_tokens={current_max_tokens}, attempt {attempt}/{max_attempts}")
+            logger.info(f"Sending dossier normalization request to Gemini ({model}), max_tokens={current_max_tokens}, attempt {attempt}/{effective_max_attempts}")
             
             gen_config = {
                 "temperature": settings.GEMINI_TEMPERATURE,
@@ -1121,7 +1132,48 @@ Requirements:
             t1 = datetime.now(UTC)
             req_id = _extract_request_id(resp)
 
-            if resp.status_code != 200:
+            if resp.status_code in (401, 403):
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="dossier_normalization",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"Gemini API authentication failed ({resp.status_code}): {resp.text}",
+                    provider_request_id=req_id,
+                )
+                interaction_recorded = True
+                raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+            elif resp.status_code == 429:
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation="dossier_normalization",
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    http_status=resp.status_code,
+                    attempt=attempt,
+                    input_chars=len(prompt),
+                    requested_max_output_tokens=current_max_tokens,
+                    error=f"HTTP 429: {resp.text}",
+                    provider_request_id=req_id,
+                )
+                interaction_recorded = True
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
+                if attempt < effective_max_attempts:
+                    attempt += 1
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                raise GeminiQuotaError(f"Gemini API rate limit exceeded: {resp.text}")
+            elif resp.status_code != 200:
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
@@ -1144,7 +1196,8 @@ Requirements:
                     raise GeminiModelUnavailableError(
                         f"Gemini model '{model}' is not available or not found (404): {err_msg}"
                     )
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
+                    attempt += 1
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -1179,7 +1232,7 @@ Requirements:
             finish_reason = candidates[0].get("finishReason", "")
             if finish_reason == "MAX_TOKENS":
                 # Output was truncated — do NOT attempt JSON parsing
-                logger.warning(f"Dossier normalization truncated (finishReason=MAX_TOKENS), attempt {attempt}/{max_attempts}, current_max_tokens={current_max_tokens}")
+                logger.warning(f"Dossier normalization truncated (finishReason=MAX_TOKENS), attempt {attempt}/{effective_max_attempts}, current_max_tokens={current_max_tokens}")
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
@@ -1201,16 +1254,23 @@ Requirements:
                 )
                 interaction_recorded = True
                 # Adaptive retry: increase token budget toward hard cap
-                if current_max_tokens < hard_cap:
+                if current_max_tokens < hard_cap and not truncation_escalated:
                     new_budget = min(current_max_tokens * 2, hard_cap)
                     logger.info(f"Increasing normalization token budget: {current_max_tokens} -> {new_budget}")
                     current_max_tokens = new_budget
-                if attempt < max_attempts:
+                    truncation_escalated = True
+                    effective_max_attempts += 1
+                    attempt += 1
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                    continue
+                if attempt < effective_max_attempts:
+                    attempt += 1
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
                 raise GeminiOutputTruncatedError(
-                    f"Research dossier normalization output truncated after {max_attempts} attempts "
+                    f"Research dossier normalization output truncated after {effective_max_attempts} attempts "
                     f"(last maxOutputTokens={current_max_tokens})"
                 )
 
@@ -1277,8 +1337,9 @@ Requirements:
                     provider_request_id=req_id if "req_id" in locals() else None,
                 )
                 interaction_recorded = True
-            if attempt == max_attempts:
+            if attempt >= effective_max_attempts:
                 raise GeminiValidationError(f"Invalid dossier schema returned by Gemini: {e}")
+            attempt += 1
             time.sleep(backoff)
             backoff *= 2.0
         except Exception as e:
@@ -1299,8 +1360,9 @@ Requirements:
                 interaction_recorded = True
             if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError, GeminiOutputTruncatedError)):
                 raise
-            if attempt == max_attempts:
+            if attempt >= effective_max_attempts:
                 raise GeminiError(f"Dossier normalization failed: {e}")
+            attempt += 1
             time.sleep(backoff)
             backoff *= 2.0
 
@@ -1316,6 +1378,7 @@ def generate_podcast_script(
     model_name: str | None = None,
     job_id: str | None = None,
     generation_instructions: str | None = None,
+    max_attempts: int | None = None,
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
@@ -1400,7 +1463,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
         ],
     }
 
-    max_attempts = settings.GEMINI_RETRY_COUNT
+    effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
     last_error = ""
     last_finish_reason = ""
@@ -1414,7 +1477,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     current_max_tokens = min(base_max_tokens, model_ceiling) if model_ceiling is not None else base_max_tokens
     truncation_budget_retry_used = False
 
-    for attempt in range(1, max_attempts + 1):
+    attempt = 1
+    while attempt <= effective_max_attempts:
         t0 = datetime.now(UTC)
         interaction_recorded = False
         prompt_content = f"{system_prompt}\n\n{user_prompt}"
@@ -1491,7 +1555,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 interaction_recorded = True
                 if _is_billing_exhausted_text(resp.text):
                     raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
+                    attempt += 1
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -1521,7 +1586,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     raise GeminiModelUnavailableError(
                         f"Gemini model '{model}' is not available or not found (404): {err_msg}"
                     )
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
+                    attempt += 1
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -1614,16 +1680,18 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
 
             if f_reason == "MAX_TOKENS":
                 logger.warning(
-                    f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{max_attempts}: {e}"
+                    f"Gemini script generation truncated at {current_max_tokens} tokens on attempt {attempt}/{effective_max_attempts}: {e}"
                 )
                 if mode_clean != "research" and model_ceiling is not None and not truncation_budget_retry_used:
                     next_tokens = min(current_max_tokens * 2, model_ceiling)
-                    if next_tokens > current_max_tokens and attempt < max_attempts:
+                    if next_tokens > current_max_tokens:
                         logger.info(
                             f"Retrying Gemini script generation with increased output budget: {current_max_tokens} -> {next_tokens} tokens (ceiling: {model_ceiling})"
                         )
                         current_max_tokens = next_tokens
                         truncation_budget_retry_used = True
+                        effective_max_attempts += 1
+                        attempt += 1
                         time.sleep(backoff)
                         backoff *= 2.0
                         continue
@@ -1632,7 +1700,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 )
             else:
                 logger.error(f"Failed to parse or validate Gemini JSON output on attempt {attempt}: {e}")
-                if attempt < max_attempts:
+                if attempt < effective_max_attempts:
+                    attempt += 1
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -1660,11 +1729,12 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 raise
             last_error = str(e)
             logger.error(f"Gemini client error on attempt {attempt}: {e}")
-            if attempt == max_attempts:
+            if attempt >= effective_max_attempts:
                 raise GeminiError(f"Gemini script generation failed: {e}")
 
-        time.sleep(backoff)
-        backoff *= 2.0
+            attempt += 1
+            time.sleep(backoff)
+            backoff *= 2.0
 
     raise GeminiError("Failed to generate podcast script after retries.")
 

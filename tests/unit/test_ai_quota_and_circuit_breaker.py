@@ -182,3 +182,177 @@ def test_failover_skips_provider_with_active_circuit_breaker():
     assert invoked_providers == ["Cloudflare Workers AI"]
     # Failover cursor should point to Cloudflare
     assert job.ai_failover_index == 1
+
+
+# ==============================================================================
+# Retry Ownership & Anti-Storm Physical Invocations Tests
+# ==============================================================================
+
+def test_retry_ownership_transient_429_invocations():
+    """Verify that transient 429 errors respect execute_with_failover's outer limit without inner multiplication."""
+    post_call_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal post_call_count
+        post_call_count += 1
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {}
+        resp.text = '{"error": {"code": 429, "message": "Resource temporarily exhausted, please slow down."}}'
+        resp.json.return_value = {"error": {"code": 429, "message": "Resource temporarily exhausted, please slow down."}}
+        return resp
+
+    chain = [{"provider": "gemini", "model": "gemini-2.5-flash"}]
+    job = PodcastJob(
+        id="test-retry-owner-429",
+        transport="telegram",
+        status="PENDING",
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+        ai_provider_chain_json=chain,
+        ai_failover_index=0,
+    )
+
+    with patch("herald.config.settings.GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep"):
+        with pytest.raises(Exception):
+            execute_with_failover(
+                job=job,
+                operation="script_generation",
+                execute_fn=lambda prov, att, src: prov.generate_script(source_text=src or "test text"),
+                source_text="Test source text",
+                max_same_provider_attempts=3,
+            )
+
+    # Invariant: Must equal the outer attempt limit (3), NOT 3 * 3 = 9
+    assert post_call_count == 3
+
+
+def test_retry_ownership_transient_5xx_invocations():
+    """Verify that transient 5xx errors respect execute_with_failover's outer limit without inner multiplication."""
+    post_call_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal post_call_count
+        post_call_count += 1
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.headers = {}
+        resp.text = '{"error": {"code": 503, "message": "Service unavailable"}}'
+        resp.json.return_value = {"error": {"code": 503, "message": "Service unavailable"}}
+        return resp
+
+    chain = [{"provider": "gemini", "model": "gemini-2.5-flash"}]
+    job = PodcastJob(
+        id="test-retry-owner-5xx",
+        transport="telegram",
+        status="PENDING",
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+        ai_provider_chain_json=chain,
+        ai_failover_index=0,
+    )
+
+    with patch("herald.config.settings.GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep"):
+        with pytest.raises(Exception):
+            execute_with_failover(
+                job=job,
+                operation="script_generation",
+                execute_fn=lambda prov, att, src: prov.generate_script(source_text=src or "test text"),
+                source_text="Test source text",
+                max_same_provider_attempts=3,
+            )
+
+    # Invariant: Must equal the outer attempt limit (3), NOT 3 * 3 = 9
+    assert post_call_count == 3
+
+
+def test_retry_ownership_quota_exhausted_single_invocation():
+    """Verify that quota/billing exhaustion makes exactly 1 call before failing over/halting."""
+    post_call_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal post_call_count
+        post_call_count += 1
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {}
+        resp.text = '{"error": {"code": 429, "message": "Resource has been exhausted: Your prepayment credits are depleted."}}'
+        resp.json.return_value = {"error": {"code": 429, "message": "Resource has been exhausted: Your prepayment credits are depleted."}}
+        return resp
+
+    chain = [{"provider": "gemini", "model": "gemini-2.5-flash"}]
+    job = PodcastJob(
+        id="test-retry-owner-quota",
+        transport="telegram",
+        status="PENDING",
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+        ai_provider_chain_json=chain,
+        ai_failover_index=0,
+    )
+
+    with patch("herald.config.settings.GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep"):
+        with pytest.raises(Exception):
+            execute_with_failover(
+                job=job,
+                operation="script_generation",
+                execute_fn=lambda prov, att, src: prov.generate_script(source_text=src or "test text"),
+                source_text="Test source text",
+                max_same_provider_attempts=3,
+            )
+
+    # Invariant: Must halt after exactly 1 call on quota/billing exhaustion
+    assert post_call_count == 1
+
+
+def test_retry_ownership_truncation_allows_single_budget_escalation():
+    """Verify that Gemini client honors single token-budget retry even when max_attempts=1 is passed."""
+    call_count = 0
+
+    def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        if call_count == 1:
+            # First attempt: truncated output with finishReason=MAX_TOKENS
+            resp.text = '{"candidates": [{"content": {"parts": [{"text": "{\\"episode_title\\": \\"Truncated"}]}, "finishReason": "MAX_TOKENS"}]}'
+            resp.json.return_value = {
+                "candidates": [{
+                    "content": {"parts": [{"text": '{"episode_title": "Truncated'}]},
+                    "finishReason": "MAX_TOKENS",
+                }]
+            }
+        else:
+            # Second attempt (adaptive budget retry): succeeds with valid JSON
+            valid_script = '{"episode_title": "Success", "episode_description": "Full episode", "segments": [{"order": 1, "heading": "Intro", "narration": "Hello world"}], "warnings": []}'
+            resp.text = f'{{"candidates": [{{"content": {{"parts": [{{"text": {json.dumps(valid_script)}}}]}}, "finishReason": "STOP"}}]}}'
+            resp.json.return_value = {
+                "candidates": [{
+                    "content": {"parts": [{"text": valid_script}]},
+                    "finishReason": "STOP",
+                }]
+            }
+        return resp
+
+    import json
+    with patch("herald.config.settings.GEMINI_API_KEY", "test-key"), \
+         patch("httpx.Client.post", side_effect=mock_post), \
+         patch("time.sleep"):
+        result = generate_podcast_script(
+            source_text="Sample text for script generation",
+            model_name="gemini-2.5-flash",
+            max_attempts=1,
+        )
+
+    # Invariant: initial call (1) + single adaptive budget retry (1) = 2 calls
+    assert call_count == 2
+    assert result.episode_title == "Success"
+

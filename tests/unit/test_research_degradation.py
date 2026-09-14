@@ -168,3 +168,117 @@ def test_topic_mode_fails_cleanly_without_degradation():
         err_msg = str(exc_info.value)
         assert "research" in err_msg.lower()
         assert "topic" in err_msg.lower()
+
+
+# ==============================================================================
+# Research Degradation Resume & Exception Boundary Tests
+# ==============================================================================
+
+def test_research_degraded_resume_enforces_source_only_scope():
+    """Verify that a resumed job with research_degraded=True enforces SOURCE_ONLY throughout subsequent stages."""
+    job = PodcastJob(
+        id="test-job-resume-deg-1",
+        transport="telegram",
+        status="PENDING",
+        content_mode="expanded",
+        request_mode="standard",
+        source_url="https://example.com/article",
+        source_text="This is comprehensive article source text about renewable energy." * 10,
+        research_degraded=True,
+        research_degradation_reason="AI_QUOTA_EXHAUSTED",
+        evidence_packet_json={
+            "topic": "Renewable Energy",
+            "scope": "SOURCE_PLUS_RESEARCH",  # Legacy/stale packet scope
+            "items": [{
+                "evidence_id": "ev_seed",
+                "title": "Primary Submitted Source",
+                "publisher": "User Source Material",
+                "snippet": "This is comprehensive article source text about renewable energy.",
+                "is_seed_source": True,
+            }],
+        },
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+    )
+
+    db = MagicMock()
+    executed_operations = []
+
+    def mock_failover(job, operation, execute_fn, **kwargs):
+        executed_operations.append(operation)
+        if operation == "section_generation":
+            mock_resp = MagicMock()
+            mock_seg = MagicMock()
+            mock_seg.narration = "Renewable energy narration from source article."
+            mock_resp.segments = [mock_seg]
+            mock_resp.episode_title = "Renewable Energy"
+            mock_resp.episode_description = "Generated from source"
+            return mock_resp
+        elif operation == "verification":
+            mock_audit = MagicMock()
+            mock_audit.has_material_issues = False
+            mock_audit.repair_instructions = None
+            mock_audit.model_dump.return_value = {"has_material_issues": False}
+            return mock_audit
+        return MagicMock()
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover), \
+         patch("herald.ai.long_form.record_job_diagnostic_event"):
+        res = execute_unified_long_form_pipeline(
+            db=db,
+            job=job,
+            topic="Renewable Energy",
+            scope=EvidenceScope.SOURCE_PLUS_RESEARCH,  # Caller passes original scope
+            target_minutes="auto",
+            research_depth="medium",
+            source_text=job.source_text,
+        )
+
+    # Invariants:
+    # 1. Stored evidence packet scope must be coerced to SOURCE_ONLY
+    assert job.evidence_packet_json["scope"] == "SOURCE_ONLY"
+    # 2. Resumed stages must NOT execute research_audit or grounded_research
+    assert "grounded_research" not in executed_operations
+    assert "research_audit" not in executed_operations
+    # 3. Pipeline completed successfully
+    assert res is not None
+
+
+def test_programmer_error_during_research_raises_and_never_degrades():
+    """Verify that internal programmer errors (TypeError, AttributeError, etc.) raise directly and do not degrade."""
+    job = PodcastJob(
+        id="test-job-prog-error-1",
+        transport="telegram",
+        status="PENDING",
+        content_mode="expanded",
+        request_mode="standard",
+        source_url="https://example.com/article",
+        source_text="This is a comprehensive article about artificial intelligence advances in medicine. " * 10,
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+    )
+
+    db = MagicMock()
+
+    def mock_failover_prog_error(job, operation, execute_fn, **kwargs):
+        if operation == "grounded_research":
+            raise TypeError("generate_grounded_research() got an unexpected keyword argument 'foo'")
+        return MagicMock()
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover_prog_error), \
+         patch("herald.ai.long_form.record_job_diagnostic_event"):
+        with pytest.raises(TypeError) as exc_info:
+            execute_unified_long_form_pipeline(
+                db=db,
+                job=job,
+                topic="AI in Medicine",
+                scope=EvidenceScope.SOURCE_PLUS_RESEARCH,
+                target_minutes="auto",
+                research_depth="medium",
+                source_text=job.source_text,
+            )
+
+    # Invariant: Must re-raise programmer error directly without catching it as graceful degradation
+    assert "unexpected keyword argument 'foo'" in str(exc_info.value)
+    assert job.research_degraded is not True
+

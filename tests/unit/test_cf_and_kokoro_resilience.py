@@ -238,3 +238,61 @@ def test_kokoro_health_probe_fails_when_idle_and_grace_expired():
     assert status["healthy"] is False
     assert status["kokoro_api"] is False
     assert "timeout" in str(status["error"]).lower()
+
+
+def test_is_tts_actively_synthesizing_db_check():
+    """Verify that is_tts_actively_synthesizing detects active synthesis jobs in DB."""
+    from herald.db.models import JobState
+    from herald.tts.kokoro_client import is_tts_actively_synthesizing
+
+    with KokoroClient._active_syntheses_lock:
+        KokoroClient._active_syntheses = 0
+
+    mock_db = MagicMock()
+    mock_db.get_bind.return_value.dialect.name = "sqlite"
+
+    # Case 1: An active job exists in SYNTHESIZING state
+    mock_job = MagicMock()
+    mock_job.status = JobState.SYNTHESIZING.value
+    mock_db.query.return_value.filter.return_value.first.return_value = mock_job
+    assert is_tts_actively_synthesizing(db=mock_db) is True
+
+    # Case 2: No active synthesis jobs
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+    assert is_tts_actively_synthesizing(db=mock_db) is False
+
+
+def test_kokoro_health_probe_busy_hint_degraded_healthy_on_timeout():
+    """Verify that busy_hint=True causes a probe timeout to return degraded healthy."""
+    client = KokoroClient(base_url="http://kokoro:8880/v1")
+
+    with KokoroClient._active_syntheses_lock:
+        KokoroClient._active_syntheses = 0
+    KokoroClient._last_successful_probe_at = None
+
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("httpx.Client.get", side_effect=httpx.TimeoutException("Read timeout")):
+        status = client.health_check(busy_hint=True)
+
+    # Invariant: Must recognize busy inference window across processes and return healthy=True, degraded=True
+    assert status["healthy"] is True
+    assert status["degraded"] is True
+    assert status["kokoro_api"] is True
+
+
+def test_kokoro_health_probe_busy_hint_fails_on_connection_error():
+    """Verify that busy_hint=True still fails as unhealthy when connection is refused."""
+    client = KokoroClient(base_url="http://kokoro:8880/v1")
+
+    with KokoroClient._active_syntheses_lock:
+        KokoroClient._active_syntheses = 0
+
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+         patch("httpx.Client.get", side_effect=httpx.ConnectError("Connection refused")):
+        status = client.health_check(busy_hint=True)
+
+    # Invariant: True connection error must NEVER be masked as healthy, even if busy_hint is True
+    assert status["healthy"] is False
+    assert status["kokoro_api"] is False
+    assert "connection failed" in str(status["error"]).lower()
+

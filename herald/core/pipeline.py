@@ -21,6 +21,7 @@ from herald.db.state_machine import transition_job_state
 from herald.extraction.source_cleaner import clean_source_text, deduplicate_source_blocks
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
+    ArticleNotFoundError,
     BlockReason,
     DNSResolutionError,
     SourceAccessBlockedError,
@@ -130,6 +131,8 @@ def find_prior_content_candidate(
         return (_tier_rank(j), -ts)
 
     sorted_candidates = sorted(candidates, key=_sort_key)
+    if not sorted_candidates:
+        return None
     return sorted_candidates[0]
 
 
@@ -483,6 +486,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
         except (SourceAccessBlockedError, ArticleExtractionError) as e:
             from herald.extraction.recovery import (
                 classify_extraction_failure,
+                discover_same_publisher_replacement_url,
                 find_extraction_fallback_provider,
                 validate_and_sanitize_recovered_url,
             )
@@ -558,6 +562,67 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                             )
                     except Exception as rec_err:
                         logger.info(f"Same-publisher candidate recovery attempt failed: {rec_err}")
+
+                # 1b. Grounded same-publisher discovery for 404 / stale URLs
+                if fallback_result != "SUCCESS" and (error_cat == "ARTICLE_NOT_FOUND" or isinstance(e, ArticleNotFoundError)):
+                    try:
+                        discovered_url = discover_same_publisher_replacement_url(original_source_url, job_id=job.id)
+                        if discovered_url:
+                            valid_recovered = validate_and_sanitize_recovered_url(discovered_url, original_source_url)
+                            rec_res = extract_article_from_url(valid_recovered)
+                            rec_title, rec_text, rec_canon = rec_res
+                            if rec_text and len(rec_text.strip()) >= 100:
+                                canonical_title = rec_title or canonical_title
+                                source_url = rec_canon
+                                resolved_url = valid_recovered
+                                extracted_text = f"Title: {rec_title}\n\n{rec_text}" if rec_title else rec_text
+                                fallback_attempted = True
+                                fallback_method = "SAME_PUBLISHER_GROUNDED_DISCOVERY"
+                                fallback_result = "SUCCESS"
+                                extraction_meta = {
+                                    "extraction_method": fallback_method,
+                                    "direct_extraction_attempted": True,
+                                    "direct_extraction_result": "FAILED",
+                                    "direct_error_category": error_cat,
+                                    "direct_error": safe_msg,
+                                    "block_reason": block_reason,
+                                    "fallback_eligible": True,
+                                    "fallback_attempted": True,
+                                    "fallback_method": fallback_method,
+                                    "fallback_result": "SUCCESS",
+                                    "original_url": original_source_url,
+                                    "resolved_url": resolved_url,
+                                    "final_extraction_classification": error_cat,
+                                    "url": source_url,
+                                    "chars": len(rec_text),
+                                }
+                                record_stage_metric(
+                                    job_id=job.id,
+                                    stage="URL_EXTRACTION",
+                                    status="SUCCESS",
+                                    started_at=datetime.now(UTC),
+                                    metadata_json=extraction_meta,
+                                )
+                                record_job_diagnostic_event(
+                                    job.id,
+                                    "INFO",
+                                    "extraction",
+                                    "SAME_PUBLISHER_DISCOVERY_SUCCESS",
+                                    f"Grounded same-publisher discovery succeeded for {resolved_url} ({len(rec_text)} chars).",
+                                    metadata=extraction_meta,
+                                    db=db,
+                                )
+                                record_job_diagnostic_event(
+                                    job.id,
+                                    "INFO",
+                                    "extraction",
+                                    "EXTRACTION_SUCCESS",
+                                    f"Same-publisher discovery extraction succeeded ({len(rec_text)} chars).",
+                                    metadata=extraction_meta,
+                                    db=db,
+                                )
+                    except Exception as disc_err:
+                        logger.info(f"Grounded same-publisher discovery failed: {disc_err}")
 
                 # 2. AI URL Context fallback (independent of user scripting provider preference)
                 if fallback_result != "SUCCESS":

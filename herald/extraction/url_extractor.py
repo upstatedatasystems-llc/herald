@@ -23,6 +23,10 @@ class ArticleExtractionError(Exception):
     """Raised when an article URL cannot be fetched or contains insufficient content."""
     error_category = "EXTRACTION_FAILURE"
 
+    def __init__(self, message: str, candidate_url: str | None = None):
+        super().__init__(message)
+        self.candidate_url = candidate_url
+
 
 class ArticleNotFoundError(ArticleExtractionError):
     """Raised when an article URL returns HTTP 404 Not Found."""
@@ -53,8 +57,8 @@ class SourceAccessBlockedError(ArticleExtractionError):
     """Raised when access to an article URL is blocked by paywall, bot protection, interstitial, or publisher restrictions."""
     error_category = "SOURCE_ACCESS_BLOCKED"
 
-    def __init__(self, message: str, block_reason: str = BlockReason.PUBLIC_RETRIEVAL_BLOCK):
-        super().__init__(message)
+    def __init__(self, message: str, block_reason: str = BlockReason.PUBLIC_RETRIEVAL_BLOCK, candidate_url: str | None = None):
+        super().__init__(message, candidate_url=candidate_url)
         self.block_reason = block_reason
 
 
@@ -273,6 +277,26 @@ class ExtractionResult(tuple):
         return obj
 
 
+def _extract_canonical_candidate(soup: BeautifulSoup, base_url: str) -> str | None:
+    """Extract canonical link href or og:url meta property from soup if present."""
+    try:
+        canonical_tag = soup.find("link", rel=lambda val: val and "canonical" in val.lower().split())
+        if canonical_tag and canonical_tag.get("href"):
+            cand = canonical_tag["href"].strip()
+            if cand:
+                return urljoin(base_url, cand)
+        og_tag = soup.find("meta", property=lambda val: val and val.lower() == "og:url") or soup.find(
+            "meta", attrs={"name": lambda val: val and val.lower() == "og:url"}
+        )
+        if og_tag and og_tag.get("content"):
+            cand = og_tag["content"].strip()
+            if cand:
+                return urljoin(base_url, cand)
+    except Exception:
+        pass
+    return None
+
+
 def extract_article_from_url(
     url: str,
     timeout_seconds: float = 10.0,
@@ -381,7 +405,18 @@ def extract_article_from_url(
                         )
 
                     if response.status_code == 404:
-                        raise ArticleNotFoundError(f"Publisher returned HTTP 404 Not Found: {current_url}")
+                        cand_url_404 = None
+                        try:
+                            sample_bytes = response.read()[:16384]
+                            sample_text = sample_bytes.decode("utf-8", errors="replace")
+                            s404 = BeautifulSoup(sample_text, "html.parser")
+                            cand_url_404 = _extract_canonical_candidate(s404, current_url)
+                        except Exception:
+                            pass
+                        raise ArticleNotFoundError(
+                            f"Publisher returned HTTP 404 Not Found: {current_url}",
+                            candidate_url=cand_url_404,
+                        )
 
                     if response.status_code != 200:
                         raise ArticleExtractionError(f"Server returned non-200 status code: {response.status_code}")
@@ -484,6 +519,8 @@ def extract_article_from_url(
                 
     full_text = "\n\n".join(extracted_lines)
 
+    cand_from_html = _extract_canonical_candidate(soup, current_url)
+
     if len(full_text.strip()) < 100:
         # Check if the page had paywall/interstitial clues before raising general error
         for marker in BOT_PAYWALL_MARKERS:
@@ -492,20 +529,15 @@ def extract_article_from_url(
                 raise SourceAccessBlockedError(
                     f"Publisher blocked automated retrieval (short text with {marker}): {current_url}",
                     block_reason=reason,
+                    candidate_url=cand_from_html,
                 )
-        raise InsufficientContentError("Insufficient article text extracted from page (less than 100 characters).")
+        raise InsufficientContentError(
+            "Insufficient article text extracted from page (less than 100 characters).",
+            candidate_url=cand_from_html,
+        )
 
     canonical_url = current_url
-    candidate_href = None
-    canonical_tag = soup.find("link", rel=lambda val: val and "canonical" in val.lower().split())
-    if canonical_tag and canonical_tag.get("href"):
-        candidate_href = canonical_tag["href"]
-    else:
-        og_tag = soup.find("meta", property=lambda val: val and val.lower() == "og:url") or soup.find(
-            "meta", attrs={"name": lambda val: val and val.lower() == "og:url"}
-        )
-        if og_tag and og_tag.get("content"):
-            candidate_href = og_tag["content"]
+    candidate_href = cand_from_html
 
     if candidate_href:
         candidate_canonical = urljoin(current_url, candidate_href)

@@ -116,6 +116,7 @@ class GeminiProvider(AIProvider):
             job_id=job_id,
             model_name=self.configured_model,
             generation_instructions=generation_instructions,
+            max_attempts=1,
         )
 
     def generate_grounded_research(
@@ -132,6 +133,7 @@ class GeminiProvider(AIProvider):
             model_name=self.research_model,
             job_id=job_id,
             research_plan=research_plan,
+            max_attempts=1,
         )
 
     def normalize_research_dossier(
@@ -146,6 +148,7 @@ class GeminiProvider(AIProvider):
             grounded_research_data=grounded_research_data,
             model_name=self.configured_model,
             job_id=job_id,
+            max_attempts=1,
         )
 
     def audit_research_script(
@@ -222,6 +225,7 @@ class GeminiProvider(AIProvider):
             url=url,
             model_name=self.configured_model,
             job_id=job_id,
+            max_attempts=1,
         )
 
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:

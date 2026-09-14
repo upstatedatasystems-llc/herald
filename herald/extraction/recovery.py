@@ -236,7 +236,12 @@ def classify_extraction_failure(error: Exception, url: str) -> dict[str, Any]:
 
     if isinstance(error, SourceAccessBlockedError):
         block_reason = getattr(error, "block_reason", BlockReason.PUBLIC_RETRIEVAL_BLOCK)
-        is_eligible = block_reason in (BlockReason.PUBLIC_RETRIEVAL_BLOCK, BlockReason.RATE_LIMITED)
+        is_eligible = block_reason in (
+            BlockReason.PUBLIC_RETRIEVAL_BLOCK,
+            BlockReason.RATE_LIMITED,
+            BlockReason.INTERSTITIAL,
+            BlockReason.CAPTCHA,
+        )
         return {
             "category": "SOURCE_ACCESS_BLOCKED",
             "fallback_eligible": is_eligible,
@@ -247,11 +252,16 @@ def classify_extraction_failure(error: Exception, url: str) -> dict[str, Any]:
     # Generic ArticleExtractionError with non-200 or interstitial
     if isinstance(error, ArticleExtractionError):
         # Cloudflare or public bot challenge or 403 on public sites
-        if any(code in err_str for code in ("403", "cloudflare", "bot challenge")):
+        if any(code in err_str for code in ("403", "cloudflare", "bot challenge", "interstitial", "just a moment", "turnstile", "captcha")):
+            reason = BlockReason.PUBLIC_RETRIEVAL_BLOCK
+            if "interstitial" in err_str or "just a moment" in err_str:
+                reason = BlockReason.INTERSTITIAL
+            elif "captcha" in err_str or "turnstile" in err_str:
+                reason = BlockReason.CAPTCHA
             return {
                 "category": "SOURCE_ACCESS_BLOCKED",
                 "fallback_eligible": True,
-                "block_reason": BlockReason.PUBLIC_RETRIEVAL_BLOCK,
+                "block_reason": reason,
                 "safe_detail": safe_msg,
             }
         return {
@@ -298,3 +308,120 @@ def find_extraction_fallback_provider() -> tuple[str | None, Any | None]:
                 continue
 
     return None, None
+
+
+def find_grounded_discovery_provider() -> tuple[str | None, Any | None]:
+    """
+    Find any configured AI provider with 'research_grounding' capability,
+    independent of user scripting provider preference.
+    Checks circuit breaker status before returning.
+    Returns (provider_id, provider_instance) or (None, None).
+    """
+    try:
+        from herald.ai.circuit_breaker import is_circuit_breaker_active
+    except ImportError:
+        is_circuit_breaker_active = lambda p: (False, None)
+
+    from herald.ai.registry import create_provider, list_descriptors
+
+    for desc in list_descriptors():
+        if desc.is_configured() and getattr(desc.capabilities, "research_grounding", False):
+            p_id = desc.provider_id
+            active, reason = is_circuit_breaker_active(p_id)
+            if active:
+                logger.info(f"Skipping grounded discovery provider '{p_id}': circuit breaker active ({reason})")
+                continue
+            try:
+                inst = create_provider(p_id)
+                return p_id, inst
+            except Exception as e:
+                logger.warning(f"Failed to instantiate discovery provider '{p_id}': {e}")
+                continue
+
+    return None, None
+
+
+def discover_same_publisher_replacement_url(
+    original_url: str,
+    job_id: str | None = None,
+) -> str | None:
+    """
+    Bounded same-publisher URL discovery for HTTP 404 / stale URLs.
+    Performs one search query using an available configured provider with research/search grounding.
+    Candidate URLs must strictly come from grounded/search source metadata (not generated prose).
+    Filters candidates by:
+    - Same registrable publisher domain
+    - Strong slug / path keyword similarity
+    - HTTP/HTTPS only
+    - Full SSRF revalidation
+    - Ambiguity rejection: if multiple distinct candidates pass, rejects to avoid guessing.
+    Returns the validated replacement URL or None.
+    """
+    if not original_url or not isinstance(original_url, str):
+        return None
+
+    domain = get_registrable_domain(original_url)
+    if not domain:
+        return None
+
+    slug_words = _extract_slug_keywords(original_url)
+    if not slug_words:
+        logger.info(f"Original URL '{original_url}' lacks slug keywords; skipping discovery.")
+        return None
+
+    prov_id, prov = find_grounded_discovery_provider()
+    if not prov:
+        logger.info(f"No configured provider with research_grounding available for discovery of {original_url}.")
+        return None
+
+    search_terms = " ".join(sorted(slug_words))
+    discovery_query = f"site:{domain} {search_terms}"
+    logger.info(f"Attempting grounded same-publisher discovery for '{original_url}' via {prov_id}: '{discovery_query}'")
+
+    try:
+        grounded_data = prov.generate_grounded_research(
+            source_text=f"Find the original article published on {domain} matching: {original_url}\nSearch query: {discovery_query}",
+            research_depth="low",
+            job_id=job_id,
+        )
+    except Exception as e:
+        logger.warning(f"Grounded discovery call to {prov_id} failed: {e}")
+        return None
+
+    if not isinstance(grounded_data, dict):
+        return None
+
+    # Strictly extract candidates from search/grounding metadata, NOT generated prose!
+    sources = list(grounded_data.get("research_sources") or grounded_data.get("sources") or [])
+    if not sources and "grounding_metadata" in grounded_data:
+        gm = grounded_data["grounding_metadata"]
+        chunks = gm.get("groundingChunks") or gm.get("grounding_chunks") or []
+        for c in chunks:
+            web = c.get("web") or {}
+            u = web.get("uri") or web.get("url")
+            if u:
+                sources.append({"url": u, "title": web.get("title")})
+
+    candidate_urls: list[str] = []
+    for s in sources:
+        cand = s.get("url") if isinstance(s, dict) else (s if isinstance(s, str) else None)
+        if not cand or not isinstance(cand, str):
+            continue
+        try:
+            valid_cand = validate_and_sanitize_recovered_url(cand, original_url)
+            if valid_cand not in candidate_urls:
+                candidate_urls.append(valid_cand)
+        except Exception as val_err:
+            logger.debug(f"Discovered candidate '{cand}' failed recovery validation: {val_err}")
+
+    if len(candidate_urls) == 1:
+        logger.info(f"Grounded same-publisher discovery succeeded: '{candidate_urls[0]}' for original '{original_url}'")
+        return candidate_urls[0]
+    elif len(candidate_urls) > 1:
+        logger.warning(
+            f"Grounded discovery returned ambiguous candidates for '{original_url}': {candidate_urls}. Rejecting to prevent guessing."
+        )
+        return None
+    else:
+        logger.info(f"Grounded discovery found no valid same-publisher replacement for '{original_url}'.")
+        return None
