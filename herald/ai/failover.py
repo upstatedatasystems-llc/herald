@@ -27,6 +27,7 @@ from herald.ai.policy import (
     classify_error,
     decide_policy,
 )
+from herald.ai.circuit_breaker import is_circuit_breaker_active, trip_circuit_breaker
 from herald.ai.registry import create_provider, get_descriptor, is_provider_configured
 from herald.config import settings
 from herald.db.models import AIInteraction, PodcastJob
@@ -344,6 +345,33 @@ def execute_with_failover(
                 db.commit()
             continue
 
+        # 2b. Check circuit breaker status (quota/billing cooldown)
+        cb_active, cb_reason = is_circuit_breaker_active(p_id)
+        if cb_active:
+            logger.warning(f"Candidate {p_id} circuit breaker is active ({cb_reason}); skipping candidate.")
+            cb_fail = {
+                "provider": p_id,
+                "model": m_id,
+                "reason": "AI_QUOTA_EXHAUSTED",
+                "detail": f"Circuit breaker active: {cb_reason}",
+            }
+            failures_log.append(cb_fail)
+            if db:
+                record_job_diagnostic_event(
+                    job_id=job.id,
+                    level="WARNING",
+                    component="ai_failover",
+                    event_type="CIRCUIT_BREAKER_SKIPPED",
+                    message=f"Candidate {p_id} circuit breaker active, advancing chain",
+                    metadata=cb_fail,
+                    db=db,
+                )
+            curr_index += 1
+            job.ai_failover_index = curr_index
+            if db:
+                db.commit()
+            continue
+
         # 3. Instantiate provider for execution with immutable research model snapshot
         res_model = getattr(job, "research_model", None)
         prov_instance = create_provider(p_id, model_id=m_id, research_model=res_model)
@@ -462,6 +490,8 @@ def execute_with_failover(
                 raise
             except Exception as e:
                 classified = classify_error(e, provider=p_id, model=m_id, operation=operation)
+                if getattr(classified, "category", "") == "AI_QUOTA_EXHAUSTED":
+                    trip_circuit_breaker(p_id, reason=classified.safe_detail, job_id=getattr(job, "id", None), db=db)
                 has_next = (curr_index + 1) < len(chain)
                 decision = decide_policy(
                     error=classified,

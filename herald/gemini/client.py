@@ -73,6 +73,33 @@ class GeminiQuotaError(GeminiError):
     """Rate limit or quota exceeded failure."""
 
 
+class GeminiBillingExhaustedError(GeminiQuotaError):
+    """Prepayment credits or billing quota exhausted (non-transient). Never retried."""
+    error_category = "AI_QUOTA_EXHAUSTED"
+    retryable = False
+
+
+def _is_billing_exhausted_text(text: str) -> bool:
+    """Detect non-transient prepaid/billing exhaustion in provider response text."""
+    low = (text or "").lower()
+    return any(
+        m in low
+        for m in (
+            "prepayment credits are depleted",
+            "prepaid credits depleted",
+            "credits are depleted",
+            "credit balance is too low",
+            "billing balance unavailable",
+            "account quota exhausted",
+            "insufficient quota",
+            "exceeded your current quota",
+            "billing account",
+            "payment required",
+        )
+    )
+
+
+
 class GeminiValidationError(GeminiError):
     """Returned response failed schema validation."""
 
@@ -392,6 +419,8 @@ Report your comprehensive grounded findings in detail.
                     metadata={"research_depth": depth},
                 )
                 interaction_recorded = True
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -650,6 +679,8 @@ URL: {url}"""
                     provider_request_id=req_id,
                 )
                 logger.warning(f"URL Context extraction failed with HTTP {resp.status_code}")
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -1106,6 +1137,8 @@ Requirements:
                     provider_request_id=req_id,
                 )
                 interaction_recorded = True
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
                 is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
                 if is_unavail:
                     raise GeminiModelUnavailableError(
@@ -1456,6 +1489,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     metadata={"mode": mode_clean},
                 )
                 interaction_recorded = True
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
                 if attempt < max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
@@ -1479,6 +1514,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                     metadata={"mode": mode_clean},
                 )
                 interaction_recorded = True
+                if _is_billing_exhausted_text(resp.text):
+                    raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
                 is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
                 if is_unavail:
                     raise GeminiModelUnavailableError(

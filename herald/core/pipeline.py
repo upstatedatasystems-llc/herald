@@ -356,6 +356,7 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     )
             raise e
 
+        original_source_url = source_url
         try:
             art_res = extract_article_from_url(source_url)
             art_title, art_text, canon_url = art_res
@@ -367,6 +368,15 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
             ex_metrics = getattr(art_res, "metrics", {})
             extraction_meta = {
                 "extraction_method": "DIRECT_HTTP",
+                "direct_extraction_attempted": True,
+                "direct_extraction_result": "SUCCESS",
+                "fallback_eligible": False,
+                "fallback_attempted": False,
+                "fallback_method": "NONE",
+                "fallback_result": "NOT_ATTEMPTED",
+                "original_url": original_source_url,
+                "resolved_url": source_url,
+                "final_extraction_classification": "SUCCESS",
                 "url": source_url,
                 "fetched_bytes": ex_metrics.get("fetched_bytes", len(art_text.encode("utf-8"))),
                 "extracted_chars": ex_metrics.get("extracted_chars", len(art_text)),
@@ -470,99 +480,181 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 message=f"URL retrieval failed: {safe_msg}",
                 error_category=error_cat,
             )
-        except SourceAccessBlockedError as e:
-            error_cat = getattr(e, "error_category", "SOURCE_ACCESS_BLOCKED")
-            block_reason = getattr(e, "block_reason", BlockReason.PUBLIC_RETRIEVAL_BLOCK)
+        except (SourceAccessBlockedError, ArticleExtractionError) as e:
+            from herald.extraction.recovery import (
+                classify_extraction_failure,
+                find_extraction_fallback_provider,
+                validate_and_sanitize_recovered_url,
+            )
+
+            classification = classify_extraction_failure(e, original_source_url)
+            error_cat = classification["category"]
+            block_reason = classification.get("block_reason") or getattr(e, "block_reason", "EXTRACTION_FAILURE")
+            is_eligible = classification["fallback_eligible"] and mode_val != "literal"
             _, safe_msg = sanitize_error(e)
-            url_context_attempted = False
+
+            fallback_attempted = False
             fallback_result = "NOT_ATTEMPTED"
+            fallback_method = "NONE"
+            resolved_url = source_url
 
-            # URL Context may ONLY be attempted for public retrieval blocks or rate limits,
-            # never for 401/auth, paywalls, captchas, interstitials, SSRF, or Literal mode.
-            is_eligible_block = block_reason in (
-                BlockReason.PUBLIC_RETRIEVAL_BLOCK,
-                BlockReason.RATE_LIMITED,
-            )
-            can_attempt_fallback = (
-                is_eligible_block
-                and mode_val != "literal"
-                and any(is_provider_configured(c.provider_id) for c in resolved.ai_candidates)
-                and source_url
-            )
-            if can_attempt_fallback:
-                url_context_attempted = True
-                try:
-                    logger.info(f"Attempting AI URL Context fallback for blocked URL ({block_reason}): {source_url}")
-                    record_job_diagnostic_event(
-                        job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_ATTEMPT",
-                        f"Source access blocked ({block_reason}); attempting AI URL Context fallback.",
-                        metadata={"url": source_url, "original_error": error_cat, "block_reason": block_reason}, db=db,
-                    )
-                    def _call_url_ctx(p_inst, att, src):
-                        return p_inst.extract_article_via_url_context(url=source_url, job_id=job.id)
-
-                    url_ctx_result = execute_with_failover(
-                        job=job,
-                        operation="url_context_extraction",
-                        execute_fn=_call_url_ctx,
-                        db=db,
-                        required_capability="url_context_extraction",
-                    )
-                    if url_ctx_result and url_ctx_result.get("body", "").strip():
-                        # URL Context succeeded — use extracted content
-                        ctx_title = url_ctx_result.get("title", "").strip()
-                        ctx_body = url_ctx_result["body"].strip()
-                        canonical_title = ctx_title or canonical_title
-                        extracted_text = f"Title: {ctx_title}\n\n{ctx_body}" if ctx_title else ctx_body
-                        fallback_result = "SUCCESS"
-                        prov_eff = (job.ai_effective_provider or "ai").upper()
-                        record_stage_metric(
-                            job_id=job.id,
-                            stage="URL_EXTRACTION",
-                            status="SUCCESS",
-                            started_at=datetime.now(UTC),
-                            metadata_json={
-                                "extraction_method": f"{prov_eff}_URL_CONTEXT",
+            if is_eligible:
+                # 1. Conservative same-publisher / canonical URL recovery if candidate available
+                candidate_url = getattr(e, "candidate_url", None)
+                if candidate_url:
+                    try:
+                        valid_recovered = validate_and_sanitize_recovered_url(candidate_url, original_source_url)
+                        rec_res = extract_article_from_url(valid_recovered)
+                        rec_title, rec_text, rec_canon = rec_res
+                        if rec_text and len(rec_text.strip()) >= 100:
+                            canonical_title = rec_title or canonical_title
+                            source_url = rec_canon
+                            resolved_url = valid_recovered
+                            extracted_text = f"Title: {rec_title}\n\n{rec_text}" if rec_title else rec_text
+                            fallback_attempted = True
+                            fallback_method = "SAME_PUBLISHER_CANONICAL"
+                            fallback_result = "SUCCESS"
+                            extraction_meta = {
+                                "extraction_method": fallback_method,
+                                "direct_extraction_attempted": True,
+                                "direct_extraction_result": "FAILED",
                                 "direct_error_category": error_cat,
                                 "direct_error": safe_msg,
                                 "block_reason": block_reason,
+                                "fallback_eligible": True,
                                 "fallback_attempted": True,
+                                "fallback_method": fallback_method,
                                 "fallback_result": "SUCCESS",
+                                "original_url": original_source_url,
+                                "resolved_url": resolved_url,
+                                "final_extraction_classification": error_cat,
                                 "url": source_url,
-                            },
-                        )
-                        record_job_diagnostic_event(
-                            job.id, "INFO", "extraction", "URL_CONTEXT_FALLBACK_SUCCESS",
-                            f"{prov_eff} URL Context fallback succeeded ({len(ctx_body)} chars).",
-                            metadata={"url": source_url, "title": ctx_title, "body_chars": len(ctx_body)}, db=db,
-                        )
-                        record_job_diagnostic_event(
-                            job.id, "INFO", "extraction", "EXTRACTION_SUCCESS",
-                            f"{prov_eff} URL Context extraction succeeded ({len(ctx_body)} chars).",
-                            metadata={
-                                "extraction_method": f"{prov_eff}_URL_CONTEXT",
-                                "direct_error_category": error_cat,
-                                "direct_error": safe_msg,
-                                "block_reason": block_reason,
-                                "fallback_attempted": True,
-                                "fallback_result": "SUCCESS",
-                                "url": source_url,
-                                "chars": len(ctx_body),
-                            },
-                            db=db,
-                        )
-                        logger.info(f"URL Context fallback succeeded for {source_url}: {len(ctx_body)} chars")
-                    else:
-                        fallback_result = "FAILED"
-                except Exception as ctx_err:
-                    fallback_result = "FAILED"
-                    _, safe_ctx_msg = sanitize_error(ctx_err)
-                    logger.warning(f"URL Context fallback failed for {source_url}: {ctx_err}")
-                    record_job_diagnostic_event(
-                        job.id, "WARNING", "extraction", "URL_CONTEXT_FALLBACK_FAILED",
-                        f"URL Context fallback failed: {safe_ctx_msg}",
-                        metadata={"url": source_url}, db=db,
-                    )
+                                "chars": len(rec_text),
+                            }
+                            record_stage_metric(
+                                job_id=job.id,
+                                stage="URL_EXTRACTION",
+                                status="SUCCESS",
+                                started_at=datetime.now(UTC),
+                                metadata_json=extraction_meta,
+                            )
+                            record_job_diagnostic_event(
+                                job.id,
+                                "INFO",
+                                "extraction",
+                                "CANONICAL_RECOVERY_SUCCESS",
+                                f"Same-publisher recovery succeeded for {resolved_url} ({len(rec_text)} chars).",
+                                metadata=extraction_meta,
+                                db=db,
+                            )
+                            record_job_diagnostic_event(
+                                job.id,
+                                "INFO",
+                                "extraction",
+                                "EXTRACTION_SUCCESS",
+                                f"Same-publisher extraction succeeded ({len(rec_text)} chars).",
+                                metadata=extraction_meta,
+                                db=db,
+                            )
+                    except Exception as rec_err:
+                        logger.info(f"Same-publisher candidate recovery attempt failed: {rec_err}")
+
+                # 2. AI URL Context fallback (independent of user scripting provider preference)
+                if fallback_result != "SUCCESS":
+                    fb_prov_id, fb_prov = find_extraction_fallback_provider()
+                    if fb_prov and source_url:
+                        fallback_attempted = True
+                        fallback_method = f"{fb_prov_id.upper()}_URL_CONTEXT"
+                        try:
+                            logger.info(
+                                f"Attempting extraction fallback via {fb_prov_id} for {source_url} ({error_cat})"
+                            )
+                            record_job_diagnostic_event(
+                                job.id,
+                                "INFO",
+                                "extraction",
+                                "URL_CONTEXT_FALLBACK_ATTEMPT",
+                                f"Source access failed ({error_cat}); attempting {fb_prov_id} URL context fallback.",
+                                metadata={
+                                    "url": source_url,
+                                    "original_error": error_cat,
+                                    "block_reason": block_reason,
+                                    "fallback_provider": fb_prov_id,
+                                },
+                                db=db,
+                            )
+                            url_ctx_result = fb_prov.extract_article_via_url_context(url=source_url, job_id=job.id)
+                            if url_ctx_result and url_ctx_result.get("body", "").strip():
+                                ctx_title = url_ctx_result.get("title", "").strip()
+                                ctx_body = url_ctx_result["body"].strip()
+                                canonical_title = ctx_title or canonical_title
+                                extracted_text = f"Title: {ctx_title}\n\n{ctx_body}" if ctx_title else ctx_body
+                                fallback_result = "SUCCESS"
+                                extraction_meta = {
+                                    "extraction_method": fallback_method,
+                                    "direct_extraction_attempted": True,
+                                    "direct_extraction_result": "FAILED",
+                                    "direct_error_category": error_cat,
+                                    "direct_error": safe_msg,
+                                    "block_reason": block_reason,
+                                    "fallback_eligible": True,
+                                    "fallback_attempted": True,
+                                    "fallback_method": fallback_method,
+                                    "fallback_result": "SUCCESS",
+                                    "original_url": original_source_url,
+                                    "resolved_url": resolved_url,
+                                    "final_extraction_classification": error_cat,
+                                    "url": source_url,
+                                    "chars": len(ctx_body),
+                                }
+                                record_stage_metric(
+                                    job_id=job.id,
+                                    stage="URL_EXTRACTION",
+                                    status="SUCCESS",
+                                    started_at=datetime.now(UTC),
+                                    metadata_json=extraction_meta,
+                                )
+                                record_job_diagnostic_event(
+                                    job.id,
+                                    "INFO",
+                                    "extraction",
+                                    "URL_CONTEXT_FALLBACK_SUCCESS",
+                                    f"{fallback_method} succeeded ({len(ctx_body)} chars).",
+                                    metadata={
+                                        "url": source_url,
+                                        "title": ctx_title,
+                                        "body_chars": len(ctx_body),
+                                        "fallback_provider": fb_prov_id,
+                                    },
+                                    db=db,
+                                )
+                                record_job_diagnostic_event(
+                                    job.id,
+                                    "INFO",
+                                    "extraction",
+                                    "EXTRACTION_SUCCESS",
+                                    f"{fallback_method} extraction succeeded ({len(ctx_body)} chars).",
+                                    metadata=extraction_meta,
+                                    db=db,
+                                )
+                                logger.info(
+                                    f"URL context extraction fallback succeeded for {source_url}: {len(ctx_body)} chars"
+                                )
+                            else:
+                                fallback_result = "FAILED"
+                        except Exception as ctx_err:
+                            fallback_result = "FAILED"
+                            _, safe_ctx_msg = sanitize_error(ctx_err)
+                            logger.warning(f"URL context fallback failed for {source_url}: {ctx_err}")
+                            record_job_diagnostic_event(
+                                job.id,
+                                "WARNING",
+                                "extraction",
+                                "URL_CONTEXT_FALLBACK_FAILED",
+                                f"URL context fallback failed: {safe_ctx_msg}",
+                                metadata={"url": source_url, "fallback_provider": fb_prov_id},
+                                db=db,
+                            )
 
             if fallback_result != "SUCCESS":
                 # Fallback not attempted or not successful — fail the job
@@ -571,61 +663,74 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
                 except Exception as diag_err:
                     logger.warning(f"Failure diagnostics capture error: {diag_err}")
+                fail_meta = {
+                    "extraction_method": "DIRECT_HTTP",
+                    "direct_extraction_attempted": True,
+                    "direct_extraction_result": "FAILED",
+                    "direct_error_category": error_cat,
+                    "direct_error": safe_msg,
+                    "block_reason": block_reason,
+                    "fallback_eligible": is_eligible,
+                    "fallback_attempted": fallback_attempted,
+                    "fallback_method": fallback_method,
+                    "fallback_result": fallback_result,
+                    "original_url": original_source_url,
+                    "resolved_url": resolved_url,
+                    "final_extraction_classification": error_cat,
+                    "url": source_url,
+                }
                 record_stage_metric(
-                    job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
+                    job_id=job.id,
+                    stage="URL_EXTRACTION",
+                    status="FAILED",
                     started_at=datetime.now(UTC),
-                    metadata_json={
-                        "extraction_method": "DIRECT_HTTP",
-                        "direct_error_category": error_cat,
-                        "direct_error": safe_msg,
-                        "block_reason": block_reason,
-                        "fallback_attempted": url_context_attempted,
-                        "fallback_result": fallback_result,
-                        "url": source_url,
-                    },
+                    metadata_json=fail_meta,
                 )
                 record_job_diagnostic_event(
-                    job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
-                    f"Source access blocked: {safe_msg}",
-                    metadata={
-                        "extraction_method": "DIRECT_HTTP",
-                        "direct_error_category": error_cat,
-                        "direct_error": safe_msg,
-                        "block_reason": block_reason,
-                        "fallback_attempted": url_context_attempted,
-                        "fallback_result": fallback_result,
-                        "url": source_url,
-                    },
+                    job.id,
+                    "ERROR",
+                    "extraction",
+                    "EXTRACTION_FAILED",
+                    f"Article extraction failed: {safe_msg}",
+                    metadata=fail_meta,
                     db=db,
                 )
-                if mode_val == "literal":
-                    user_message = (
-                        "URL extraction blocked: Literal mode does not use AI-assisted URL retrieval. "
-                        "Please paste the article text directly into Herald."
-                    )
-                elif url_context_attempted:
-                    user_message = (
-                        "URL extraction failed: Herald could not retrieve the original public page. "
-                        "Please paste the article text directly into Herald."
-                    )
+                if error_cat == "SOURCE_ACCESS_BLOCKED":
+                    if mode_val == "literal":
+                        user_message = (
+                            "URL extraction blocked: Literal mode does not use AI-assisted URL retrieval. "
+                            "Please paste the article text directly into Herald."
+                        )
+                    elif fallback_attempted:
+                        user_message = (
+                            "URL extraction failed: Herald could not retrieve the original public page. "
+                            "Please paste the article text directly into Herald."
+                        )
+                    else:
+                        b_str = str(block_reason or "unknown").lower().replace("_", " ")
+                        user_message = (
+                            f"URL extraction failed: Access blocked ({b_str}). "
+                            "Please paste the article text directly into Herald."
+                        )
+                    job.error_detail = user_message
                 else:
-                    user_message = (
-                        f"URL extraction failed: Access blocked ({block_reason.lower().replace('_', ' ')}). "
-                        "Please paste the article text directly into Herald."
-                    )
+                    user_message = f"URL extraction failed: {safe_msg}"
+                    job.error_detail = safe_msg
+
                 transition_job_state(
-                    db, job, JobState.FAILED_FINAL.value,
-                    component="herald-core", message=user_message,
-                    error_category=error_cat, commit=False,
+                    db,
+                    job,
+                    JobState.FAILED_FINAL.value,
+                    component="herald-core",
+                    message=user_message,
+                    error_category=error_cat,
+                    commit=False,
                 )
                 job.failed_stage = "EXTRACTION"
                 job.error_code = error_cat
-                job.error_detail = user_message
                 db.commit()
                 try:
-                    from herald.services.diagnostics_export import (
-                        ensure_terminal_diagnostics_archive,
-                    )
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
@@ -638,46 +743,6 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                     message=user_message,
                     error_category=error_cat,
                 )
-        except ArticleExtractionError as e:
-            error_cat = getattr(e, "error_category", "EXTRACTION_FAILURE")
-            _, safe_msg = sanitize_error(e)
-            try:
-                from herald.services.failure_diagnostics import collect_failure_diagnostics
-                collect_failure_diagnostics(stage="extraction", error=e, target_url=source_url, job_id=job.id, db=db)
-            except Exception as diag_err:
-                logger.warning(f"Failure diagnostics capture error: {diag_err}")
-            record_stage_metric(
-                job_id=job.id, stage="URL_EXTRACTION", status="FAILED",
-                started_at=datetime.now(UTC), metadata_json={"error_category": error_cat, "url": source_url, "direct_error": safe_msg},
-            )
-            record_job_diagnostic_event(
-                job.id, "ERROR", "extraction", "EXTRACTION_FAILED",
-                f"Article extraction failed: {safe_msg}",
-                metadata={"error_category": error_cat, "url": source_url, "direct_error": safe_msg}, db=db,
-            )
-            transition_job_state(
-                db, job, JobState.FAILED_FINAL.value,
-                component="herald-core", message=f"Article extraction failed: {safe_msg}",
-                error_category=error_cat, commit=False,
-            )
-            job.failed_stage = "EXTRACTION"
-            job.error_code = error_cat
-            job.error_detail = safe_msg
-            db.commit()
-            try:
-                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
-            except Exception as arc_err:
-                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
-            return HeraldResponse(
-                job_id=job.id,
-                status=JobState.FAILED_FINAL.value,
-                request_mode=mode_val,
-                source_type=SourceType.URL.value,
-                is_duplicate=False,
-                message=f"URL extraction failed: {safe_msg}",
-                error_category=error_cat,
-            )
         except Exception as e:
             _, safe_msg = sanitize_error(e)
             try:

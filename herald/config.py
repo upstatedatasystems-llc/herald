@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     GEMINI_TIMEOUT_SECONDS: int | None = None
     AI_REQUEST_MAX_ATTEMPTS: int = 3
     GEMINI_RETRY_COUNT: int = 3
+    AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 300.0
 
     # Large-Source Adaptation Settings
     ADAPTATION_MAX_CHUNKS: int = 12

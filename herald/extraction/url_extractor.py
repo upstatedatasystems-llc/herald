@@ -24,9 +24,20 @@ class ArticleExtractionError(Exception):
     error_category = "EXTRACTION_FAILURE"
 
 
+class ArticleNotFoundError(ArticleExtractionError):
+    """Raised when an article URL returns HTTP 404 Not Found."""
+    error_category = "ARTICLE_NOT_FOUND"
+
+
+class InsufficientContentError(ArticleExtractionError):
+    """Raised when an article response contains insufficient extractable content (<100 chars)."""
+    error_category = "INSUFFICIENT_CONTENT"
+
+
 class DNSResolutionError(ArticleExtractionError):
     """Raised when DNS resolution for a URL hostname fails (network/retrieval failure)."""
     error_category = "DNS_RESOLUTION_ERROR"
+
 
 
 class BlockReason:
@@ -369,6 +380,9 @@ def extract_article_from_url(
                             block_reason=detected_reason,
                         )
 
+                    if response.status_code == 404:
+                        raise ArticleNotFoundError(f"Publisher returned HTTP 404 Not Found: {current_url}")
+
                     if response.status_code != 200:
                         raise ArticleExtractionError(f"Server returned non-200 status code: {response.status_code}")
 
@@ -479,12 +493,22 @@ def extract_article_from_url(
                     f"Publisher blocked automated retrieval (short text with {marker}): {current_url}",
                     block_reason=reason,
                 )
-        raise ArticleExtractionError("Insufficient article text extracted from page (less than 100 characters).")
+        raise InsufficientContentError("Insufficient article text extracted from page (less than 100 characters).")
 
     canonical_url = current_url
-    canonical_tag = soup.find("link", rel="canonical")
+    candidate_href = None
+    canonical_tag = soup.find("link", rel=lambda val: val and "canonical" in val.lower().split())
     if canonical_tag and canonical_tag.get("href"):
-        candidate_canonical = urljoin(current_url, canonical_tag["href"])
+        candidate_href = canonical_tag["href"]
+    else:
+        og_tag = soup.find("meta", property=lambda val: val and val.lower() == "og:url") or soup.find(
+            "meta", attrs={"name": lambda val: val and val.lower() == "og:url"}
+        )
+        if og_tag and og_tag.get("content"):
+            candidate_href = og_tag["content"]
+
+    if candidate_href:
+        candidate_canonical = urljoin(current_url, candidate_href)
         try:
             validate_url_host(candidate_canonical)
             canonical_url = candidate_canonical

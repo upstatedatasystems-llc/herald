@@ -54,14 +54,39 @@ class AIProviderError(RuntimeError):
         }
 
 
+AIError = AIProviderError
+
+
 class AIRateLimitedError(AIProviderError):
-    """Provider rate limit or quota exceeded (HTTP 429)."""
+    """Provider rate limit or temporary throttling (HTTP 429)."""
 
     def __init__(self, message: str, **kwargs):
         kwargs.setdefault("category", "AI_RATE_LIMITED")
         kwargs.setdefault("http_status", 429)
         kwargs.setdefault("retryable", True)
         super().__init__(message, **kwargs)
+
+
+class AIQuotaExhaustedError(AIProviderError):
+    """Provider quota, prepaid balance, or billing credits depleted. Never retried on same provider."""
+
+    def __init__(self, message: str, **kwargs):
+        kwargs.setdefault("category", "AI_QUOTA_EXHAUSTED")
+        kwargs.setdefault("retryable", False)
+        super().__init__(message, **kwargs)
+
+
+AIBillingExhaustedError = AIQuotaExhaustedError
+
+
+class AIResponseInvalidError(AIProviderError):
+    """Provider returned successful HTTP response (e.g. 200) but output could not be parsed into usable content."""
+
+    def __init__(self, message: str, **kwargs):
+        kwargs.setdefault("category", "AI_RESPONSE_INVALID")
+        kwargs.setdefault("retryable", True)
+        super().__init__(message, **kwargs)
+
 
 
 class AIProviderTimeoutError(AIProviderError):

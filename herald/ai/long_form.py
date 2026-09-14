@@ -591,7 +591,7 @@ Requirements:
     evidence_words = len(evidence_text.split())
     can_expand_section = (
         scope != EvidenceScope.SOURCE_ONLY
-        or (scope == EvidenceScope.SOURCE_ONLY and evidence_words >= int(budget * 0.6))
+        or (scope == EvidenceScope.SOURCE_ONLY and budget is not None and evidence_words >= int(budget * 0.6))
     )
     if budget and actual_words < int(budget * 0.8) and can_expand_section:
         logger.info(
@@ -1063,23 +1063,78 @@ def execute_unified_long_form_pipeline(
                     research_plan=r_plan,
                 )
 
-            grounded_data = execute_with_failover(
-                job=job,
-                operation="grounded_research",
-                execute_fn=_do_grounding,
-                db=db,
-                source_text=source_text or topic,
-                required_capability="research_grounding",
-            )
-            job.research_grounding_json = grounded_data
-            job.research_search_count = grounded_data.get("search_count", 0)
-            job.research_source_count = grounded_data.get("source_count", 0)
-            job.research_provider = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None)
-            if job.research_provider == "gemini":
-                job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", None) or getattr(job, "ai_effective_model", None)
-            else:
-                job.research_model = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None)
-            db.commit()
+            try:
+                grounded_data = execute_with_failover(
+                    job=job,
+                    operation="grounded_research",
+                    execute_fn=_do_grounding,
+                    db=db,
+                    source_text=source_text or topic,
+                    required_capability="research_grounding",
+                )
+                job.research_grounding_json = grounded_data
+                job.research_search_count = grounded_data.get("search_count", 0)
+                job.research_source_count = grounded_data.get("source_count", 0)
+                job.research_provider = getattr(job, "ai_effective_provider", None) or getattr(job, "ai_provider", None)
+                if job.research_provider == "gemini":
+                    job.research_model = getattr(settings, "GEMINI_RESEARCH_MODEL", None) or getattr(job, "ai_effective_model", None)
+                else:
+                    job.research_model = getattr(job, "ai_effective_model", None) or getattr(job, "ai_model", None)
+                db.commit()
+            except Exception as res_err:
+                if scope == EvidenceScope.SOURCE_PLUS_RESEARCH and source_text and len(source_text.strip()) >= 50:
+                    from herald.ai.policy import classify_exception
+                    classified_res_err = classify_exception(res_err)
+                    degraded_reason = getattr(classified_res_err, "category", "AI_RESEARCH_FAILED")
+                    logger.warning(
+                        f"Grounded research failed during SOURCE_PLUS_RESEARCH ({degraded_reason}: {res_err}); "
+                        "degrading gracefully to SOURCE_ONLY."
+                    )
+                    record_job_diagnostic_event(
+                        job.id,
+                        "WARNING",
+                        "research",
+                        "RESEARCH_DEGRADED_TO_SOURCE_ONLY",
+                        f"Supplemental research was unavailable ({degraded_reason}); falling back to source-only generation.",
+                        metadata={
+                            "reason": degraded_reason,
+                            "original_scope": scope.value if hasattr(scope, "value") else str(scope),
+                            "error": str(res_err)[:200],
+                        },
+                        db=db,
+                    )
+                    job.research_degraded = True
+                    job.research_degradation_reason = degraded_reason
+                    job.research_grounding_json = None
+                    job.research_search_count = 0
+                    job.research_source_count = 0
+                    job.research_provider = None
+                    job.research_model = None
+                    # Reset failover cursor so subsequent script generation uses the full candidate chain from index 0
+                    job.ai_failover_index = 0
+                    scope = EvidenceScope.SOURCE_ONLY
+                    grounded_data = None
+                    if status_notifier:
+                        status_notifier("Supplemental research unavailable; continuing with article-only generation...")
+                    db.commit()
+                else:
+                    if scope == EvidenceScope.RESEARCH:
+                        logger.error(f"Research failed for topic mode; research is required but unavailable: {res_err}")
+                        record_job_diagnostic_event(
+                            job.id,
+                            "ERROR",
+                            "research",
+                            "TOPIC_RESEARCH_REQUIRED_FAILED",
+                            "Research is required for topic mode but no research provider is available.",
+                            metadata={"error": str(res_err)[:200]},
+                            db=db,
+                        )
+                        from herald.ai.errors import AIError
+                        raise AIError(
+                            f"Research is required for topic mode but no research provider is available: {res_err}",
+                            category="AI_RESEARCH_REQUIRED",
+                        ) from res_err
+                    raise
 
             evidence_packet = normalize_evidence_packet(
                 topic=topic,
@@ -1174,20 +1229,32 @@ def execute_unified_long_form_pipeline(
                 "transition_intent": "Deepen the analysis with evidence synthesis",
             }
             prev_narr = completed_sections[-1]["narration"] if completed_sections else ""
-            cont_sec = generate_single_section(
-                job=job,
-                section_info=continuation_sec_def,
-                topic=topic,
-                evidence_packet=evidence_packet,
-                previous_summary=prev_narr[:250],
-                scope=scope,
-                db=db,
-            )
-            if cont_sec.get("word_count", 0) > 100:
-                completed_sections.append(cont_sec)
-                job.section_progress_json = completed_sections
-                total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
-                db.commit()
+            try:
+                cont_sec = generate_single_section(
+                    job=job,
+                    section_info=continuation_sec_def,
+                    topic=topic,
+                    evidence_packet=evidence_packet,
+                    previous_summary=prev_narr[:250],
+                    scope=scope,
+                    db=db,
+                )
+                if cont_sec.get("word_count", 0) > 100:
+                    completed_sections.append(cont_sec)
+                    job.section_progress_json = completed_sections
+                    total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
+                    db.commit()
+            except Exception as cont_err:
+                logger.warning(f"Optional continuation section generation failed non-fatally: {cont_err}")
+                record_job_diagnostic_event(
+                    job.id,
+                    "WARNING",
+                    "section_expansion",
+                    "CONTINUATION_EXPANSION_FAILED",
+                    f"Optional continuation section expansion failed non-fatally: {cont_err}",
+                    metadata={"error": str(cont_err)[:200]},
+                    db=db,
+                )
         else:
             # Source mode: only expand if source contains sufficient material; otherwise preserve faithful brevity
             src_words = len((source_ledger.get("clean_text", "") if source_ledger else (source_text or "")).split())

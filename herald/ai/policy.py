@@ -19,8 +19,10 @@ from herald.ai.errors import (
     AIProviderError,
     AIProviderTimeoutError,
     AIProviderUnavailableError,
+    AIQuotaExhaustedError,
     AIRateLimitedError,
     AIRequestTooLargeError,
+    AIResponseInvalidError,
     AISchemaInvalidError,
 )
 
@@ -114,7 +116,7 @@ def extract_retry_after(headers: Any) -> float | None:
 
 def classify_error(
     err: Exception,
-    provider: str,
+    provider: str = "unknown",
     model: str | None = None,
     operation: str | None = None,
 ) -> AIProviderError:
@@ -159,7 +161,30 @@ def classify_error(
         status_code = err.response.status_code
         headers = err.response.headers
 
-    # HTTP 429 Rate Limiting
+    # Explicit Quota / Prepayment / Billing Exhaustion (Non-transient)
+    quota_billing_markers = (
+        "prepayment credits are depleted",
+        "prepaid credits depleted",
+        "credits are depleted",
+        "credit balance is too low",
+        "billing balance unavailable",
+        "account quota exhausted",
+        "insufficient quota",
+        "exceeded your current quota",
+        "billing account",
+        "payment required",
+    )
+    if status_code == 402 or any(m in low_msg for m in quota_billing_markers):
+        return AIQuotaExhaustedError(
+            f"{provider} quota or billing exhausted: {msg}",
+            provider=provider,
+            model=model,
+            operation=operation,
+            http_status=status_code,
+            safe_detail="AI provider quota or billing credits depleted",
+        )
+
+    # HTTP 429 Rate Limiting (Transient)
     if status_code == 429 or "rate limit" in low_msg or "too many requests" in low_msg or "quota" in low_msg:
         ra = extract_retry_after(headers)
         return AIRateLimitedError(
@@ -264,6 +289,22 @@ def classify_error(
             safe_detail="AI response violated expected schema",
         )
 
+    # Output Parsing / Invalid Response Structure
+    if (
+        "unable to extract content" in low_msg
+        or "response invalid" in low_msg
+        or "invalid response structure" in low_msg
+        or "malformed response payload" in low_msg
+    ):
+        return AIResponseInvalidError(
+            f"{provider} response invalid: {msg}",
+            provider=provider,
+            model=model,
+            operation=operation,
+            http_status=status_code,
+            safe_detail="AI provider response could not be parsed into valid content",
+        )
+
     # Fallback generic provider error
     return AIProviderError(
         f"{provider} error: {msg}",
@@ -273,6 +314,9 @@ def classify_error(
         http_status=status_code,
         safe_detail=f"AI provider error: {msg[:100]}",
     )
+
+
+classify_exception = classify_error
 
 
 def decide_policy(
@@ -313,7 +357,27 @@ def decide_policy(
             )
         return RetryDecision(action=ActionType.FAIL_FINAL, reason="Source exceeds provider limits", error=error)
 
-    # 3. Deterministic Non-Retryable Errors on Current Provider: 401 Auth, 403 Permission, Model Unavailable
+    # 3a. Explicit Quota / Billing Exhaustion: Never retried on same provider, trip circuit breaker
+    if isinstance(error, AIQuotaExhaustedError):
+        try:
+            from herald.ai.circuit_breaker import trip_circuit_breaker
+            trip_circuit_breaker(error.provider or "", reason=error.safe_detail)
+        except Exception:
+            pass
+
+        if has_next_candidate:
+            return RetryDecision(
+                action=ActionType.FAILOVER_NEXT_PROVIDER,
+                reason=f"Quota/billing exhausted on current provider ({error.provider}); failing over immediately",
+                error=error,
+            )
+        return RetryDecision(
+            action=ActionType.FAIL_FINAL,
+            reason=f"Quota/billing exhausted ({error.category}) and no fallback candidates",
+            error=error,
+        )
+
+    # 3b. Deterministic Non-Retryable Errors on Current Provider: 401 Auth, 403 Permission, Model Unavailable
     if isinstance(error, (AIAuthFailedError, AIPermissionDeniedError, AIModelUnavailableError)):
         if has_next_candidate:
             return RetryDecision(
@@ -382,6 +446,23 @@ def decide_policy(
                 error=error,
             )
         return RetryDecision(action=ActionType.FAIL_FINAL, reason="Schema invalid", error=error)
+
+    # 6b. Response Invalid: 1 bounded repair
+    if isinstance(error, AIResponseInvalidError):
+        if attempt < max_attempts:
+            return RetryDecision(
+                action=ActionType.RETRY_SAME_PROVIDER,
+                backoff_seconds=1.0,
+                reason="Response invalid; attempting bounded repair",
+                error=error,
+            )
+        if has_next_candidate:
+            return RetryDecision(
+                action=ActionType.FAILOVER_NEXT_PROVIDER,
+                reason="Response parsing exhausted on current provider; failing over",
+                error=error,
+            )
+        return RetryDecision(action=ActionType.FAIL_FINAL, reason="Response invalid", error=error)
 
     # 7. Output Truncated
     if isinstance(error, AIOutputTruncatedError):

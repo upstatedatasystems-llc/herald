@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ class KokoroClient(BaseTTSEngine):
     Kokoro-FastAPI engine client over internal OpenAI-compatible speech endpoint.
     """
     _last_successful_probe_at: datetime | None = None
+    _active_syntheses: int = 0
+    _active_syntheses_lock = threading.Lock()
 
     def __init__(
         self,
@@ -37,10 +40,25 @@ class KokoroClient(BaseTTSEngine):
         self.voice = voice or settings.KOKORO_VOICE
         self.speed = speed or settings.KOKORO_SPEED
 
+    @classmethod
+    def is_synthesizing(cls) -> bool:
+        """Check if any TTS synthesis is actively executing."""
+        with cls._active_syntheses_lock:
+            if cls._active_syntheses > 0:
+                return True
+        try:
+            from herald.concurrency import get_semaphores
+            sem = get_semaphores().global_tts
+            if hasattr(sem, "_value") and sem._value == 0:
+                return True
+        except Exception:
+            pass
+        return False
+
     def health_check(self) -> dict[str, Any]:
         """
         Verify Kokoro container accessibility (/v1/models), FFmpeg availability, and test inference status.
-        Supports bounded grace period during active inference saturation.
+        Supports load-aware busy/degraded state during active synthesis and bounded grace period.
         """
         status = {
             "healthy": False,
@@ -77,20 +95,27 @@ class KokoroClient(BaseTTSEngine):
                     status["error"] = f"Kokoro /v1/models probe returned HTTP {resp.status_code}"
         except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
             last_good = KokoroClient._last_successful_probe_at
-            if last_good and (now - last_good).total_seconds() <= grace_seconds:
+            active = KokoroClient.is_synthesizing()
+            # If probe times out while active synthesis is in progress or within grace period:
+            if active or (last_good and (now - last_good).total_seconds() <= grace_seconds):
                 logger.info(
-                    f"Kokoro probe timed out during active inference window ({e}), returning degraded healthy state (last successful: {last_good.isoformat()})"
+                    f"Kokoro probe timed out during active inference window (active={active}, {e}), "
+                    f"returning degraded healthy state (last successful: {last_good.isoformat() if last_good else 'none'})"
                 )
                 status["kokoro_api"] = True
                 status["degraded"] = True
             else:
-                logger.warning(f"Kokoro probe timed out and grace period expired ({e})")
+                logger.warning(f"Kokoro probe timed out and grace period expired (active=False, {e})")
                 status["error"] = f"Kokoro probe timeout: {e}"
+        except httpx.ConnectError as e:
+            # True connection error (refused, no route) -> hard down
+            logger.warning(f"Kokoro API endpoint '{self.base_url}' connection refused/failed: {e}")
+            status["error"] = f"Kokoro connection failed: {e}"
         except Exception as e:
             logger.warning(f"Kokoro API endpoint '{self.base_url}' health check failed: {e}")
             status["error"] = str(e)
 
-        if status["ffmpeg"] and (status["kokoro_api"] or os.environ.get("HERALD_MOCK_TTS") == "1"):
+        if status["ffmpeg"] and not status["error"] and (status["kokoro_api"] or os.environ.get("HERALD_MOCK_TTS") == "1"):
             status["healthy"] = True
 
         return status
@@ -142,6 +167,9 @@ class KokoroClient(BaseTTSEngine):
         import time
         start_time = time.monotonic()
 
+        with KokoroClient._active_syntheses_lock:
+            KokoroClient._active_syntheses += 1
+
         try:
             logger.info(f"Synthesizing chunk ({len(text)} chars) with Kokoro voice '{use_voice}' (Timeout: {synthesis_timeout}s)")
             with httpx.Client(timeout=synthesis_timeout) as client:
@@ -180,3 +208,6 @@ class KokoroClient(BaseTTSEngine):
             if isinstance(e, KokoroTTSError):
                 raise
             raise KokoroTTSError(f"Kokoro synthesis failed: {e}")
+        finally:
+            with KokoroClient._active_syntheses_lock:
+                KokoroClient._active_syntheses -= 1

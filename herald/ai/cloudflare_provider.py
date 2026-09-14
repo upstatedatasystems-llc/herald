@@ -22,6 +22,7 @@ from herald.ai.errors import (
     AIProviderUnavailableError,
     AIRateLimitedError,
     AIRequestTooLargeError,
+    AIResponseInvalidError,
     AISchemaInvalidError,
 )
 from herald.ai.schema import PodcastScriptResponse
@@ -32,49 +33,109 @@ from herald.services.redaction import sanitize_error
 logger = logging.getLogger("herald.ai.cloudflare")
 
 
-def extract_cloudflare_content(resp_json: dict) -> str:
+def _safe_payload_structure(payload: Any) -> dict[str, Any]:
+    """Extract safe structural description of an envelope without leaking content or credentials."""
+    if isinstance(payload, dict):
+        diag: dict[str, Any] = {}
+        for k, v in payload.items():
+            if isinstance(v, dict):
+                diag[k] = {"type": "dict", "keys": list(v.keys())}
+            elif isinstance(v, list):
+                diag[k] = {"type": "list", "len": len(v), "elem_types": [type(x).__name__ for x in v[:3]]}
+            elif isinstance(v, str):
+                diag[k] = {"type": "str", "len": len(v)}
+            else:
+                diag[k] = {"type": type(v).__name__}
+        return diag
+    elif isinstance(payload, list):
+        return {"type": "list", "len": len(payload), "elem_types": [type(x).__name__ for x in payload[:3]]}
+    return {"type": type(payload).__name__}
+
+
+def extract_cloudflare_content(resp_json: Any) -> str:
     """
     Extract assistant text content from Cloudflare Workers AI response payload.
-    Handles 4 payload shapes:
-    1. resp_json["result"]["response"]
-    2. resp_json["result"]["choices"][0]["message"]["content"] (or result["choices"][0]["text"])
-    3. resp_json["response"]
-    4. resp_json["choices"][0]["message"]["content"] (or choices[0]["text"])
+    Handles all documented and observed Cloudflare Workers AI response shapes:
+    1. {"result": {"response": "..."}}
+    2. {"result": {"output_text": "..."}} / {"result": {"text": "..."}} / {"result": {"generated_text": "..."}}
+    3. {"result": [{"response": "..."}]} / [{"text": "..."}] / [{"output_text": "..."}] / [{"generated_text": "..."}] / ["..."]
+    4. {"result": "..."}
+    5. Direct {"response": "..."} / {"output_text": "..."} / {"text": "..."} / {"generated_text": "..."}
+    6. OpenAI-compatible choices format:
+       {"result": {"choices": [...]}} or top-level {"choices": [...]}
 
-    Raises AIProviderError if content cannot be extracted or payload is invalid.
+    If content cannot be extracted or payload is invalid:
+    Logs safe structural diagnostics and raises AIResponseInvalidError.
     """
     if isinstance(resp_json, dict):
-        # 1 & 2: result dict
         result = resp_json.get("result")
+
+        # 1, 2, 6a: result is a dict
         if isinstance(result, dict):
-            if "response" in result and isinstance(result["response"], str):
-                return result["response"]
-            if "text" in result and isinstance(result["text"], str):
-                return result["text"]
+            for key in ("response", "output_text", "text", "generated_text"):
+                if key in result and isinstance(result[key], str):
+                    return result[key]
+
             res_choices = result.get("choices")
-            if isinstance(res_choices, list) and len(res_choices) > 0 and isinstance(res_choices[0], dict):
-                msg = res_choices[0].get("message")
+            if isinstance(res_choices, list) and len(res_choices) > 0:
+                first = res_choices[0]
+                if isinstance(first, dict):
+                    msg = first.get("message")
+                    if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+                        return msg["content"]
+                    for key in ("text", "content", "response", "output_text", "generated_text"):
+                        if key in first and isinstance(first[key], str):
+                            return first[key]
+                elif isinstance(first, str):
+                    return first
+
+        # 3: result is a list
+        elif isinstance(result, list) and len(result) > 0:
+            first = result[0]
+            if isinstance(first, dict):
+                for key in ("response", "output_text", "text", "generated_text"):
+                    if key in first and isinstance(first[key], str):
+                        return first[key]
+                msg = first.get("message")
                 if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
                     return msg["content"]
-                if "text" in res_choices[0] and isinstance(res_choices[0]["text"], str):
-                    return res_choices[0]["text"]
+            elif isinstance(first, str):
+                return first
+
+        # 4: result is directly a string
         elif isinstance(result, str):
             return result
 
-        # 3: direct response field
-        if "response" in resp_json and isinstance(resp_json["response"], str):
-            return resp_json["response"]
+        # 5: direct response / output_text field at top level
+        for key in ("response", "output_text", "text", "generated_text"):
+            if key in resp_json and isinstance(resp_json[key], str):
+                return resp_json[key]
 
-        # 4: choices list (OpenAI-compatible format)
+        # 6b: choices list at top level
         choices = resp_json.get("choices")
-        if isinstance(choices, list) and len(choices) > 0 and isinstance(choices[0], dict):
-            msg = choices[0].get("message")
-            if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
-                return msg["content"]
-            if "text" in choices[0] and isinstance(choices[0]["text"], str):
-                return choices[0]["text"]
+        if isinstance(choices, list) and len(choices) > 0:
+            first = choices[0]
+            if isinstance(first, dict):
+                msg = first.get("message")
+                if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
+                    return msg["content"]
+                for key in ("text", "content", "response", "output_text", "generated_text"):
+                    if key in first and isinstance(first[key], str):
+                        return first[key]
+            elif isinstance(first, str):
+                return first
 
-    raise AIProviderError("Unable to extract content from Cloudflare Workers AI response payload", provider="cloudflare")
+    # Safe structural diagnostics (no body, prompt, or sensitive payloads)
+    structure = _safe_payload_structure(resp_json)
+    logger.warning(
+        "Unable to extract content from Cloudflare Workers AI response envelope. Structural diagnostics: %s",
+        structure,
+    )
+    raise AIResponseInvalidError(
+        "Unable to extract content from Cloudflare Workers AI response payload",
+        provider="cloudflare",
+        safe_detail=f"Envelope structure: {structure}",
+    )
 
 
 
@@ -439,7 +500,7 @@ class CloudflareProvider(AIProvider):
         result_json = resp.json()
         try:
             raw_content = extract_cloudflare_content(result_json)
-        except AIProviderError as extract_err:
+        except (AIProviderError, AIResponseInvalidError) as extract_err:
             resp_evidence = {
                 "http_status": resp.status_code,
                 "response_character_count": 0,
@@ -639,7 +700,7 @@ class CloudflareProvider(AIProvider):
             rep_json = repair_resp.json()
             try:
                 rep_raw = extract_cloudflare_content(rep_json)
-            except AIProviderError as rep_extract_err:
+            except (AIProviderError, AIResponseInvalidError) as rep_extract_err:
                 rep_resp_evidence = {
                     "http_status": repair_resp.status_code,
                     "response_character_count": 0,
@@ -754,7 +815,7 @@ class CloudflareProvider(AIProvider):
             if resp.status_code != 200:
                 self._classify_http_error(resp, operation="distillation")
             data = resp.json()
-            raw_text = self._extract_response_text(data)
+            raw_text = extract_cloudflare_content(data)
             return raw_text.strip()
         except httpx.TimeoutException:
             raise AIClientTimeoutError(

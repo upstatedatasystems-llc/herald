@@ -156,6 +156,8 @@ class PodcastJob(Base):
     resolved_default = Column(Boolean, nullable=True, default=False)
     telegram_config_message_id = Column(BigInteger, nullable=True)
     research_provider = Column(String(50), nullable=True)
+    research_degraded = Column(Boolean, nullable=True, default=False)
+    research_degradation_reason = Column(String(100), nullable=True)
 
     # Audio synthesis & telemetry tracking
     completed_chunk_index = Column(Integer, nullable=False, default=0)

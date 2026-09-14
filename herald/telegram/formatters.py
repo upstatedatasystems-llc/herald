@@ -716,6 +716,10 @@ def format_approval(
             f"{settings_line}"
         )
 
+    degraded_notice = ""
+    if getattr(job, "research_degraded", False):
+        degraded_notice = "\nℹ️ <i>Supplemental research was unavailable, so this episode was generated from the supplied article only.</i>\n"
+
     text = (
         f"{header_title}\n\n"
         f"<b>{title}</b>{desc_section}\n"
@@ -726,6 +730,7 @@ def format_approval(
         f"{ai_line}\n"
         f"• <b>Estimated Range:</b> {html.escape(eta_range)}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>\n"
+        f"{degraded_notice}"
         f"{prior_section}\n"
         f"<i>Review details above and approve to start audio synthesis:</i>"
     )
