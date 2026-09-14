@@ -351,7 +351,7 @@ def test_set_my_commands_includes_settings():
     assert "settings" in registered_names
     assert "download" in registered_names
     assert "voices" not in registered_names
-    assert {"start", "help", "download", "diagnostics", "status", "ai_check", "queue", "settings", "readme"} == registered_names
+    assert {"start", "help", "download", "diagnostics", "logs", "status", "ai_check", "queue", "settings", "readme"} == registered_names
 
 
 def test_send_audio_and_document_multipart_reply_markup_and_file_id(tmp_path, monkeypatch):

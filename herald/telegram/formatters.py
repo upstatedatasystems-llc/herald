@@ -162,6 +162,7 @@ def format_help() -> str:
         "/help — Full usage and directive reference\n"
         "/download — Download latest (or specific) episode MP3 file\n"
         "/diagnostics — View job diagnostics and download support package\n"
+        "/logs YYYY-MM-DD [HH:MM] — Owner-only log and diagnostics export\n"
         "/status — Live system health, AI status, and queue depth\n"
         "/ai_check — Fresh AI provider connection test (alias: /ai-check)\n"
         "/queue — Pending and processing jobs\n"

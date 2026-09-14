@@ -1,5 +1,7 @@
 import html
 import logging
+import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,15 @@ from herald.extraction.url_extractor import (
 )
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 from herald.services.eta_calculator import calculate_job_eta
+from herald.services.log_export import (
+    LogsArgumentError,
+    build_log_export_archive,
+    collect_matching_diagnostics,
+    collect_matching_service_logs,
+    generate_export_zip_name,
+    get_configured_timezone,
+    parse_logs_command_args,
+)
 from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
@@ -700,6 +711,115 @@ def handle_telegram_command(
             client.send_message(
                 chat_id=chat_id, text="README.md not found on server.", reply_to_message_id=msg_id
             )
+
+    elif cmd_clean == "logs":
+        owner = get_paired_owner(db)
+        is_owner = False
+        if owner is not None:
+            try:
+                is_owner = (
+                    int(user_id) == owner.telegram_user_id
+                    and int(chat_id) == owner.telegram_chat_id
+                )
+            except (ValueError, TypeError):
+                is_owner = False
+
+        if not is_owner:
+            client.send_message(
+                chat_id=chat_id,
+                text="⛔ <b>Access Denied</b>\n\nThis command is restricted to the paired owner of this Herald instance.",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            return
+
+        tz = get_configured_timezone(settings.TZ)
+        command_start_time = datetime.now(tz)
+
+        try:
+            start_dt, export_end = parse_logs_command_args(
+                args, tz=tz, now=command_start_time
+            )
+        except LogsArgumentError as lae:
+            client.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ {lae}",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+            return
+
+        try:
+            client.send_chat_action(chat_id=chat_id, action="upload_document")
+        except Exception:
+            pass
+
+        log_dir = Path(getattr(settings, "HERALD_LOG_DIR", "logs"))
+        diagnostics_dir = log_dir / "diagnostics"
+
+        temp_dir = tempfile.mkdtemp(prefix="herald_logs_export_")
+        temp_dir_path = Path(temp_dir)
+        zip_filename = generate_export_zip_name(start_dt, export_end)
+        temp_zip_path = temp_dir_path / zip_filename
+
+        try:
+            matched_logs, log_count = collect_matching_service_logs(
+                log_dir=log_dir,
+                start_dt=start_dt,
+                end_dt=export_end,
+                tz=tz,
+            )
+            matched_diags = collect_matching_diagnostics(
+                diagnostics_dir=diagnostics_dir,
+                start_dt=start_dt,
+                end_dt=export_end,
+                tz=tz,
+            )
+
+            if log_count == 0 and not matched_diags:
+                client.send_message(
+                    chat_id=chat_id,
+                    text="ℹ️ No Herald logs or diagnostics were found for that time range.",
+                    reply_to_message_id=msg_id,
+                )
+                return
+
+            build_log_export_archive(
+                output_zip_path=temp_zip_path,
+                filtered_logs=matched_logs,
+                diagnostic_zips=matched_diags,
+            )
+
+            caption = (
+                f"Herald logs\n"
+                f"From: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+                f"Through: {export_end.strftime('%Y-%m-%d %H:%M')}\n"
+                f"Timezone: {settings.TZ}"
+            )
+            client.send_document(
+                chat_id=chat_id,
+                document_path=str(temp_zip_path),
+                caption=caption,
+                reply_to_message_id=msg_id,
+            )
+        except Exception as e:
+            logger.error("Failed to export logs and diagnostics: %s", e, exc_info=True)
+            client.send_message(
+                chat_id=chat_id,
+                text="❌ <b>Export Failed</b>\n\nAn error occurred while generating or delivering the logs bundle.",
+                reply_to_message_id=msg_id,
+                parse_mode="HTML",
+            )
+        finally:
+            try:
+                if temp_zip_path.exists():
+                    temp_zip_path.unlink()
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(temp_dir_path, ignore_errors=True)
+            except Exception:
+                pass
 
     else:
         client.send_message(
