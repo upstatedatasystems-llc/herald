@@ -18,7 +18,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.batch_alter_table("podcast_jobs", schema=None) as batch_op:
-        batch_op.add_column(sa.Column("research_degraded", sa.Boolean(), nullable=True, server_default=sa.text("0")))
+        batch_op.add_column(sa.Column("research_degraded", sa.Boolean(), nullable=True, server_default=sa.false()))
         batch_op.add_column(sa.Column("research_degradation_reason", sa.String(length=100), nullable=True))
 
 
