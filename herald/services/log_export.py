@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 from herald.config import settings
@@ -154,10 +154,16 @@ def generate_export_zip_name(start_dt: datetime, end_dt: datetime) -> str:
     return f"herald-logs-{s_str}-to-{e_str}.zip"
 
 
-def parse_log_timestamp(line: str, tz: tzinfo) -> datetime | None:
+def parse_log_timestamp(line: str, tz: tzinfo | None = None) -> datetime | None:
     """
     Extract and parse the leading timestamp from a standard Herald log line.
-    Returns timezone-aware datetime in tz, or None if the line does not start with a valid timestamp.
+
+    Herald's persisted service log timestamps are emitted in the container/runtime
+    timezone, which is UTC in the supported deployment.
+    /logs request boundaries remain in settings.TZ; aware datetime comparison
+    handles the conversion naturally.
+
+    Returns timezone-aware datetime in UTC, or None if the line does not start with a valid timestamp.
     """
     m = _LOG_TIMESTAMP_REGEX.match(line)
     if not m:
@@ -168,7 +174,7 @@ def parse_log_timestamp(line: str, tz: tzinfo) -> datetime | None:
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.strptime(raw_ts, fmt)
-            return dt.replace(tzinfo=tz)
+            return dt.replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -178,7 +184,7 @@ def filter_log_file_content(
     content: str,
     start_dt: datetime,
     end_dt: datetime,
-    tz: tzinfo,
+    tz: tzinfo | None = None,
 ) -> tuple[str, int]:
     """
     Filter the lines of a log file, keeping only records whose initial timestamp
@@ -197,7 +203,7 @@ def filter_log_file_content(
     matching_record_count = 0
 
     for line in lines:
-        ts = parse_log_timestamp(line, tz)
+        ts = parse_log_timestamp(line)
         if ts is not None:
             # Beginning of a new log record
             if start_dt <= ts <= end_dt:
@@ -218,7 +224,7 @@ def collect_matching_service_logs(
     log_dir: Path,
     start_dt: datetime,
     end_dt: datetime,
-    tz: tzinfo,
+    tz: tzinfo | None = None,
 ) -> tuple[dict[str, str], int]:
     """
     Scan persistent service log files in log_dir, filter their records by timestamp,
@@ -254,7 +260,7 @@ def collect_matching_service_logs(
         try:
             raw_content = file_path.read_text(encoding="utf-8", errors="replace")
             filtered_content, count = filter_log_file_content(
-                raw_content, start_dt, end_dt, tz
+                raw_content, start_dt, end_dt
             )
             if count > 0 and filtered_content.strip():
                 rel_path = f"logs/{file_path.name}"

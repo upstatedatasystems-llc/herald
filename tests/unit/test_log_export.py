@@ -260,6 +260,41 @@ def test_denied_caller_no_filesystem_touch(db_session, monkeypatch, tmp_path):
 # 3. SERVICE LOG FILTERING & MULTILINE RECORDS
 # ==============================================================================
 
+def test_regression_service_log_filtering_utc_timestamps_with_local_request_window():
+    """
+    Regression test for production issue:
+    User request window is in settings.TZ (America/New_York, EDT = UTC-4):
+        start = 2026-09-13 00:00 EDT (= 2026-09-13 04:00 UTC)
+        end   = 2026-09-14 09:05 EDT (= 2026-09-14 13:05 UTC)
+    Persisted service-log timestamps are in UTC.
+    """
+    local_tz = get_configured_timezone("America/New_York")
+    start = datetime(2026, 9, 13, 0, 0, 0, tzinfo=local_tz)
+    end = datetime(2026, 9, 14, 9, 5, 0, tzinfo=local_tz)
+
+    sample_log = """2026-09-13 03:59:59,999 [INFO] [worker] Record before local start (03:59:59 UTC = 23:59:59 EDT previous day)
+2026-09-13 04:00:00,000 [INFO] [worker] Record at local start (04:00:00 UTC = 00:00:00 EDT)
+2026-09-14 10:43:19,100 [INFO] [herald.worker] Job diagnostic event recorded
+2026-09-14 11:25:50,123 [INFO] [herald.bot] Processing request
+Traceback (most recent call last):
+  File "bot.py", line 10
+RuntimeError: test failure
+2026-09-14 13:05:00,000 [INFO] [worker] Record at local end (13:05:00 UTC = 09:05:00 EDT)
+2026-09-14 13:05:01,000 [INFO] [worker] Record after local end (13:05:01 UTC = 09:05:01 EDT)
+"""
+
+    filtered, count = filter_log_file_content(sample_log, start, end, local_tz)
+
+    assert "Record before local start" not in filtered
+    assert "Record at local start" in filtered
+    assert "Job diagnostic event recorded" in filtered
+    assert "Processing request" in filtered
+    assert "RuntimeError: test failure" in filtered
+    assert "Record at local end" in filtered
+    assert "Record after local end" not in filtered
+    assert count == 4
+
+
 def test_service_log_filtering_boundaries_and_multiline():
     """
     12-17. Verifies:
@@ -269,28 +304,33 @@ def test_service_log_filtering_boundaries_and_multiline():
     - Records after export_end excluded (15)
     - Multiline traceback lines stay attached to included parent record (16)
     - Multiline records before cutoff are entirely excluded (17)
+
+    Window in settings.TZ (EDT = UTC-4):
+        start = 2026-09-13 18:30:00 EDT (= 2026-09-13 22:30:00 UTC)
+        end   = 2026-09-14 08:00:00 EDT (= 2026-09-14 12:00:00 UTC)
+    Persisted log lines are in UTC.
     """
     tz = get_configured_timezone("America/New_York")
     start = datetime(2026, 9, 13, 18, 30, 0, tzinfo=tz)
     end = datetime(2026, 9, 14, 8, 0, 0, tzinfo=tz)
 
-    sample_log = """2026-09-13 18:29:59,999 [INFO] [worker] Record before cutoff
+    sample_log = """2026-09-13 22:29:59,999 [INFO] [worker] Record before cutoff
 Traceback (most recent call last):
   File "test.py", line 1, in <module>
 RuntimeError: should be excluded entirely
-2026-09-13 18:30:00,000 [INFO] [worker] Record exactly at cutoff
-2026-09-13 20:15:00,123 [ERROR] [daemon] Job failed
+2026-09-13 22:30:00,000 [INFO] [worker] Record exactly at cutoff
+2026-09-14 00:15:00,123 [ERROR] [daemon] Job failed
 Traceback (most recent call last):
   File "runner.py", line 42, in run
     raise ValueError("Something broke")
 ValueError: Something broke
-2026-09-14 07:59:59,500 [INFO] [worker] Record within window
-2026-09-14 08:00:00,000 [INFO] [worker] Record exactly at end boundary
-2026-09-14 08:00:01,000 [INFO] [worker] Record after end boundary
+2026-09-14 11:59:59,500 [INFO] [worker] Record within window
+2026-09-14 12:00:00,000 [INFO] [worker] Record exactly at end boundary
+2026-09-14 12:00:01,000 [INFO] [worker] Record after end boundary
 Another continuation line from excluded record
 """
 
-    filtered, count = filter_log_file_content(sample_log, start, end, tz)
+    filtered, count = filter_log_file_content(sample_log, start, end)
 
     assert count == 4
     # Check that excluded record and its traceback are gone
