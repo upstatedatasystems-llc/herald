@@ -10,7 +10,10 @@ F. Herald pronunciation A/B testing (conservative default vs. candidate override
 """
 
 import json
+import math
+import struct
 import sys
+import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +21,7 @@ from herald.audio.branding import (
     render_intro_narration,
     synthesize_branding_segment,
 )
+from herald.audio.ffmpeg_builder import measure_wav_silence
 from herald.audio.pause_policy import (
     PAUSE_BRANDING,
     PAUSE_BY_BOUNDARY,
@@ -284,3 +288,83 @@ def test_herald_candidate_override_changes_spoken_only():
     assert len(res.transformations) == 1
     assert res.transformations[0].original == "Herald"
     assert res.transformations[0].spoken == "HAIR-uld"
+
+
+# ==============================================================================
+# G. Phase 2 Closeout Verifications (Packaging & Silence Measurement)
+# ==============================================================================
+def test_test_reel_packaged_in_worker_dockerfile():
+    """Verify tools directory is copied into the worker Docker image."""
+    root_dir = Path(__file__).parent.parent.parent
+    dockerfile = root_dir / "docker" / "Dockerfile.worker"
+    assert dockerfile.exists()
+    content = dockerfile.read_text(encoding="utf-8")
+    assert "COPY tools/ ./tools/" in content
+
+
+def test_synthetic_wav_silence_measurement(tmp_path: Path):
+    """Verify synthetic WAV with known silence regions measures approximately expected durations."""
+    wav_path = tmp_path / "synthetic_silence.wav"
+    rate = 24000
+    # 150 ms leading silence (3600 samples)
+    # 1000 ms active audio (24000 samples, 440 Hz tone, amplitude 6000)
+    # 350 ms trailing silence (8400 samples, low background dither amplitude 150)
+    samples: list[int] = [0] * 3600
+    for i in range(24000):
+        samples.append(int(6000 * math.sin(2 * math.pi * 440 * i / rate)))
+    for i in range(8400):
+        samples.append(int(150 * math.sin(i)))
+
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+    res = measure_wav_silence(wav_path)
+    assert res["leading_silence_s"] is not None
+    assert res["trailing_silence_s"] is not None
+    assert abs(res["leading_silence_s"] - 0.150) < 0.02
+    assert abs(res["trailing_silence_s"] - 0.350) < 0.02
+
+
+def test_zero_silence_wav_measurement(tmp_path: Path):
+    """Verify active audio from sample 0 to end reports zero silence."""
+    wav_path = tmp_path / "zero_silence.wav"
+    rate = 24000
+    samples = [int(6000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(12000)]
+
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+    res = measure_wav_silence(wav_path)
+    assert res["leading_silence_s"] == 0.0
+    assert res["trailing_silence_s"] == 0.0
+
+
+def test_silence_measurement_failure_reports_none(tmp_path: Path):
+    """Verify measurement failure reports None rather than falsely reporting 0.0."""
+    non_existent = tmp_path / "missing.wav"
+    res = measure_wav_silence(non_existent)
+    assert res["leading_silence_s"] is None
+    assert res["trailing_silence_s"] is None
+
+    empty_wav = tmp_path / "empty.wav"
+    empty_wav.write_bytes(b"")
+    res_empty = measure_wav_silence(empty_wav)
+    assert res_empty["leading_silence_s"] is None
+    assert res_empty["trailing_silence_s"] is None
+
+
+def test_semantic_pause_policy_remains_unchanged():
+    """Verify pause durations remain identical to approved Phase 2 values."""
+    assert PAUSE_TECHNICAL_SPLIT == 0.0
+    assert PAUSE_SENTENCE == 0.5
+    assert PAUSE_PARAGRAPH == 0.8
+    assert PAUSE_SECTION == 1.2
+    assert PAUSE_BRANDING == 1.2
+    assert PAUSE_PADDING_START == 0.8
+    assert PAUSE_PADDING_END == 0.8

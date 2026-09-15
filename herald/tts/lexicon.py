@@ -14,7 +14,8 @@ from typing import Any
 logger = logging.getLogger("herald.tts.lexicon")
 
 DEFAULT_LEXICON: dict[str, str] = {
-    # Product protection (Herald stays Herald by default unless overridden)
+    # Product protection: Accepted production default following human listening verification.
+    # Canonical 'Herald' -> Spoken 'Herald' (Variant A). Candidate 'HAIR-uld' was tested and rejected.
     "Herald": "Herald",
     # Astronomical / Physical identifiers
     "JWST": "J W S T",

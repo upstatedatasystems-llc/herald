@@ -26,13 +26,25 @@ from herald.config import settings
 logger = logging.getLogger("herald.audio.ffmpeg")
 
 
-def measure_wav_silence(file_path: Path, threshold_amplitude: int = 500) -> dict[str, float]:
+def measure_wav_silence(
+    file_path: Path,
+    threshold_amplitude: int | None = None,
+    threshold_db: float = -38.0,
+    window_ms: int = 10,
+) -> dict[str, float | None]:
     """Measure leading and trailing silence duration in seconds for a 16-bit PCM WAV file.
 
     Non-destructive inspection using standard library wave module.
+    Uses windowed RMS energy detection (default window: 10ms, threshold: -38.0 dBFS)
+    to accurately distinguish active speech from ambient silence or vocoder noise floor.
+
+    Returns:
+        dict with:
+            "leading_silence_s": float duration in seconds, or None if unmeasurable
+            "trailing_silence_s": float duration in seconds, or None if unmeasurable
     """
     if not file_path.exists() or file_path.stat().st_size == 0:
-        return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+        return {"leading_silence_s": None, "trailing_silence_s": None}
 
     try:
         with wave.open(str(file_path), "rb") as w:
@@ -42,36 +54,73 @@ def measure_wav_silence(file_path: Path, threshold_amplitude: int = 500) -> dict
             n_frames = w.getnframes()
 
             if framerate <= 0 or n_frames <= 0 or sampwidth != 2:
-                return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+                return {"leading_silence_s": None, "trailing_silence_s": None}
 
             raw_frames = w.readframes(n_frames)
             total_samples = n_frames * n_channels
             fmt = f"<{total_samples}h"
             samples = struct.unpack(fmt, raw_frames[: total_samples * 2])
 
+            # Authoritative silence threshold in RMS:
+            # -38.0 dBFS corresponds to RMS ~413 out of 32767 full-scale.
+            if threshold_amplitude is not None:
+                threshold_rms = float(threshold_amplitude)
+            else:
+                threshold_rms = 32767.0 * (10.0 ** (threshold_db / 20.0))
+
+            # Window length in frames (e.g. 10ms = 240 frames at 24kHz)
+            window_frames = max(1, int(framerate * (window_ms / 1000.0)))
+            window_samples = window_frames * n_channels
+
+            num_windows = total_samples // window_samples
+            if num_windows == 0:
+                # File shorter than 1 window: compute global RMS
+                mean_sq = sum(s * s for s in samples) / float(max(1, total_samples))
+                rms = math.sqrt(mean_sq)
+                dur = round(n_frames / float(framerate), 3)
+                if rms < threshold_rms:
+                    return {"leading_silence_s": dur, "trailing_silence_s": dur}
+                return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+
+            # Evaluate activity for each window using RMS
+            window_active: list[bool] = []
+            for w_idx in range(num_windows):
+                start = w_idx * window_samples
+                end = start + window_samples
+                w_slice = samples[start:end]
+                mean_sq = sum(s * s for s in w_slice) / float(window_samples)
+                w_rms = math.sqrt(mean_sq)
+                window_active.append(w_rms >= threshold_rms)
+
             first_active = -1
             last_active = -1
-
-            for idx, s in enumerate(samples):
-                if abs(s) >= threshold_amplitude:
+            for idx, is_act in enumerate(window_active):
+                if is_act:
                     if first_active == -1:
                         first_active = idx
                     last_active = idx
 
+            # Complete silence throughout the entire file
             if first_active == -1:
                 dur = round(n_frames / float(framerate), 3)
                 return {"leading_silence_s": dur, "trailing_silence_s": dur}
 
-            leading_frames = first_active // n_channels
-            trailing_frames = (total_samples - 1 - last_active) // n_channels
+            # Leading silence: frames before the first active window
+            leading_frames = first_active * window_frames
+            leading_s = max(0.0, round(leading_frames / float(framerate), 3))
+
+            # Trailing silence: frames after the last active window plus any remainder
+            trailing_windows = (num_windows - 1) - last_active
+            trailing_frames = (trailing_windows * window_frames) + (n_frames - (num_windows * window_frames))
+            trailing_s = max(0.0, round(trailing_frames / float(framerate), 3))
 
             return {
-                "leading_silence_s": max(0.0, round(leading_frames / float(framerate), 3)),
-                "trailing_silence_s": max(0.0, round(trailing_frames / float(framerate), 3)),
+                "leading_silence_s": leading_s,
+                "trailing_silence_s": trailing_s,
             }
     except Exception as e:
         logger.debug(f"Failed to measure WAV silence on '{file_path}': {e}")
-        return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+        return {"leading_silence_s": None, "trailing_silence_s": None}
 
 
 class FFmpegExecutionError(Exception):

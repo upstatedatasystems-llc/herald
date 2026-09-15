@@ -469,8 +469,10 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             if c.local_path and Path(c.local_path).exists():
                 try:
                     s_info = measure_wav_silence(Path(c.local_path))
-                    silence_ms["leading_silence_ms"] = int(round(s_info["leading_silence_s"] * 1000))
-                    silence_ms["trailing_silence_ms"] = int(round(s_info["trailing_silence_s"] * 1000))
+                    lead_s = s_info.get("leading_silence_s")
+                    trail_s = s_info.get("trailing_silence_s")
+                    silence_ms["leading_silence_ms"] = int(round(lead_s * 1000)) if lead_s is not None else None
+                    silence_ms["trailing_silence_ms"] = int(round(trail_s * 1000)) if trail_s is not None else None
                 except Exception:
                     pass
 
@@ -527,8 +529,8 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     "voice": meta.get("voice") or job.kokoro_voice or getattr(settings, "KOKORO_VOICE", "af_heart"),
                     "speed": meta.get("speed") or job.kokoro_speed or getattr(settings, "KOKORO_SPEED", 1.0),
                     "audio_duration": winfo.get("duration_seconds") if winfo else None,
-                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)),
-                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)),
+                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)) if s_info.get("leading_silence_s") is not None else None,
+                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)) if s_info.get("trailing_silence_s") is not None else None,
                 })
                 break
 
@@ -555,8 +557,8 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     "voice": meta.get("voice") or job.kokoro_voice or getattr(settings, "KOKORO_VOICE", "af_heart"),
                     "speed": meta.get("speed") or job.kokoro_speed or getattr(settings, "KOKORO_SPEED", 1.0),
                     "audio_duration": winfo.get("duration_seconds") if winfo else None,
-                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)),
-                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)),
+                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)) if s_info.get("leading_silence_s") is not None else None,
+                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)) if s_info.get("trailing_silence_s") is not None else None,
                 })
                 break
 

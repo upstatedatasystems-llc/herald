@@ -19,6 +19,7 @@ COPY apps/ ./apps/
 COPY migrations/ ./migrations/
 COPY prompts/ ./prompts/
 COPY scripts/ ./scripts/
+COPY tools/ ./tools/
 
 # Install python dependencies and herald package
 RUN pip install --no-cache-dir -e .

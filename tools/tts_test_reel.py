@@ -256,8 +256,10 @@ def run_test_reel(
                 dur = float(info["duration_seconds"]) if info else 0.0
 
             s_info = measure_wav_silence(wav_file)
-            lead_ms = int(round(s_info["leading_silence_s"] * 1000))
-            trail_ms = int(round(s_info["trailing_silence_s"] * 1000))
+            lead_s = s_info.get("leading_silence_s")
+            trail_s = s_info.get("trailing_silence_s")
+            lead_ms = int(round(lead_s * 1000)) if lead_s is not None else None
+            trail_ms = int(round(trail_s * 1000)) if trail_s is not None else None
 
             item["wav_path"] = str(wav_file)
             item["audio_duration"] = dur
@@ -269,7 +271,12 @@ def run_test_reel(
             boundary_types.append(item["boundary_type"])
             pause_durations.append(item["pause_duration_ms"] / 1000.0)
 
-            print(f"    -> Success ({dur:.2f}s, leading: {lead_ms}ms, trailing: {trail_ms}ms)")
+            lead_disp = f"{lead_ms}ms" if lead_ms is not None else "N/A"
+            trail_disp = f"{trail_ms}ms" if trail_ms is not None else "N/A"
+            print(
+                f"    -> Success ({dur:.2f}s, natural silence: lead={lead_disp}, trail={trail_disp} | "
+                f"inserted pause: {item['pause_duration_ms']}ms)"
+            )
 
         except Exception as exc:
             err_msg = str(exc)

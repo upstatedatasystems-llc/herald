@@ -20,3 +20,4 @@ def test_dockerfiles_structure():
 
     assert "COPY herald/ ./herald/" in worker_content
     assert "COPY apps/ ./apps/" in worker_content
+    assert "COPY tools/ ./tools/" in worker_content
