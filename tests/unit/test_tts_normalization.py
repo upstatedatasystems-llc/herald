@@ -13,7 +13,7 @@ G. Transformation trace diagnostics
 import json
 from pathlib import Path
 
-from herald.tts.lexicon import PronunciationLexicon, load_lexicon
+from herald.tts.lexicon import load_lexicon
 from herald.tts.normalizer import normalize_for_speech
 
 

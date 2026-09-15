@@ -68,18 +68,17 @@ def calculate_script_duration(
     speed = float(kokoro_speed or 1.0)
     wpm_effective = effective_base_wpm * speed
 
-    # 4. Semantic boundary pause overheads (sentence, paragraph, section, branding)
+    # 4. Semantic boundary pause overheads (sections/branding baseline + paragraphs + sentences)
     total_paragraphs = 0
     for narration in all_narrations:
         paras = [p for p in re.split(r"\n\s*\n|\r\n\s*\r\n", narration) if p.strip()]
         total_paragraphs += max(1, len(paras))
 
     section_count = len(segments)
-    branding_pauses = 2.4  # Intro and outro boundary padding
-    section_pauses = max(0, section_count - 1) * 1.2
-    paragraph_pauses = max(0, total_paragraphs - section_count) * 0.8
-    intra_sentence_pauses = max(0, sentence_count - total_paragraphs) * 0.5
-    pause_allowance_sec = branding_pauses + section_pauses + paragraph_pauses + intra_sentence_pauses
+    section_pause_allowance = section_count * 1.5
+    paragraph_pause_allowance = max(0, total_paragraphs - section_count) * 0.5
+    sentence_pause_allowance = max(0, sentence_count - total_paragraphs) * 0.25
+    pause_allowance_sec = section_pause_allowance + paragraph_pause_allowance + sentence_pause_allowance
     speech_duration_sec = (total_words / wpm_effective) * 60.0 if total_words > 0 else 0.0
 
     predicted_seconds = (

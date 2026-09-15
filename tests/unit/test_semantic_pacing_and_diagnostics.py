@@ -17,17 +17,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from herald.audio.ffmpeg_builder import (
-    PAUSE_PARAGRAPH,
-    PAUSE_SECTION,
-    PAUSE_SENTENCE,
-    PAUSE_TECHNICAL_SPLIT,
     join_and_normalize_audio,
     measure_wav_silence,
 )
 from herald.db.models import Base, PodcastJob, PodcastTTSChunk
 from herald.services.diagnostics_export import generate_job_diagnostics_zip
 from herald.services.eta_calculator import calculate_script_duration
-from herald.tts.chunker import BoundaryType
 
 
 def create_pcm_wav(path: Path, sample_rate: int = 24000, leading_silence_samples: int = 2400, active_samples: int = 4800, trailing_silence_samples: int = 2400):
@@ -91,6 +86,7 @@ def test_join_and_normalize_audio_semantic_pauses(tmp_path: Path):
             pause_durations=pause_durations,
             job_id="test-pacing-job",
         )
+        assert res["duration_seconds"] > 0
 
         # TECHNICAL_SPLIT has 0.0 pause, so generate_silence_wav must NOT be called for c1's pause!
         # Only padding_start (0.8s), c2 pause (0.8s), and padding_end (0.8s) should be generated

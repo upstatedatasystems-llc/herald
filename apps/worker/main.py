@@ -375,7 +375,8 @@ def process_next_scripting_job(db: Session, worker_id: str = "herald-worker") ->
     with WorkerLeaseHeartbeat(job.id, worker_id, lease_seconds=600, interval_seconds=30):
         try:
             from herald.core.pipeline import execute_script_generation
-            gen_resp = execute_script_generation(
+
+            _ = execute_script_generation(
                 db=db,
                 job=job,
                 hold_for_approval=confirm_tts,
@@ -653,7 +654,10 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     pub_name = None
 
             if getattr(settings, "BRANDING_INTRO_ENABLED", True):
-                from herald.audio.branding import render_intro_narration, synthesize_branding_segment
+                from herald.audio.branding import (
+                    render_intro_narration,
+                    synthesize_branding_segment,
+                )
 
                 try:
                     intro_text = render_intro_narration(
@@ -685,7 +689,10 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     logger.warning(f"Intro branding synthesis failed non-fatally: {b_err}")
 
             if getattr(settings, "BRANDING_OUTRO_ENABLED", True):
-                from herald.audio.branding import render_outro_narration, synthesize_branding_segment
+                from herald.audio.branding import (
+                    render_outro_narration,
+                    synthesize_branding_segment,
+                )
 
                 try:
                     outro_text = render_outro_narration()

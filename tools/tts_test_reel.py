@@ -32,7 +32,7 @@ from herald.audio.ffmpeg_builder import (
     validate_audio_file,
 )
 from herald.config import settings
-from herald.tts.chunker import BoundaryType, chunk_podcast_script
+from herald.tts.chunker import chunk_podcast_script
 from herald.tts.kokoro_client import KokoroClient
 
 TEST_REEL_SEGMENTS = [
