@@ -202,9 +202,15 @@ def run_quality_gate(
         # Check TTS-risk markup
         for pat, desc in TTS_RISK_PATTERNS:
             if re.search(pat, narr_raw, re.IGNORECASE):
+                if "URL" in desc:
+                    w_code = "TTS_UNEXPANDED_URL"
+                elif "Markdown" in desc or "tag" in desc or "LaTeX" in desc:
+                    w_code = "TTS_SUSPICIOUS_MARKUP"
+                else:
+                    w_code = "TTS_RISK_MARKUP"
                 warnings.append(
                     QualityWarning(
-                        code="TTS_RISK_MARKUP",
+                        code=w_code,
                         message=f"Section {idx} contains risky TTS markup: {desc}",
                         section_index=idx,
                         severity=QualitySeverity.WARNING,

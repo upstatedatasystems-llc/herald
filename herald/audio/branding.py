@@ -17,22 +17,48 @@ from herald.tts.kokoro_client import KokoroClient
 
 logger = logging.getLogger("herald.audio.branding")
 
+INTRO_EPISODE_TEMPLATE = "This is {platform_name}. Today's episode is '{episode_title}'."
+INTRO_EPISODE_DURATION_TEMPLATE = (
+    "This is {platform_name}. Today's episode is '{episode_title}', running approximately {target_minutes} minutes."
+)
+INTRO_REPORTING_TEMPLATE = "Based on reporting from {publisher}."
+INTRO_CLOSING = "Let's begin."
+
 INTRO_FIXED_TEMPLATE = (
-    "This is {platform_name}, an open-source podcast generation platform. "
-    "You're listening to an approximately {target_minutes}-minute podcast about {topic}. Enjoy."
+    "This is {platform_name}. Today's episode is '{topic}', running approximately {target_minutes} minutes. Let's begin."
 )
 
 INTRO_GENERAL_TEMPLATE = (
-    "This is {platform_name}, an open-source podcast generation platform. "
-    "You're listening to a podcast about {topic}. Enjoy."
+    "This is {platform_name}. Today's episode is '{topic}'. Let's begin."
 )
 
 OUTRO_TEMPLATE = "You've been listening to {platform_name}, the open-source podcast generation platform."
 
 
+def sanitize_publisher_name(raw_publisher: str | None) -> str | None:
+    """Sanitize publisher name to prevent dangling phrases, URLs, or malformed attribution."""
+    if not raw_publisher:
+        return None
+    clean = str(raw_publisher).strip()
+    if "://" in clean or clean.startswith("www."):
+        try:
+            clean = urlparse(clean if "://" in clean else f"https://{clean}").netloc.replace("www.", "")
+        except Exception:
+            return None
+
+    clean = re.sub(r"<[^>]+>", "", clean)
+    clean = re.sub(r"[*_`#~]", "", clean)
+    clean = clean.strip(" '\"`.,:;!?–—()[]{}")
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    if not clean or clean.lower() in ("at", "enjoy", "http", "https", "www", "unknown", "n/a", "none", "today's topic"):
+        return None
+    return clean
+
+
 def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
-    """
-    Sanitize and normalize a topic string for natural-sounding speech in the intro.
+    """Sanitize and normalize an episode title or topic string for natural speech.
+
     Strips raw URLs, protocols, domains, query strings, file extensions,
     markdown formatting, HTML tags, excess whitespace, and trailing punctuation.
     """
@@ -46,14 +72,10 @@ def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
         try:
             parsed = urlparse(clean if "://" in clean else f"https://{clean}")
             path = parsed.path.strip("/")
-            # If path exists, try to extract meaningful slug/words
             if path:
-                # Remove common file extensions like .html, .htm, .php
                 path_clean = re.sub(r"\.[a-zA-Z0-9]+$", "", path)
-                # Split path by slashes to get path components
                 path_segments = [p for p in path_clean.strip("/").split("/") if p and not p.isdigit()]
                 if path_segments:
-                    # Take the final meaningful path segment (the article slug)
                     slug = path_segments[-1]
                     words = [w for w in re.split(r"[-_]+", slug) if w]
                     clean = " ".join(words).title()
@@ -79,7 +101,6 @@ def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
         return "today's topic"
 
     if len(clean) > max_chars:
-        # Bounded truncation at word boundary
         truncated = clean[:max_chars].rsplit(" ", 1)[0].strip()
         clean = truncated or clean[:max_chars]
 
@@ -87,47 +108,60 @@ def sanitize_branding_topic(raw_topic: str | None, max_chars: int = 80) -> str:
 
 
 def render_intro_narration(
-    topic: str | None,
-    target_minutes: str | int | None,
+    topic: str | None = None,
+    target_minutes: str | int | None = None,
     actual_body_duration_seconds: float | None = None,
     content_mode: str | None = None,
+    episode_title: str | None = None,
+    publisher: str | None = None,
+    source_title: str | None = None,
 ) -> str:
-    """
-    Render deterministic intro narration string.
-    Uses INTRO_FIXED_TEMPLATE when target_minutes is a specific duration (e.g. 10, 20, 30, 45, 60),
-    and INTRO_GENERAL_TEMPLATE for 'auto', 'literal', or unspecified duration.
+    """Render deterministic intro narration string using controlled conditional templates.
 
+    Separates episode title, source headline, and publisher attribution.
     Truthfulness guarantee:
-    If actual synthesized body duration materially underfilled the requested duration
-    (e.g. requested 60m but source only supported an 8m episode), announces the actual
-    rounded duration instead of misleading the listener.
+    If actual synthesized body duration materially underfilled the requested duration,
+    announces the actual rounded duration.
     """
     platform_name = getattr(settings, "BRANDING_PLATFORM_NAME", "Herald")
-    clean_topic = sanitize_branding_topic(topic)
+    raw_title = episode_title or source_title or topic
+    clean_title = sanitize_branding_topic(raw_title)
 
-    if content_mode and str(content_mode).lower().strip() == "literal":
-        return INTRO_GENERAL_TEMPLATE.format(platform_name=platform_name, topic=clean_topic)
+    clean_pub = sanitize_publisher_name(publisher)
 
     t_str = str(target_minutes).lower().strip() if target_minutes is not None else ""
+    has_duration = (
+        t_str
+        and t_str.isdigit()
+        and int(t_str) > 0
+        and not (content_mode and str(content_mode).lower().strip() == "literal")
+    )
 
-    if t_str and t_str.isdigit() and int(t_str) > 0:
+    if has_duration:
         req_mins = int(t_str)
         effective_mins = req_mins
-
         if actual_body_duration_seconds is not None and actual_body_duration_seconds > 0:
             act_mins = max(1, round(actual_body_duration_seconds / 60.0))
-            # If actual duration is materially under target (less than 60% of target),
-            # use actual duration so the intro claim is truthful.
             if act_mins < req_mins * 0.6:
                 effective_mins = act_mins
 
-        return INTRO_FIXED_TEMPLATE.format(
+        lead = INTRO_EPISODE_DURATION_TEMPLATE.format(
             platform_name=platform_name,
+            episode_title=clean_title,
             target_minutes=effective_mins,
-            topic=clean_topic,
+        )
+    else:
+        lead = INTRO_EPISODE_TEMPLATE.format(
+            platform_name=platform_name,
+            episode_title=clean_title,
         )
 
-    return INTRO_GENERAL_TEMPLATE.format(platform_name=platform_name, topic=clean_topic)
+    parts = [lead]
+    if clean_pub:
+        parts.append(INTRO_REPORTING_TEMPLATE.format(publisher=clean_pub))
+    parts.append(INTRO_CLOSING)
+
+    return " ".join(parts)
 
 
 def render_outro_narration() -> str:

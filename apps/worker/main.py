@@ -555,6 +555,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             )
 
             is_section_end_list = [c.is_section_end for c in chunks]
+            boundary_types_list = [c.boundary_type.value for c in chunks]
+            pause_durations_list = [c.pause_duration_seconds for c in chunks]
 
             initial_completed = job.completed_chunk_index or 0
             monitor = TTSResourceMonitor(interval_seconds=5.0)
@@ -632,14 +634,33 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             # Intro and Outro Branding Synthesis
             final_chunk_paths = list(generated_chunk_paths)
             final_is_section_end = list(is_section_end_list)
+            final_boundary_types = list(boundary_types_list)
+            final_pause_durations = list(pause_durations_list)
             intro_dur_sec = 0.0
             outro_dur_sec = 0.0
 
+            ep_title = script.get("episode_title") or job.custom_title or title
+            src_title = script.get("source_title")
+            pub_name = script.get("publisher") or getattr(job, "publisher", None)
+            if not pub_name and job.source_url:
+                try:
+                    from herald.extraction.recovery import get_registrable_domain
+
+                    domain = get_registrable_domain(job.source_url)
+                    if domain:
+                        pub_name = domain.split(".")[0].title()
+                except Exception:
+                    pub_name = None
+
             if getattr(settings, "BRANDING_INTRO_ENABLED", True):
                 from herald.audio.branding import render_intro_narration, synthesize_branding_segment
+
                 try:
                     intro_text = render_intro_narration(
                         topic=title,
+                        episode_title=ep_title,
+                        source_title=src_title,
+                        publisher=pub_name,
                         target_minutes=getattr(job, "target_minutes", None),
                         actual_body_duration_seconds=program_dur_sec,
                         content_mode=getattr(job, "content_mode", None),
@@ -658,11 +679,14 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     intro_dur_sec = intro_res.get("duration_seconds", 0.0)
                     final_chunk_paths.insert(0, intro_wav_path)
                     final_is_section_end.insert(0, True)
+                    final_boundary_types.insert(0, "BRANDING")
+                    final_pause_durations.insert(0, 1.2)
                 except Exception as b_err:
                     logger.warning(f"Intro branding synthesis failed non-fatally: {b_err}")
 
             if getattr(settings, "BRANDING_OUTRO_ENABLED", True):
                 from herald.audio.branding import render_outro_narration, synthesize_branding_segment
+
                 try:
                     outro_text = render_outro_narration()
                     outro_wav_path = chunks_dir / f"branding_outro_{job.id}.wav"
@@ -681,6 +705,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         final_is_section_end[-1] = True
                     final_chunk_paths.append(outro_wav_path)
                     final_is_section_end.append(False)
+                    final_boundary_types.append("BRANDING")
+                    final_pause_durations.append(0.0)
                 except Exception as b_err:
                     logger.warning(f"Outro branding synthesis failed non-fatally: {b_err}")
 
@@ -712,6 +738,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         chunk_paths=final_chunk_paths,
                         output_mp3_path=output_mp3_path,
                         is_section_end_list=final_is_section_end,
+                        boundary_types=final_boundary_types,
+                        pause_durations=final_pause_durations,
                         episode_title=title,
                         episode_description=description,
                         job_id=job.id,

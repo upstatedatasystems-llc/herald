@@ -18,6 +18,70 @@ from herald.config import settings
 
 logger = logging.getLogger("herald.audio.ffmpeg")
 
+PAUSE_TECHNICAL_SPLIT = 0.0
+PAUSE_SENTENCE = 0.5
+PAUSE_PARAGRAPH = 0.8
+PAUSE_SECTION = 1.2
+PAUSE_BRANDING = 1.2
+PAUSE_PADDING_START = 0.8
+PAUSE_PADDING_END = 0.8
+
+PAUSE_DURATION_BY_BOUNDARY = {
+    "TECHNICAL_SPLIT": PAUSE_TECHNICAL_SPLIT,
+    "SENTENCE": PAUSE_SENTENCE,
+    "PARAGRAPH": PAUSE_PARAGRAPH,
+    "SECTION": PAUSE_SECTION,
+    "BRANDING": PAUSE_BRANDING,
+}
+
+
+def measure_wav_silence(file_path: Path, threshold_amplitude: int = 500) -> dict[str, float]:
+    """Measure leading and trailing silence duration in seconds for a 16-bit PCM WAV file.
+
+    Non-destructive inspection using standard library wave module.
+    """
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+
+    try:
+        with wave.open(str(file_path), "rb") as w:
+            n_channels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+            framerate = w.getframerate()
+            n_frames = w.getnframes()
+
+            if framerate <= 0 or n_frames <= 0 or sampwidth != 2:
+                return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+
+            raw_frames = w.readframes(n_frames)
+            total_samples = n_frames * n_channels
+            fmt = f"<{total_samples}h"
+            samples = struct.unpack(fmt, raw_frames[: total_samples * 2])
+
+            first_active = -1
+            last_active = -1
+
+            for idx, s in enumerate(samples):
+                if abs(s) >= threshold_amplitude:
+                    if first_active == -1:
+                        first_active = idx
+                    last_active = idx
+
+            if first_active == -1:
+                dur = round(n_frames / float(framerate), 3)
+                return {"leading_silence_s": dur, "trailing_silence_s": dur}
+
+            leading_frames = first_active // n_channels
+            trailing_frames = (total_samples - 1 - last_active) // n_channels
+
+            return {
+                "leading_silence_s": max(0.0, round(leading_frames / float(framerate), 3)),
+                "trailing_silence_s": max(0.0, round(trailing_frames / float(framerate), 3)),
+            }
+    except Exception as e:
+        logger.debug(f"Failed to measure WAV silence on '{file_path}': {e}")
+        return {"leading_silence_s": 0.0, "trailing_silence_s": 0.0}
+
 
 class FFmpegExecutionError(Exception):
     """Exception raised when FFmpeg or FFprobe commands fail."""
@@ -295,9 +359,11 @@ def join_and_normalize_audio(
     job_id: str = "",
     insert_pauses: bool = True,
     is_section_end_list: list[bool] | None = None,
+    boundary_types: list[Any] | None = None,
+    pause_durations: list[float] | None = None,
 ) -> dict[str, Any]:
-    """
-    Concat WAV audio chunks with section (1.2s) and paragraph (0.5s) pause padding, normalize spoken loudness,
+    """Concat WAV audio chunks with semantic pause padding, normalize spoken loudness,
+
     encode to mono MP3, embed ID3 metadata, and validate audio duration.
     """
     if not chunk_paths:
@@ -320,19 +386,30 @@ def join_and_normalize_audio(
 
     try:
         if insert_pauses:
-            padding_start = generate_silence_wav(pauses_dir / "silence_start.wav", 0.8)
+            padding_start = generate_silence_wav(pauses_dir / "silence_start.wav", PAUSE_PADDING_START)
             padded_chunks.append(padding_start)
 
         for i, chunk in enumerate(chunk_paths):
             padded_chunks.append(chunk)
             if insert_pauses and i < len(chunk_paths) - 1:
-                is_sec_end = is_section_end_list[i] if (is_section_end_list and i < len(is_section_end_list)) else False
-                pause_duration = 1.2 if is_sec_end else 0.5
-                pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", pause_duration)
-                padded_chunks.append(pause_wav)
+                # Determine pause duration from pause_durations -> boundary_types -> is_section_end_list
+                if pause_durations and i < len(pause_durations):
+                    pause_duration = float(pause_durations[i])
+                elif boundary_types and i < len(boundary_types):
+                    b_raw = boundary_types[i]
+                    b_name = b_raw.value if hasattr(b_raw, "value") else str(b_raw).split(".")[-1]
+                    pause_duration = PAUSE_DURATION_BY_BOUNDARY.get(b_name, PAUSE_SENTENCE)
+                elif is_section_end_list and i < len(is_section_end_list):
+                    pause_duration = PAUSE_SECTION if is_section_end_list[i] else PAUSE_SENTENCE
+                else:
+                    pause_duration = PAUSE_SENTENCE
+
+                if pause_duration > 0.0:
+                    pause_wav = generate_silence_wav(pauses_dir / f"pause_{i:04d}.wav", pause_duration)
+                    padded_chunks.append(pause_wav)
 
         if insert_pauses:
-            padding_end = generate_silence_wav(pauses_dir / "silence_end.wav", 0.8)
+            padding_end = generate_silence_wav(pauses_dir / "silence_end.wav", PAUSE_PADDING_END)
             padded_chunks.append(padding_end)
 
         with open(concat_list_path, "w", encoding="utf-8") as f:

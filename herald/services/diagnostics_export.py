@@ -442,26 +442,60 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
         included_files.append("processing-metrics.json")
 
         # 7. tts-chunks.json
+        from herald.audio.ffmpeg_builder import measure_wav_silence
+        from herald.tts.chunker import chunk_podcast_script
+
+        script_data = job.script_json or {}
+        script_segments = script_data.get("segments", [])
+        chunk_objects_by_idx = {}
+        if script_segments:
+            try:
+                target_chars = job.tts_chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)
+                reproduced_chunks = chunk_podcast_script(script_segments, max_chars=target_chars)
+                chunk_objects_by_idx = {chk.index: chk for chk in reproduced_chunks}
+            except Exception as ce:
+                logger.debug(f"Could not derive chunk objects for diagnostics export: {ce}")
+
         chunks = (
             db.query(PodcastTTSChunk)
             .filter(PodcastTTSChunk.job_id == job.id)
             .order_by(PodcastTTSChunk.chunk_index.asc())
             .all()
         )
-        chunk_list = [
-            {
+        chunk_list = []
+        for c in chunks:
+            chk_obj = chunk_objects_by_idx.get(c.chunk_index)
+            silence_ms = {"leading_silence_ms": None, "trailing_silence_ms": None}
+            if c.local_path and Path(c.local_path).exists():
+                try:
+                    s_info = measure_wav_silence(Path(c.local_path))
+                    silence_ms["leading_silence_ms"] = int(round(s_info["leading_silence_s"] * 1000))
+                    silence_ms["trailing_silence_ms"] = int(round(s_info["trailing_silence_s"] * 1000))
+                except Exception:
+                    pass
+
+            item = {
                 "chunk_index": c.chunk_index,
                 "status": c.status,
                 "text_hash": c.text_hash,
+                "canonical_text": redact_text(chk_obj.canonical_text) if chk_obj else None,
+                "spoken_text": redact_text(chk_obj.text) if chk_obj else None,
+                "transformations": chk_obj.transformations if chk_obj else [],
+                "boundary_type": chk_obj.boundary_type.value if chk_obj else None,
+                "pause_duration_ms": int(round(chk_obj.pause_duration_seconds * 1000)) if chk_obj else None,
+                "voice": job.kokoro_voice or job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"),
+                "speed": job.kokoro_speed or job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0),
                 "audio_duration": c.audio_duration,
+                "leading_silence_ms": silence_ms["leading_silence_ms"],
+                "trailing_silence_ms": silence_ms["trailing_silence_ms"],
                 "attempt_count": c.attempt_count,
                 "error_detail": redact_text(c.error_detail),
                 "started_at": c.started_at.isoformat() if c.started_at else None,
                 "completed_at": c.completed_at.isoformat() if c.completed_at else None,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
             }
-            for c in chunks
-        ]
+            chunk_list.append(item)
+
         (staging_dir / "tts-chunks.json").write_text(json.dumps(chunk_list, indent=2), encoding="utf-8")
         included_files.append("tts-chunks.json")
 
