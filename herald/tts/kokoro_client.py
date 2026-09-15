@@ -240,8 +240,12 @@ def is_tts_actively_synthesizing(db: Any | None = None) -> bool:
                 bind = db.get_bind()
                 if bind and getattr(bind.dialect, "name", "") == "postgresql":
                     from sqlalchemy import text as sa_text
+
+                    from herald.concurrency import (
+                        TTS_ADVISORY_SLOT_BASE,
+                        get_effective_tts_global_slots,
+                    )
                     from herald.config import settings
-                    from herald.concurrency import TTS_ADVISORY_SLOT_BASE, get_effective_tts_global_slots
                     base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", TTS_ADVISORY_SLOT_BASE)
                     num_slots = get_effective_tts_global_slots()
                     max_key = base_key + num_slots - 1
