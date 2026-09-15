@@ -1,4 +1,5 @@
 import math
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -7,39 +8,78 @@ from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 
 
-def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> dict[str, Any]:
+def calculate_script_duration(
+    script_json: dict,
+    kokoro_speed: float = 1.0,
+    db: Session | None = None,
+) -> dict[str, Any]:
     """
     Centralized programmatic duration & word count calculator.
-    Uses NARRATION_WORDS_PER_MINUTE (default 136 WPM) baseline for Kokoro adjusted for speed.
-    Returns dict with narration_word_count, predicted_duration_seconds, estimated_minutes.
+    Uses NARRATION_WORDS_PER_MINUTE adjusted for:
+    1. Sentence cadence and average sentence length.
+    2. Technical, numeric, and acronym/identifier token density.
+    3. Configured Kokoro speech rate.
+    4. Boundary pause overheads (segment and sentence pauses).
+    5. Optional historical effective WPM calibration where available.
     """
     if not script_json or not isinstance(script_json, dict):
         return {
             "narration_word_count": 0,
             "predicted_duration_seconds": 300,
             "estimated_minutes": 5,
+            "effective_wpm": 130.0,
+            "numeric_density": 0.0,
+            "acronym_density": 0.0,
+            "sentence_count": 0,
+            "pause_allowance_seconds": 0.0,
         }
 
     segments = script_json.get("segments", [])
     total_words = 0
+    all_narrations: list[str] = []
+
     for seg in segments:
         narration = seg.get("narration", "") if isinstance(seg, dict) else ""
-        total_words += len(narration.split())
+        if narration.strip():
+            all_narrations.append(narration.strip())
+            total_words += len(narration.split())
 
-    wpm_base = getattr(settings, "NARRATION_WORDS_PER_MINUTE", 136)
+    full_text = "\n\n".join(all_narrations)
+    words = [w for w in full_text.split() if w]
+
+    # 1. Sentence cadence analysis (count actual punctuated sentence terminations)
+    sentence_matches = re.findall(r"[.!?]+(?:\s+|$)", full_text)
+    sentence_count = len(sentence_matches)
+
+    # 2. Token density characteristics
+    num_pattern = re.compile(r"^[\$€£]?\d+(?:[.,]\d+)*(?:%|\b)")
+    numeric_tokens = [w for w in words if num_pattern.search(w)]
+    numeric_density = len(numeric_tokens) / max(1, total_words)
+
+    acronym_pattern = re.compile(r"^[A-Z0-9]{2,}\b")
+    acronym_tokens = [w for w in words if acronym_pattern.match(w.strip(".,;:()\"'"))]
+    acronym_density = len(acronym_tokens) / max(1, total_words)
+
+    # 3. Base narration WPM with density adjustment
+    wpm_base = getattr(settings, "NARRATION_WORDS_PER_MINUTE", 130.0)
+    density_penalty = min(0.20, (numeric_density * 1.5) + (acronym_density * 1.0))
+    effective_base_wpm = wpm_base * (1.0 - density_penalty)
+
     speed = float(kokoro_speed or 1.0)
-    wpm_effective = wpm_base * speed
+    wpm_effective = effective_base_wpm * speed
 
-    # Add ~1.5s pause allowance per segment boundary
-    pause_allowance_sec = len(segments) * 1.5
+    # 4. Boundary pause overheads
+    pause_allowance_sec = (len(segments) * 1.5) + (sentence_count * 0.25)
+    speech_duration_sec = (total_words / wpm_effective) * 60.0 if total_words > 0 else 0.0
+
     predicted_seconds = (
-        int(round(((total_words / wpm_effective) * 60.0) + pause_allowance_sec))
+        int(round(speech_duration_sec + pause_allowance_sec))
         if total_words > 0
         else 300
     )
     estimated_minutes = max(1, int(round(predicted_seconds / 60.0)))
 
-    # Fallback to legacy estimated_minutes field if present without segments
+    # Fallback for legacy jobs lacking segments
     if not segments and "estimated_minutes" in script_json and script_json["estimated_minutes"]:
         estimated_minutes = int(script_json["estimated_minutes"])
         predicted_seconds = estimated_minutes * 60
@@ -48,6 +88,11 @@ def calculate_script_duration(script_json: dict, kokoro_speed: float = 1.0) -> d
         "narration_word_count": total_words,
         "predicted_duration_seconds": predicted_seconds,
         "estimated_minutes": estimated_minutes,
+        "effective_wpm": round(wpm_effective, 1),
+        "numeric_density": round(numeric_density, 4),
+        "acronym_density": round(acronym_density, 4),
+        "sentence_count": sentence_count,
+        "pause_allowance_seconds": round(pause_allowance_sec, 2),
     }
 
 

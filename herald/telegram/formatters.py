@@ -184,7 +184,6 @@ def format_settings(user_prefs: dict, instance_settings: object = None) -> tuple
     confirm_on = bool(user_prefs.get("confirm_before_tts", False))
     default_voice = html.escape(str(user_prefs.get("default_voice", "af_heart")))
     default_speed = float(user_prefs.get("default_speed", 1.0))
-    default_mode = html.escape(str(user_prefs.get("default_mode", "standard")).capitalize())
     default_content_mode = html.escape(str(user_prefs.get("default_content_mode", getattr(settings, "DEFAULT_CONTENT_MODE", "source"))).capitalize())
     default_target_minutes = html.escape(str(user_prefs.get("default_target_minutes", getattr(settings, "DEFAULT_TARGET_MINUTES", "auto"))).capitalize())
     default_research_depth = html.escape(str(user_prefs.get("default_research_depth", getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium"))).capitalize())
@@ -695,9 +694,34 @@ def format_approval(
     header_title = "📋 <b>Podcast Ready for Approval</b>"
     button_approve_text = "✅ Approve & Generate"
 
+    # Check for unresolved fidelity content warning
+    fid_audit = getattr(job, "fidelity_audit_json", None) or {}
+    cfg_state = getattr(job, "configuration_state_json", None) or {}
+    has_content_warning = (
+        (isinstance(fid_audit, dict) and (fid_audit.get("content_warning") is True or fid_audit.get("unresolved_issue") is True or fid_audit.get("status") == "unresolved_issue_remains"))
+        or (isinstance(cfg_state, dict) and cfg_state.get("content_warning") is True)
+    )
+
+    content_warning_section = ""
+    if has_content_warning:
+        header_title = "⚠️ <b>Podcast Ready for Approval (Content Warning)</b>"
+        button_approve_text = "⚠️ Synthesize Anyway"
+        warn_msg = (
+            (fid_audit.get("repair_instructions") if isinstance(fid_audit, dict) else None)
+            or "Unresolved factual consistency or coverage issue identified during audit."
+        )
+        warn_clean = html.escape(warn_msg[:200] + "..." if len(warn_msg) > 200 else warn_msg)
+        content_warning_section = (
+            f"\n⚠️ <b>CONTENT WARNING: Unresolved Factual Concern</b>\n"
+            f"<i>{warn_clean}</i>\n"
+        )
+
     if prior_job:
         header_title = "🔄 <b>Podcast Rerun Ready for Approval</b>"
-        button_approve_text = "✅ Approve Rerun & Generate"
+        if has_content_warning:
+            button_approve_text = "⚠️ Synthesize Rerun Anyway"
+        else:
+            button_approve_text = "✅ Approve Rerun & Generate"
         p_dt = prior_job.created_at
         p_date_str = p_dt.strftime("%b %d, %H:%M UTC") if p_dt else "earlier"
         p_status = prior_job.status
@@ -731,6 +755,7 @@ def format_approval(
         f"• <b>Estimated Range:</b> {html.escape(eta_range)}\n"
         f"• <b>Job ID:</b> <code>{short_id}</code>\n"
         f"{degraded_notice}"
+        f"{content_warning_section}"
         f"{prior_section}\n"
         f"<i>Review details above and approve to start audio synthesis:</i>"
     )

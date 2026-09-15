@@ -66,7 +66,7 @@ def test_vertical_slice_topic_mode_20m_research(db_session, monkeypatch):
 
     researched_topics = []
 
-    def mock_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None):
+    def mock_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None, **kwargs):
         researched_topics.append(source_text)
         return {
             "raw_text": "Deep research notes on Fusion Energy.",
@@ -160,7 +160,7 @@ def test_vertical_slice_expanded_mode_10m_research(db_session, monkeypatch):
     """
     import herald.gemini.client as gem_client
 
-    def mock_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None):
+    def mock_grounded_research(source_text, research_depth="medium", model_name=None, job_id=None, research_plan=None, api_key=None, **kwargs):
         return {
             "raw_text": "Expanded context on battery chemistry.",
             "search_count": 2,

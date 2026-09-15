@@ -215,11 +215,17 @@ def redact_value(val: Any) -> Any:
         return redact_text(str(val))
 
 
-def sanitize_content_dict(d: dict[str, Any] | None) -> dict[str, Any]:
+def sanitize_content_dict(d: Any) -> Any:
     """
-    Sanitize content artifacts (such as script JSON or research dossier),
+    Sanitize content artifacts (such as script JSON, section progress list, or research dossier),
     preserving narrative fields (narration, headings, titles) while scrubbing actual configured secrets.
     """
+    if isinstance(d, list):
+        return [
+            sanitize_content_dict(item) if isinstance(item, (dict, list))
+            else (redact_text(item) if isinstance(item, str) else item)
+            for item in d
+        ]
     if not d or not isinstance(d, dict):
         return {}
 

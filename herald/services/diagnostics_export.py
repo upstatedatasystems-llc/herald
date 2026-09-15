@@ -180,13 +180,20 @@ def build_manifest_dict(
     if not res_prov and job.request_mode == "research":
         res_prov = getattr(job, "ai_provider", None)
 
-    sec_progress = getattr(job, "section_progress_json", None) or {}
-    if not isinstance(sec_progress, dict):
-        sec_progress = {}
+    sec_raw = getattr(job, "section_progress_json", None)
+    if isinstance(sec_raw, list):
+        sec_list = sec_raw
+        sec_progress_dict = {}
+    elif isinstance(sec_raw, dict):
+        sec_list = sec_raw.get("sections") or []
+        sec_progress_dict = sec_raw
+    else:
+        sec_list = []
+        sec_progress_dict = {}
 
     sec_words = []
-    if sec_progress.get("sections"):
-        for s in sec_progress["sections"]:
+    if sec_list:
+        for s in sec_list:
             if isinstance(s, dict):
                 sec_words.append(s.get("word_count") or len((s.get("narration") or "").split()))
     elif script_obj.get("segments"):
@@ -194,10 +201,57 @@ def build_manifest_dict(
             if isinstance(seg, dict):
                 sec_words.append(len((seg.get("narration") or "").split()))
 
+    cfg_state = getattr(job, "configuration_state_json", None) or {}
+    if not isinstance(cfg_state, dict):
+        cfg_state = {}
+
+    effective_target = (
+        cfg_state.get("evidence_supported_target_words")
+        or sec_progress_dict.get("planned_total_words")
+        or sec_progress_dict.get("effective_evidence_target")
+    )
+    planned_words = (
+        cfg_state.get("requested_target_words")
+        or cfg_state.get("evidence_supported_target_words")
+        or sec_progress_dict.get("planned_total_words")
+    )
+
     audit_status = None
     fid_audit = getattr(job, "fidelity_audit_json", None)
     if isinstance(fid_audit, dict):
         audit_status = fid_audit.get("status")
+
+    # AI interaction tokens breakdown & efficiency telemetry
+    ai_interactions = (
+        db.query(AIInteraction)
+        .filter(AIInteraction.job_id == job.id)
+        .all()
+    )
+    total_ai_tokens = 0
+    generation_ai_tokens = 0
+    audit_ai_tokens = 0
+    repair_ai_tokens = 0
+    research_ai_tokens = 0
+
+    for ai in ai_interactions:
+        toks = ai.total_tokens or ((ai.prompt_tokens or 0) + (ai.completion_tokens or 0))
+        total_ai_tokens += toks
+        op = (ai.operation or "").lower()
+        if "research" in op and "audit" not in op and "repair" not in op:
+            research_ai_tokens += toks
+        elif "audit" in op or ("verification" in op and "repair" not in op):
+            audit_ai_tokens += toks
+        elif "repair" in op:
+            repair_ai_tokens += toks
+        else:
+            generation_ai_tokens += toks
+
+    dur_est_sec = getattr(job, "program_duration_seconds", None)
+    if not dur_est_sec and script_obj.get("estimated_minutes"):
+        dur_est_sec = float(script_obj["estimated_minutes"]) * 60.0
+    duration_sec = job.audio_duration_seconds or dur_est_sec
+    audio_minutes = (duration_sec / 60.0) if duration_sec and duration_sec > 0 else 0.0
+    ai_tokens_per_audio_min = round(total_ai_tokens / audio_minutes, 1) if audio_minutes > 0 else None
 
     return {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
@@ -210,11 +264,20 @@ def build_manifest_dict(
         "content_mode": getattr(job, "content_mode", None),
         "target_minutes": getattr(job, "target_minutes", None),
         "requested_target_minutes": getattr(job, "target_minutes", None),
-        "effective_evidence_target_words": sec_progress.get("planned_total_words") or sec_progress.get("effective_evidence_target"),
-        "planned_words": sec_progress.get("planned_total_words"),
+        "effective_evidence_target_words": effective_target,
+        "planned_words": planned_words,
         "actual_words": narration_words,
         "section_words": sec_words,
         "audit_status": audit_status,
+        "quality_gate": cfg_state.get("quality_gate"),
+        "ai_tokens_breakdown": {
+            "total_tokens": total_ai_tokens,
+            "generation_tokens": generation_ai_tokens,
+            "audit_tokens": audit_ai_tokens,
+            "repair_tokens": repair_ai_tokens,
+            "research_tokens": research_ai_tokens,
+            "ai_tokens_per_audio_minute": ai_tokens_per_audio_min,
+        },
         "research_depth": job.research_depth,
         "resolved_default": bool(getattr(job, "resolved_default", False)),
         "input_type": input_type,
@@ -563,6 +626,14 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     json.dumps(sanitize_content_dict(job.fidelity_audit_json), indent=2), encoding="utf-8"
                 )
                 included_files.append("longform/fidelity-audit.json")
+
+        # 14. Quality gate report
+        cfg_state_export = getattr(job, "configuration_state_json", None) or {}
+        if isinstance(cfg_state_export, dict) and cfg_state_export.get("quality_gate"):
+            (staging_dir / "quality-gate.json").write_text(
+                json.dumps(sanitize_content_dict(cfg_state_export["quality_gate"]), indent=2), encoding="utf-8"
+            )
+            included_files.append("quality-gate.json")
 
         # Multi-stage progressive size reduction when exceeding budget
         staged_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())

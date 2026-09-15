@@ -22,7 +22,6 @@ from herald.extraction.source_cleaner import clean_source_text, deduplicate_sour
 from herald.extraction.url_extractor import (
     ArticleExtractionError,
     ArticleNotFoundError,
-    BlockReason,
     DNSResolutionError,
     SourceAccessBlockedError,
     SSRFVulnerabilityError,
@@ -795,7 +794,9 @@ def process_herald_request(db: Session, req: HeraldRequest) -> HeraldResponse:
                 job.error_code = error_cat
                 db.commit()
                 try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    from herald.services.diagnostics_export import (
+                        ensure_terminal_diagnostics_archive,
+                    )
                     ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
                 except Exception as arc_err:
                     logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
@@ -1150,12 +1151,10 @@ def execute_script_generation(
     if c_mode:
         is_literal = (c_mode == "literal")
         is_long_form = c_mode in ("expanded", "topic") or (c_mode == "source" and is_fixed_dur)
-        is_source_auto = (c_mode == "source" and not is_fixed_dur)
     else:
         # Fallback for historical jobs lacking content_mode
         is_literal = (mode_val == RequestMode.LITERAL.value)
         is_long_form = False
-        is_source_auto = False
 
     try:
         if is_literal:
@@ -1576,6 +1575,38 @@ def execute_script_generation(
         dur_info = calculate_script_duration(
             script_obj, job.custom_speed or settings.KOKORO_SPEED
         )
+        job.program_duration_seconds = dur_info.get("predicted_duration_seconds")
+
+        from herald.services.quality_gate import run_quality_gate
+
+        cfg = job.configuration_state_json or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if not cfg.get("quality_gate"):
+            cleaned_script, q_report = run_quality_gate(script_obj)
+            job.script_json = cleaned_script
+            script_obj = cleaned_script
+            cfg["quality_gate"] = q_report.to_dict()
+            if q_report.has_warnings:
+                record_job_diagnostic_event(
+                    job.id,
+                    "WARNING",
+                    "quality_gate",
+                    "QUALITY_GATE_WARNINGS",
+                    f"Quality gate identified {len(q_report.warnings)} issues: {', '.join(w.message for w in q_report.warnings[:3])}",
+                    metadata={"warning_count": len(q_report.warnings), "warnings": [w.to_dict() for w in q_report.warnings]},
+                    db=db,
+                )
+        cfg["duration_estimation"] = dur_info
+        job.configuration_state_json = cfg
+
+        fid_audit = getattr(job, "fidelity_audit_json", None) or {}
+        has_content_warning = (
+            (isinstance(fid_audit, dict) and (fid_audit.get("content_warning") is True or fid_audit.get("unresolved_issue") is True or fid_audit.get("status") == "unresolved_issue_remains"))
+            or (isinstance(cfg, dict) and cfg.get("content_warning") is True)
+        )
+        if has_content_warning:
+            hold_for_approval = True
 
         if hold_for_approval:
             job.approval_required = True

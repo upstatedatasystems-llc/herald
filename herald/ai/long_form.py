@@ -12,7 +12,6 @@ Supports:
 """
 
 import enum
-import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -21,9 +20,8 @@ from typing import Any, Callable
 from herald.ai.failover import execute_with_failover
 from herald.ai.schema import PodcastScriptResponse, PodcastSegment
 from herald.config import settings
-from herald.db.models import JobDiagnosticEvent, PodcastJob
+from herald.db.models import PodcastJob
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
-from herald.services.performance_metrics import record_stage_metric
 
 logger = logging.getLogger("herald.ai.long_form")
 
@@ -151,13 +149,46 @@ def build_source_coverage_ledger(source_text: str, source_title: str | None = No
     }
 
 
+def _detect_topic_domain(topic: str) -> str:
+    """Classify topic domain to generate topic-specific narrative arcs."""
+    t_lower = topic.lower()
+    if any(k in t_lower for k in (
+        "black hole", "singularity", "quantum", "space", "star", "gravity", "relativity",
+        "fusion", "galaxy", "cosmology", "atom", "particle", "biology", "climate", "geology",
+        "chemistry", "physics", "planet", "radiation", "astronomy", "neuroscience", "evolution"
+    )):
+        return "science"
+    if any(k in t_lower for k in (
+        "restaurant", "roadhouse", "company", "business", "market", "retail", "economy",
+        "startup", "finance", "industry", "banking", "store", "supply chain", "logistics",
+        "brand", "franchise", "commercial", "earnings", "valuation", "customer"
+    )):
+        return "business"
+    if any(k in t_lower for k in (
+        "software", "hardware", "computer", "algorithm", "ai", "network", "engine",
+        "submarine", "reactor", "chip", "database", "system", "propulsion", "crypto",
+        "security", "protocol", "architecture", "microprocessor", "compiler"
+    )):
+        return "technology"
+    if any(k in t_lower for k in (
+        "war", "revolution", "treaty", "empire", "policy", "movement", "presidency",
+        "century", "battle", "crisis", "doctrine", "rebellion", "dynasty", "colonial"
+    )):
+        return "history"
+    if any(k in t_lower for k in (
+        "biography", "life of", "who was", "inventor", "admiral", "general", "founder", "biographical"
+    )):
+        return "biography"
+    return "general"
+
+
 def build_research_plan(
     topic: str,
     research_depth: str = "medium",
     scope: EvidenceScope = EvidenceScope.RESEARCH,
     seed_summary: str | None = None,
 ) -> dict[str, Any]:
-    """Generate structured research plan for what should be investigated, bounded by research depth."""
+    """Generate structured research plan for what should be investigated, tailored to the specific topic domain."""
     depth = (research_depth or "medium").lower().strip()
     if depth not in ("low", "medium", "high"):
         depth = getattr(settings, "DEFAULT_RESEARCH_DEPTH", "medium").lower().strip()
@@ -174,71 +205,156 @@ def build_research_plan(
         target_areas = 3
         queries_per_area = 2
 
+    domain = _detect_topic_domain(topic)
     focus_areas = []
-    if scope == EvidenceScope.SOURCE_PLUS_RESEARCH:
-        focus_areas.append({
-            "name": "Historical Background and Genesis",
-            "focus": f"Origins, context, and preceding developments for {topic}",
-            "queries": [f"{topic} history background origin", f"{topic} timeline context"][:queries_per_area],
-        })
-        focus_areas.append({
-            "name": "Technical Design and Architecture",
-            "focus": f"Detailed technical specifications, engineering, and architecture of {topic}",
-            "queries": [f"{topic} technical specifications design", f"{topic} capabilities analysis"][:queries_per_area],
-        })
-        if target_areas >= 3:
-            focus_areas.append({
-                "name": "Operational Reality, Updates, and Challenges",
-                "focus": f"Operational deployment, updates, controversies, and future outlook for {topic}",
-                "queries": [f"{topic} recent developments updates", f"{topic} challenges controversies"][:queries_per_area],
-            })
-        if target_areas >= 4:
-            focus_areas.append({
-                "name": "Comparisons, Alternatives, and Economics",
-                "focus": f"Comparison of {topic} with alternatives, competitors, or economic costs",
-                "queries": [f"{topic} comparison competitors", f"{topic} cost analysis"][:queries_per_area],
-            })
-        if target_areas >= 5:
-            focus_areas.append({
-                "name": "Strategic Significance and Long-Term Horizon",
-                "focus": f"Long-term significance, broader impact, and future trajectory of {topic}",
-                "queries": [f"{topic} future outlook strategic role", f"{topic} program trajectory"][:queries_per_area],
-            })
+
+    if domain == "science":
+        focus_areas.extend([
+            {
+                "name": "Formation Mechanisms and Physical Genesis",
+                "focus": f"Cosmic formation mechanisms, theoretical foundations, and genesis of {topic}",
+                "queries": [f"{topic} formation origin physics", f"{topic} theoretical predictions discovery"][:queries_per_area],
+            },
+            {
+                "name": "Governing Principles and Observable Mechanics",
+                "focus": f"Physical laws, observable behaviors, and fundamental mechanics of {topic}",
+                "queries": [f"{topic} physical properties mechanisms", f"{topic} structure dynamics"][:queries_per_area],
+            },
+            {
+                "name": "Observation Milestones and Experimental Evidence",
+                "focus": f"Empirical measurements, instrumentation breakthroughs, and observational evidence for {topic}",
+                "queries": [f"{topic} observation telescope detector", f"{topic} experimental findings evidence"][:queries_per_area],
+            },
+            {
+                "name": "Complex Interactions and Environmental Dynamics",
+                "focus": f"Interactions, environmental impact, and dynamic growth phenomena of {topic}",
+                "queries": [f"{topic} interaction behavior environment", f"{topic} growth dynamics anomalies"][:queries_per_area],
+            },
+            {
+                "name": "Frontiers, Paradoxes, and Cosmological Horizon",
+                "focus": f"Unresolved paradoxes, open questions, and broader cosmological significance of {topic}",
+                "queries": [f"{topic} paradox open questions future", f"{topic} research frontier implications"][:queries_per_area],
+            },
+        ])
+    elif domain == "business":
+        focus_areas.extend([
+            {
+                "name": "Founding Vision, Origin, and Concept",
+                "focus": f"Founding history, entrepreneurial vision, and initial operating concept of {topic}",
+                "queries": [f"{topic} founding history origin", f"{topic} concept initial launch"][:queries_per_area],
+            },
+            {
+                "name": "Operating Model and Customer Experience Strategy",
+                "focus": f"Core operational strategy, execution model, product quality, and customer service for {topic}",
+                "queries": [f"{topic} business model operations", f"{topic} service strategy execution"][:queries_per_area],
+            },
+            {
+                "name": "Unit Economics, Scaling, and Partnership Model",
+                "focus": f"Financial structure, store/unit economics, leadership incentives, and scaling strategy of {topic}",
+                "queries": [f"{topic} unit economics financials", f"{topic} scaling strategy expansion"][:queries_per_area],
+            },
+            {
+                "name": "Market Competition, Culture, and Challenges",
+                "focus": f"Competitive landscape, internal organizational culture, labor relations, and operational challenges of {topic}",
+                "queries": [f"{topic} competition industry challenges", f"{topic} organizational culture labor"][:queries_per_area],
+            },
+            {
+                "name": "Modern Evolution and Strategic Horizon",
+                "focus": f"Current market performance, adaptation to industry trends, and future strategic trajectory of {topic}",
+                "queries": [f"{topic} current market outlook", f"{topic} future growth trajectory"][:queries_per_area],
+            },
+        ])
+    elif domain == "technology":
+        focus_areas.extend([
+            {
+                "name": "Engineering Genesis and Core Problem Space",
+                "focus": f"Technical genesis, preceding limitations, and foundational problem space addressed by {topic}",
+                "queries": [f"{topic} origins design purpose", f"{topic} engineering background problem"][:queries_per_area],
+            },
+            {
+                "name": "System Architecture and Technical Specifications",
+                "focus": f"Underlying architecture, hardware/software specifications, and technical mechanics of {topic}",
+                "queries": [f"{topic} technical specifications architecture", f"{topic} design engineering details"][:queries_per_area],
+            },
+            {
+                "name": "Operational Performance and Real-World Deployments",
+                "focus": f"Deployment history, operational benchmarks, field reliability, and real-world performance of {topic}",
+                "queries": [f"{topic} benchmarks deployment performance", f"{topic} operational reliability testing"][:queries_per_area],
+            },
+            {
+                "name": "Engineering Tradeoffs and Competitive Alternatives",
+                "focus": f"Tradeoffs, economic and technical costs, failure modes, and alternative approaches compared to {topic}",
+                "queries": [f"{topic} tradeoffs alternatives comparison", f"{topic} limitations engineering challenges"][:queries_per_area],
+            },
+            {
+                "name": "Emerging Frontiers and Future Roadmap",
+                "focus": f"Next-generation revisions, research frontiers, and long-term technological trajectory of {topic}",
+                "queries": [f"{topic} next generation future roadmap", f"{topic} emerging research frontier"][:queries_per_area],
+            },
+        ])
+    elif domain == "history":
+        focus_areas.extend([
+            {
+                "name": "Historical Catalysts and Preconditions",
+                "focus": f"Underlying historical causes, socio-economic context, and catalysts leading to {topic}",
+                "queries": [f"{topic} causes background context", f"{topic} historical roots catalysts"][:queries_per_area],
+            },
+            {
+                "name": "Key Turning Points and Decision-Makers",
+                "focus": f"Crucial decisions, major milestones, and influential actors during {topic}",
+                "queries": [f"{topic} key figures turning points", f"{topic} major decisions chronology"][:queries_per_area],
+            },
+            {
+                "name": "Structural Dynamics and Societal Impact",
+                "focus": f"Everyday reality, societal shifts, and systemic consequences of {topic}",
+                "queries": [f"{topic} societal impact consequences", f"{topic} structural changes effect"][:queries_per_area],
+            },
+            {
+                "name": "Resolution, Aftermath, and Immediate Fallout",
+                "focus": f"Treaties, settlements, immediate repercussions, and structural aftermath of {topic}",
+                "queries": [f"{topic} aftermath treaty outcome", f"{topic} immediate consequences resolution"][:queries_per_area],
+            },
+            {
+                "name": "Enduring Lessons and Historiographical Legacy",
+                "focus": f"Modern historiographical perspectives, lasting lessons, and historical legacy of {topic}",
+                "queries": [f"{topic} legacy historical debate", f"{topic} modern significance lessons"][:queries_per_area],
+            },
+        ])
     else:
-        # Pure Topic mode
-        focus_areas.append({
-            "name": "Core Premise, Definition, and History",
-            "focus": f"Definition, origins, and core foundational facts regarding {topic}",
-            "queries": [f"{topic} overview definition history", f"{topic} background facts"][:queries_per_area],
-        })
-        focus_areas.append({
-            "name": "Mechanisms, Technical Structure, and Architecture",
-            "focus": f"How {topic} works, underlying mechanisms, or primary structure",
-            "queries": [f"{topic} how it works technical details", f"{topic} architecture key aspects"][:queries_per_area],
-        })
-        if target_areas >= 3:
-            focus_areas.append({
-                "name": "Real-World Impact, Case Studies, and Controversies",
-                "focus": f"Significance, impact, debates, and controversies around {topic}",
-                "queries": [f"{topic} impact real world examples", f"{topic} controversies analysis"][:queries_per_area],
-            })
-        if target_areas >= 4:
-            focus_areas.append({
-                "name": "Modern Developments, Trends, and Practical Lessons",
-                "focus": f"Recent developments and notable case studies for {topic}",
-                "queries": [f"{topic} recent developments case studies", f"{topic} current status"][:queries_per_area],
-            })
-        if target_areas >= 5:
-            focus_areas.append({
-                "name": "Future Horizon and Broader Implications",
-                "focus": f"Where {topic} is heading and what it means for the future",
-                "queries": [f"{topic} future predictions implications", f"{topic} research frontier"][:queries_per_area],
-            })
+        # General / default domain
+        focus_areas.extend([
+            {
+                "name": f"Foundational Context and Core Premise of {topic}",
+                "focus": f"Core premise, historical context, and foundational realities of {topic}",
+                "queries": [f"{topic} overview foundation history", f"{topic} core premise background"][:queries_per_area],
+            },
+            {
+                "name": "Underlying Mechanisms and Functional Structure",
+                "focus": f"How {topic} operates, primary components, and functional dynamics",
+                "queries": [f"{topic} how it works mechanisms", f"{topic} key elements dynamics"][:queries_per_area],
+            },
+            {
+                "name": "Real-World Impact and Case Studies",
+                "focus": f"Concrete manifestations, real-world case studies, and practical examples of {topic}",
+                "queries": [f"{topic} real world examples case studies", f"{topic} practical impact evidence"][:queries_per_area],
+            },
+            {
+                "name": "Tradeoffs, Nuances, and Critical Debates",
+                "focus": f"Tensions, controversies, limitations, and competing viewpoints surrounding {topic}",
+                "queries": [f"{topic} controversies debates nuance", f"{topic} challenges tradeoffs"][:queries_per_area],
+            },
+            {
+                "name": "Strategic Horizon and Broader Implications",
+                "focus": f"Where {topic} is heading, emerging trends, and broader long-term ramifications",
+                "queries": [f"{topic} future outlook trajectory", f"{topic} long term implications"][:queries_per_area],
+            },
+        ])
 
     return {
         "topic": topic,
         "research_depth": depth,
         "scope": scope.value,
+        "domain": domain,
         "focus_areas": focus_areas[:target_areas],
         "seed_summary": seed_summary,
     }
@@ -382,9 +498,8 @@ def build_episode_outline(
     research_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Build structured episode outline with topic/evidence-specific section headings and budgets.
-    For Source mode: derives sections from source structure/ledger and bounds budget to evidence.
-    For Auto mode: derives natural section count without a fixed 400-word quota.
+    Build structured episode outline with topic/evidence-specific section headings,
+    explicit target ranges, assigned key points, and anti-repetition guidance.
     """
     target_budget = get_target_word_budget(target_minutes)
     is_auto = target_budget is None
@@ -394,8 +509,7 @@ def build_episode_outline(
 
     source_words = len((source_ledger.get("clean_text", "") if source_ledger else "").split())
 
-    # Source mode bounds check: remove arbitrary 800-word floor.
-    # Never invent content merely to meet target.
+    # Source mode bounds check
     evidence_supported_target = target_budget
     if scope == EvidenceScope.SOURCE_ONLY and target_budget is not None and source_words > 0:
         max_legitimate_words = int(source_words * 2.0)
@@ -408,14 +522,13 @@ def build_episode_outline(
 
     # Section counts and target word distribution
     if is_auto:
-        # In Auto mode, derive natural scope from evidence without fixed quota
         if scope == EvidenceScope.SOURCE_ONLY and source_ledger:
             sec_count = max(2, min(len(source_ledger.get("headings", [])) or len(items) or 3, 6))
         elif research_plan and research_plan.get("focus_areas"):
             sec_count = max(2, len(research_plan["focus_areas"]))
         else:
             sec_count = max(2, min(len(items), 6))
-        section_word_budget = None  # Soft/unbudgeted in Auto mode
+        section_word_budget = None
         effective_total_words = None
     else:
         effective_total_words = evidence_supported_target
@@ -430,9 +543,6 @@ def build_episode_outline(
         else:
             nominal_sec_count = 11
 
-        # Deliberate section count reduction:
-        # If available evidence cannot support the planned number of distinct sections,
-        # reduce the number of sections rather than manufacturing repetitive sections.
         if evidence_ids:
             if scope == EvidenceScope.SOURCE_ONLY:
                 max_supported_secs = max(2, min(len(evidence_ids), len(source_ledger.get("headings", [])) or len(evidence_ids)))
@@ -446,9 +556,7 @@ def build_episode_outline(
 
         section_word_budget = evidence_supported_target // sec_count
 
-    sections = []
-
-    # Build topic-specific section headings and distinct narrative purposes
+    # Build topic-specific section headings and narrative purposes
     headings_pool = []
     if scope == EvidenceScope.SOURCE_ONLY and source_ledger and source_ledger.get("headings"):
         for h in source_ledger["headings"]:
@@ -456,35 +564,34 @@ def build_episode_outline(
     elif research_plan and research_plan.get("focus_areas"):
         for fa in research_plan["focus_areas"]:
             headings_pool.append((fa["name"], fa["focus"]))
+    elif items:
+        for it in items:
+            t = it.get("title") or it.get("focus_area")
+            if t and (t, f"Analyze findings on: {t}") not in headings_pool:
+                headings_pool.append((t, f"Analyze key facts and findings regarding {t}."))
 
-    distinct_narrative_facets = [
-        ("The Central Premise and Key Facts", "Establish core stakes and central narrative premise."),
-        ("Context, Background, and Evolution", "Analyze background roots, context, and development."),
-        ("Technical Mechanics and Architecture", "Examine structural design, mechanisms, and specifications."),
-        ("Operational Challenges and Nuance", "Address controversies, obstacles, and complex tradeoffs."),
-        ("Real-World Impact and Future Horizons", "Synthesize long-term meaning, lessons, and implications."),
-        ("Strategic Tradeoffs and Critical Analysis", "Deep-dive into tradeoffs, edge cases, and critical evaluations."),
-    ]
-
+    # Fallback to domain-tailored focus areas if pool is empty or insufficient
     if not headings_pool:
-        headings_pool = distinct_narrative_facets
+        domain_plan = build_research_plan(topic=topic, research_depth="high", scope=scope)
+        for fa in domain_plan["focus_areas"]:
+            headings_pool.append((fa["name"], fa["focus"]))
+
+    sections = []
+    items_by_id = {it["evidence_id"]: it for it in items if it.get("evidence_id")}
 
     for i in range(sec_count):
         idx = i + 1
         if i < len(headings_pool):
             heading, purpose = headings_pool[i]
         else:
-            facet_heading, facet_purpose = distinct_narrative_facets[i % len(distinct_narrative_facets)]
-            base_heading = headings_pool[i % len(headings_pool)][0]
-            heading = f"{base_heading}: {facet_heading}"
-            purpose = f"Examine {base_heading} through the lens of: {facet_purpose}"
+            base_heading, base_purpose = headings_pool[i % len(headings_pool)]
+            heading = f"{base_heading} (Part {idx})"
+            purpose = f"Deepen the exploration of {base_heading}."
 
-        # Assign relevant evidence deliberately:
-        # Guarantee all meaningful source chunks receive coverage without mechanically repeating the last chunk
+        # Assign relevant evidence deliberately
         if not evidence_ids:
             assigned_ev = []
         elif len(evidence_ids) <= sec_count:
-            # Proportional mapping across sections so chunks are distributed evenly
             chunk_idx = (i * len(evidence_ids)) // sec_count
             assigned_ev = [evidence_ids[chunk_idx]]
         else:
@@ -492,13 +599,38 @@ def build_episode_outline(
             end_ev = ((i + 1) * len(evidence_ids)) // sec_count
             assigned_ev = evidence_ids[start_ev:max(start_ev + 1, end_ev)]
 
+        # Extract compact key points from assigned evidence
+        key_points = []
+        for eid in assigned_ev:
+            if eid in items_by_id:
+                it = items_by_id[eid]
+                snip = it.get("snippet", "").strip()
+                if snip:
+                    first_sent = re.split(r"(?<=[.!?])\s+", snip)[0].strip()
+                    if first_sent and len(first_sent) > 10:
+                        key_points.append(first_sent[:120])
+        if not key_points and purpose:
+            key_points.append(purpose[:120])
+
+        w_min = int(round(section_word_budget * 0.85)) if section_word_budget else None
+        w_max = int(round(section_word_budget * 1.15)) if section_word_budget else None
+
+        anti_rep = (
+            f"Focus directly on the specific narrative job of {heading.lower()}. "
+            "Do not re-introduce the overall topic or repeat earlier section facts."
+        )
+
         sections.append({
             "section_index": idx,
             "heading": heading,
             "purpose": purpose,
             "word_budget": section_word_budget,
+            "word_budget_min": w_min,
+            "word_budget_max": w_max,
             "relevant_evidence_ids": assigned_ev,
-            "transition_intent": f"Flow smoothly from section {idx-1}" if idx > 1 else "Opening hook",
+            "key_points": key_points[:3],
+            "anti_repetition": anti_rep,
+            "transition_intent": f"Flow naturally from section {idx-1}" if idx > 1 else "Opening hook",
         })
 
     return {
@@ -523,14 +655,18 @@ def generate_single_section(
 ) -> dict[str, Any]:
     """
     Generate one section of the long-form podcast script grounded strictly in assigned evidence.
+    Enforces a strict single-pass contract: exactly one model request per section.
     Places control instructions in trusted generation_instructions outside untrusted SOURCE_DATA.
-    Enforces section word budget with bounded expansion when materially short.
     """
     sec_idx = section_info["section_index"]
     heading = section_info["heading"]
     purpose = section_info["purpose"]
     budget = section_info.get("word_budget")
+    budget_min = section_info.get("word_budget_min") or (int(round(budget * 0.85)) if budget else None)
+    budget_max = section_info.get("word_budget_max") or (int(round(budget * 1.15)) if budget else None)
     ev_ids = section_info.get("relevant_evidence_ids", [])
+    key_points = section_info.get("key_points", [])
+    anti_rep = section_info.get("anti_repetition", "")
 
     all_items = {it["evidence_id"]: it for it in evidence_packet.get("items", [])}
     assigned_snippets = []
@@ -542,16 +678,23 @@ def generate_single_section(
     evidence_text = "\n\n".join(assigned_snippets) or f"Evidence regarding {topic}."
 
     prev_context = (
-        f"Previous section covered: {previous_summary}. Do NOT repeat those introductory facts. Continue the narrative naturally."
+        f"Previous section covered: {previous_summary}. Do NOT repeat those introductory facts. Continue the narrative naturally with a smooth spoken transition."
         if previous_summary
-        else "This is the opening section. Hook the listener and state the core premise directly."
+        else "This is the opening section. Hook the listener and state the central premise directly without meta-announcements."
     )
 
     budget_instruction = (
-        f"Target Word Budget: approximately {budget} words. Write complete, detailed narration approaching this budget."
+        f"Target Word Range: approximately {budget_min}–{budget_max} words (nominal target: {budget} words). "
+        "Prioritize conversational clarity, completeness, and natural spoken flow over exact word length."
         if budget is not None
         else "Write natural, comprehensive spoken narration covering the assigned evidence thoroughly without artificial brevity."
     )
+
+    key_points_block = ""
+    if key_points:
+        key_points_block = "Key Points to Cover:\n" + "\n".join(f"- {kp}" for kp in key_points) + "\n\n"
+
+    anti_rep_block = f"Anti-Repetition Guidance:\n{anti_rep}\n\n" if anti_rep else ""
 
     control_instructions = f"""You are writing Section {sec_idx} of a long-form podcast about: {topic}
 Section Heading: {heading}
@@ -560,11 +703,17 @@ Purpose: {purpose}
 
 {prev_context}
 
-Requirements:
-1. Write engaging, natural spoken podcast narration for the host.
-2. Ground all factual assertions strictly in the provided evidence.
-3. If this is Source mode (SOURCE_ONLY), do NOT introduce outside facts not present in the evidence.
+{key_points_block}{anti_rep_block}Spoken-Writing Contract:
+1. Narration must be written specifically for LISTENING, not an essay: use conversational, explanatory prose and natural spoken transitions.
+2. Use generally short-to-medium sentences with one major idea per sentence where practical. Use contractions where natural.
+3. Explain technical jargon clearly before relying upon it. Avoid dense runs of unexpanded acronyms, statistics, dates, or mechanical lists.
+4. Ground all factual assertions strictly in the provided evidence. Preserve uncertainty and attribution accurately.
+5. NEVER mechanically announce section headings (e.g., do not say 'Section two: Technical Architecture').
+6. NEVER include a miniature conclusion, moral, or recap at the end of this section.
+7. Do not invent outside facts absent from the provided evidence.
 """
+
+    t_sec0 = datetime.now(UTC)
 
     def _execute_section(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
         return p_inst.generate_script(
@@ -586,55 +735,19 @@ Requirements:
     narration_parts = [seg.narration for seg in res.segments]
     full_narration = "\n\n".join(narration_parts)
     actual_words = len(full_narration.split())
-    # Duration enforcement: if budget is fixed and section is materially short (< 80% of budget),
-    # run one bounded continuation/expansion pass (for Expanded/Topic, or Source if evidence permits).
-    evidence_words = len(evidence_text.split())
-    can_expand_section = (
-        scope != EvidenceScope.SOURCE_ONLY
-        or (scope == EvidenceScope.SOURCE_ONLY and budget is not None and evidence_words >= int(budget * 0.6))
-    )
-    if budget and actual_words < int(budget * 0.8) and can_expand_section:
-        logger.info(
-            f"Section {sec_idx} undershot target budget ({actual_words} words vs {budget} budget). "
-            "Executing bounded section expansion pass."
-        )
-        expansion_instructions = f"""{control_instructions}
-
-NOTICE: Your previous draft was only {actual_words} words, which is materially below the required {budget}-word target.
-Expand your narration with deeper explanatory context, concrete examples from the evidence, and thorough discussions of mechanisms.
-Target approximately {budget} words. Do not introduce repetitive filler.
-"""
-        try:
-            def _expand_section(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
-                return p_inst.generate_script(
-                    source_text=src,
-                    request_mode="standard",
-                    source_title=topic,
-                    job_id=job.id,
-                    generation_instructions=expansion_instructions,
-                )
-
-            exp_res: PodcastScriptResponse = execute_with_failover(
-                job=job,
-                operation="section_generation",
-                execute_fn=_expand_section,
-                db=db,
-                source_text=evidence_text,
-            )
-            exp_narration = "\n\n".join(seg.narration for seg in exp_res.segments)
-            exp_words = len(exp_narration.split())
-            if exp_words > actual_words:
-                full_narration = exp_narration
-                actual_words = exp_words
-        except Exception as e:
-            logger.warning(f"Section expansion attempt failed non-fatally: {e}")
+    elapsed_sec = round((datetime.now(UTC) - t_sec0).total_seconds(), 2)
 
     return {
         "section_index": sec_idx,
         "heading": heading,
+        "purpose": purpose,
         "narration": full_narration,
         "word_count": actual_words,
         "target_word_budget": budget,
+        "target_word_range": (budget_min, budget_max) if budget else None,
+        "relevant_evidence_ids": ev_ids,
+        "generation_call_count": 1,
+        "elapsed_seconds": elapsed_sec,
         "completed": True,
     }
 
@@ -666,7 +779,23 @@ def audit_and_repair_fidelity(
         or (source_ledger.get("clean_text") if source_ledger else None)
         or "\n\n".join(it.get("snippet", "") for it in evidence_packet.get("items", []))
     )
-    dossier_data = evidence_packet or {}
+
+    # Scoped research evidence optimization: scope evidence items to assigned chunk/evidence IDs
+    assigned_evidence_ids = {
+        ev_id
+        for sec in sections
+        for ev_id in sec.get("relevant_evidence_ids", [])
+        if ev_id
+    }
+    all_packet_items = evidence_packet.get("items", []) if evidence_packet else []
+    if assigned_evidence_ids and all_packet_items:
+        scoped_items = [it for it in all_packet_items if it.get("evidence_id") in assigned_evidence_ids]
+        if not scoped_items:
+            scoped_items = all_packet_items
+    else:
+        scoped_items = all_packet_items
+
+    dossier_data = {**(evidence_packet or {}), "items": scoped_items}
 
     def _build_script_dict(secs: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -834,11 +963,20 @@ def audit_and_repair_fidelity(
             db=db,
         )
 
+        affected_headings = [
+            s.get("heading")
+            for s in sections
+            if s.get("heading") and any(
+                term in s.get("narration", "").lower()
+                for term in (omitted_numbers[:4] + omitted_entities[:4])
+            )
+        ]
         audit_payload = {
             "has_material_issues": True,
             "repair_instructions": repair_instructions or "Restore omitted material facts and correct factual inaccuracies.",
             "omitted_numbers": omitted_numbers[:8],
             "omitted_entities": omitted_entities[:8],
+            "affected_segments": affected_headings or [s.get("heading") for s in sections[:2] if s.get("heading")],
         }
 
         try:
@@ -926,6 +1064,7 @@ def audit_and_repair_fidelity(
     else:
         audit_status = "clean"
 
+    has_content_warning = bool(unresolved_issue or (audit_status == "unresolved_issue_remains"))
     audit_result = {
         "status": audit_status,
         "has_material_issues": has_material_issues,
@@ -933,6 +1072,7 @@ def audit_and_repair_fidelity(
         "repair_attempted": repair_attempted,
         "repair_succeeded": repair_succeeded,
         "unresolved_issue": unresolved_issue,
+        "content_warning": has_content_warning,
         "findings": audit_findings,
         "omitted_numbers": omitted_numbers[:10],
         "omitted_entities": omitted_entities[:10],
@@ -1187,15 +1327,37 @@ def execute_unified_long_form_pipeline(
     else:
         outline = job.outline_json
 
-    # 4. Sequential Section Generation with Checkpointing
+    # 4. Sequential Section Generation with Dynamic Budgeting and Checkpointing
     sections_def = outline.get("sections", [])
     completed_sections: list[dict[str, Any]] = list(job.section_progress_json or [])
     completed_indices = {s["section_index"] for s in completed_sections}
+
+    requested_budget = get_target_word_budget(target_minutes)
+    planned_target = outline.get("target_total_words") or requested_budget
+
+    cumulative_words = sum(s.get("word_count", 0) for s in completed_sections)
+    unwritten_sections_count = len([s for s in sections_def if s["section_index"] not in completed_indices])
 
     for sec_def in sections_def:
         sec_idx = sec_def["section_index"]
         if sec_idx in completed_indices:
             continue
+
+        # Dynamic remaining-budget redistribution:
+        # Subsequent section targets adapt to actual output within sensible bounds
+        if planned_target and unwritten_sections_count > 0:
+            remaining_target = max(0, planned_target - cumulative_words)
+            nominal_target = remaining_target // unwritten_sections_count
+
+            # Determine baseline and bounding clamps
+            base_sec_target = planned_target // len(sections_def)
+            min_bound = max(180, int(base_sec_target * 0.45))
+            max_bound = min(3000, max(min_bound + 100, int(base_sec_target * 1.6)))
+            curr_target = max(min_bound, min(max_bound, nominal_target))
+
+            sec_def["word_budget"] = curr_target
+            sec_def["word_budget_min"] = int(round(curr_target * 0.85))
+            sec_def["word_budget_max"] = int(round(curr_target * 1.15))
 
         if status_notifier:
             status_notifier(f"Writing section {sec_idx} of {len(sections_def)}: {sec_def['heading']}...")
@@ -1212,104 +1374,112 @@ def execute_unified_long_form_pipeline(
             scope=effective_scope,
             db=db,
         )
+        sec_words = sec_result.get("word_count", 0)
+        cumulative_words += sec_words
+        unwritten_sections_count -= 1
+
+        sec_result["cumulative_words"] = cumulative_words
+        sec_result["remaining_target"] = max(0, planned_target - cumulative_words) if planned_target else None
         completed_sections.append(sec_result)
         job.section_progress_json = completed_sections
         db.commit()
 
     # Fixed duration enforcement: check for material underfill across all sections
-    requested_budget = get_target_word_budget(target_minutes)
-    planned_target = outline.get("target_total_words") or requested_budget
     total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
 
-    if planned_target and planned_target > 500 and total_generated_words < int(planned_target * 0.75):
-        if effective_scope != EvidenceScope.SOURCE_ONLY:
-            # Expanded/Topic: execute bounded evidence-backed continuation pass
-            if status_notifier:
-                status_notifier("Performing evidence-backed continuation to meet target duration...")
+    if planned_target and planned_target > 500:
+        fill_ratio = total_generated_words / float(planned_target)
+        if fill_ratio >= 0.90:
             logger.info(
-                f"Long-form underfilled target budget ({total_generated_words} words vs {planned_target} planned). "
-                "Executing bounded evidence-backed continuation strategy."
+                f"Long-form generation reached {fill_ratio:.1%} of target "
+                f"({total_generated_words}/{planned_target} words). Accepted cleanly."
             )
-            deficit = planned_target - total_generated_words
-            continuation_sec_def = {
-                "section_index": len(completed_sections) + 1,
-                "heading": "Comprehensive Analysis and Evidence Synthesis",
-                "purpose": "Synthesize grounded research findings, historical/technical parallels, and systemic ramifications.",
-                "word_budget": deficit,
-                "relevant_evidence_ids": [it["evidence_id"] for it in evidence_packet.get("items", [])],
-                "transition_intent": "Deepen the analysis with evidence synthesis",
-            }
-            prev_narr = completed_sections[-1]["narration"] if completed_sections else ""
-            try:
-                cont_sec = generate_single_section(
-                    job=job,
-                    section_info=continuation_sec_def,
-                    topic=topic,
-                    evidence_packet=evidence_packet,
-                    previous_summary=prev_narr[:250],
-                    scope=effective_scope,
-                    db=db,
-                )
-                if cont_sec.get("word_count", 0) > 100:
-                    completed_sections.append(cont_sec)
-                    job.section_progress_json = completed_sections
-                    total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
-                    db.commit()
-            except Exception as cont_err:
-                logger.warning(f"Optional continuation section generation failed non-fatally: {cont_err}")
-                record_job_diagnostic_event(
-                    job.id,
-                    "WARNING",
-                    "section_expansion",
-                    "CONTINUATION_EXPANSION_FAILED",
-                    f"Optional continuation section expansion failed non-fatally: {cont_err}",
-                    metadata={"error": str(cont_err)[:200]},
-                    db=db,
-                )
+        elif 0.80 <= fill_ratio < 0.90:
+            underfill_msg = (
+                f"Generated {total_generated_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
+                "Accepted within 80-90% duration tolerance without padding."
+            )
+            logger.info(underfill_msg)
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "duration",
+                "DURATION_UNDERFILL_ACCEPTED",
+                underfill_msg,
+                metadata={
+                    "total_words": total_generated_words,
+                    "planned_target": planned_target,
+                    "fill_ratio": round(fill_ratio, 3),
+                },
+                db=db,
+            )
         else:
-            # Source mode: only expand if source contains sufficient material; otherwise preserve faithful brevity
-            src_words = len((source_ledger.get("clean_text", "") if source_ledger else (source_text or "")).split())
-            if src_words >= int(planned_target * 0.75):
-                if status_notifier:
-                    status_notifier("Deepening source narration to meet target duration...")
-                logger.info(f"Source has {src_words} words; expanding shortest sections to fulfill target budget.")
-                shortest_idx = min(range(len(completed_sections)), key=lambda i: completed_sections[i].get("word_count", 99999))
-                shortest_sec = completed_sections[shortest_idx]
-                expansion_instructions = (
-                    f"Target Word Budget: approximately {shortest_sec.get('target_word_budget', 500)} words. "
-                    "Elaborate thoroughly on the provided source evidence with natural spoken detail, explaining mechanisms. "
-                    "Do not invent facts outside the source."
-                )
-                try:
-                    def _do_src_elab(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
-                        return p_inst.generate_script(
-                            source_text=src,
-                            request_mode="standard",
-                            source_title=topic,
-                            job_id=job.id,
-                            generation_instructions=expansion_instructions,
-                        )
+            # < 80%: An additional section is permitted ONLY if genuinely uncovered evidence exists
+            covered_evidence_ids = {ev for s in completed_sections for ev in s.get("relevant_evidence_ids", [])}
+            all_packet_items = evidence_packet.get("items", []) if evidence_packet else []
+            uncovered_items = [
+                it for it in all_packet_items
+                if it.get("evidence_id") and it["evidence_id"] not in covered_evidence_ids and not it.get("is_seed_source")
+            ]
 
-                    elab_res = execute_with_failover(
+            if uncovered_items and effective_scope != EvidenceScope.SOURCE_ONLY:
+                first_uncovered = uncovered_items[0]
+                uncovered_heading = first_uncovered.get("title") or f"Additional Findings on {topic}"
+                logger.info(
+                    f"Long-form underfilled ({total_generated_words}/{planned_target} words) with uncovered evidence. "
+                    f"Generating bounded section on uncovered material: {uncovered_heading}"
+                )
+                deficit = max(250, min(1200, planned_target - total_generated_words))
+                uncovered_sec_def = {
+                    "section_index": len(completed_sections) + 1,
+                    "heading": uncovered_heading,
+                    "purpose": f"Analyze specific uncovered findings regarding: {first_uncovered.get('focus_area', topic)}.",
+                    "word_budget": deficit,
+                    "word_budget_min": int(round(deficit * 0.85)),
+                    "word_budget_max": int(round(deficit * 1.15)),
+                    "relevant_evidence_ids": [it["evidence_id"] for it in uncovered_items[:3]],
+                    "key_points": [first_uncovered.get("snippet", "")[:120]],
+                    "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
+                    "transition_intent": "Explore additional uncovered evidence",
+                }
+                prev_narr = completed_sections[-1]["narration"] if completed_sections else ""
+                try:
+                    extra_sec = generate_single_section(
                         job=job,
-                        operation="section_generation",
-                        execute_fn=_do_src_elab,
+                        section_info=uncovered_sec_def,
+                        topic=topic,
+                        evidence_packet=evidence_packet,
+                        previous_summary=prev_narr[:250],
+                        scope=effective_scope,
                         db=db,
-                        source_text=source_text or source_ledger.get("clean_text", ""),
                     )
-                    elab_narr = "\n\n".join(seg.narration for seg in elab_res.segments)
-                    if len(elab_narr.split()) > shortest_sec.get("word_count", 0):
-                        shortest_sec["narration"] = elab_narr
-                        shortest_sec["word_count"] = len(elab_narr.split())
+                    if extra_sec.get("word_count", 0) > 100:
+                        extra_sec["cumulative_words"] = total_generated_words + extra_sec.get("word_count", 0)
+                        extra_sec["remaining_target"] = max(0, planned_target - extra_sec["cumulative_words"])
+                        completed_sections.append(extra_sec)
                         job.section_progress_json = completed_sections
                         total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
                         db.commit()
-                except Exception as elab_err:
-                    logger.warning(f"Source-grounded expansion failed non-fatally: {elab_err}")
+                except Exception as extra_err:
+                    logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
             else:
-                logger.info(
-                    f"Source word count ({src_words}) cannot legitimately support {planned_target} words. "
-                    "Preserving faithful shorter result and recording duration telemetry."
+                underfill_msg = (
+                    f"Generated {total_generated_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
+                    "No uncovered evidence remaining; accepting faithful shorter script without artificial recap filler."
+                )
+                logger.info(underfill_msg)
+                record_job_diagnostic_event(
+                    job.id,
+                    "WARNING",
+                    "duration",
+                    "DURATION_UNDERFILL_ACCEPTED",
+                    underfill_msg,
+                    metadata={
+                        "total_words": total_generated_words,
+                        "planned_target": planned_target,
+                        "fill_ratio": round(fill_ratio, 3),
+                    },
+                    db=db,
                 )
 
     # 5. Semantic Fidelity Audit & Bounded Repair
@@ -1327,18 +1497,6 @@ def execute_unified_long_form_pipeline(
     )
     job.fidelity_audit_json = audit_res
 
-    # Record duration telemetry
-    cfg_state = job.configuration_state_json or {}
-    if not isinstance(cfg_state, dict):
-        cfg_state = {}
-    cfg_state.update({
-        "requested_target_words": requested_budget,
-        "evidence_supported_target_words": planned_target,
-        "actual_words": sum(s.get("word_count", 0) for s in repaired_sections),
-    })
-    job.configuration_state_json = cfg_state
-    db.commit()
-
     # 6. Final Coherence Pass & Assembly
     if status_notifier:
         status_notifier("Assembling final podcast script...")
@@ -1351,6 +1509,54 @@ def execute_unified_long_form_pipeline(
         planned_target_words=planned_target,
     )
     job.script_json = final_script.model_dump()
+
+    # Calculate precise duration using cadence, numeric/acronym density & pause models
+    from herald.services.eta_calculator import calculate_script_duration
+    from herald.services.quality_gate import run_quality_gate
+
+    dur_info = calculate_script_duration(
+        job.script_json, job.custom_speed or settings.KOKORO_SPEED
+    )
+    job.program_duration_seconds = dur_info.get("predicted_duration_seconds")
+
+    # Run deterministic local quality gate
+    cleaned_script, q_report = run_quality_gate(job.script_json)
+    job.script_json = cleaned_script
+    if q_report.has_warnings:
+        record_job_diagnostic_event(
+            job.id,
+            "WARNING",
+            "quality_gate",
+            "QUALITY_GATE_WARNINGS",
+            f"Quality gate identified {len(q_report.warnings)} issues: {', '.join(w.message for w in q_report.warnings[:3])}",
+            metadata={"warning_count": len(q_report.warnings), "warnings": [w.to_dict() for w in q_report.warnings]},
+            db=db,
+        )
+
+    if audit_res.get("content_warning"):
+        record_job_diagnostic_event(
+            job.id,
+            "WARNING",
+            "fidelity",
+            "CONTENT_WARNING_FLAGGED",
+            f"Unresolved factual or fidelity concern remains after audit: {audit_res.get('repair_instructions', 'Fidelity issue')}",
+            metadata={"audit_status": audit_res.get("status"), "repair_instructions": audit_res.get("repair_instructions")},
+            db=db,
+        )
+
+    # Record duration & configuration telemetry
+    cfg_state = job.configuration_state_json or {}
+    if not isinstance(cfg_state, dict):
+        cfg_state = {}
+    cfg_state.update({
+        "requested_target_words": requested_budget,
+        "evidence_supported_target_words": planned_target,
+        "actual_words": sum(s.get("word_count", 0) for s in repaired_sections),
+        "duration_estimation": dur_info,
+        "quality_gate": q_report.to_dict(),
+        "content_warning": bool(audit_res.get("content_warning")),
+    })
+    job.configuration_state_json = cfg_state
     db.commit()
 
     return final_script
