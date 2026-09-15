@@ -12,6 +12,7 @@ Supports:
 """
 
 import enum
+import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -360,6 +361,78 @@ def build_research_plan(
     }
 
 
+def extract_narrative_plan_from_research_text(raw_text: str | None) -> list[dict[str, Any]]:
+    """
+    Extract structured, topic-specific narrative plan from grounded research text.
+    Searches for <NARRATIVE_PLAN>...</NARRATIVE_PLAN> or JSON array blocks containing
+    section headings and narrative purposes.
+    Returns list of dicts with keys: heading, purpose, key_points, relevant_sources.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return []
+
+    text_to_parse = raw_text
+
+    # 1. Try matching <NARRATIVE_PLAN>...</NARRATIVE_PLAN>
+    plan_match = re.search(r"<NARRATIVE_PLAN>(.*?)</NARRATIVE_PLAN>", raw_text, re.DOTALL | re.IGNORECASE)
+    if plan_match:
+        text_to_parse = plan_match.group(1).strip()
+
+    # 2. Extract JSON array
+    json_array_match = re.search(r"\[\s*\{.*\}\s*\]", text_to_parse, re.DOTALL)
+    candidate_json = json_array_match.group(0) if json_array_match else text_to_parse
+
+    parsed_data = None
+    try:
+        parsed_data = json.loads(candidate_json)
+    except Exception:
+        clean_cand = re.sub(r"^```(?:json)?\s*", "", candidate_json.strip())
+        clean_cand = re.sub(r"\s*```$", "", clean_cand.strip())
+        try:
+            parsed_data = json.loads(clean_cand)
+        except Exception:
+            pass
+
+    if not isinstance(parsed_data, list):
+        return []
+
+    valid_sections: list[dict[str, Any]] = []
+    for item in parsed_data:
+        if not isinstance(item, dict):
+            continue
+        h = item.get("heading")
+        p = item.get("purpose")
+        if not h or not isinstance(h, str) or not p or not isinstance(p, str):
+            continue
+
+        clean_heading = re.sub(r"^(?:section\s+\d+[:.]?|\d+[\).:-])\s*", "", h.strip(), flags=re.IGNORECASE)
+        clean_purpose = p.strip()
+
+        kps = item.get("key_points") or []
+        if isinstance(kps, str):
+            kps = [k.strip() for k in re.split(r"[;\n]+", kps) if k.strip()]
+        elif not isinstance(kps, list):
+            kps = []
+        clean_kps = [str(k).strip() for k in kps if str(k).strip()]
+
+        rel_sources = item.get("relevant_sources") or item.get("relevant_evidence_ids") or []
+        if isinstance(rel_sources, str):
+            rel_sources = [s.strip() for s in re.split(r"[,;\s]+", rel_sources) if s.strip()]
+        elif not isinstance(rel_sources, list):
+            rel_sources = []
+        clean_sources = [str(s).strip() for s in rel_sources if str(s).strip()]
+
+        valid_sections.append({
+            "heading": clean_heading,
+            "purpose": clean_purpose,
+            "key_points": clean_kps[:4],
+            "relevant_sources": clean_sources,
+            "relevant_evidence_ids": clean_sources,
+        })
+
+    return valid_sections
+
+
 def normalize_evidence_packet(
     topic: str,
     scope: EvidenceScope,
@@ -480,13 +553,98 @@ def normalize_evidence_packet(
                 "focus_area": "External Grounded Research",
             })
 
+    # Extract / preserve topic-specific narrative plan from grounded research if present
+    narrative_plan: list[dict[str, Any]] = []
+    if grounded_research_data:
+        plan_data = grounded_research_data.get("narrative_plan")
+        if plan_data and isinstance(plan_data, list):
+            narrative_plan = plan_data
+        elif grounded_research_data.get("raw_text"):
+            narrative_plan = extract_narrative_plan_from_research_text(grounded_research_data["raw_text"])
+
+    # Semantically associate narrative plan sections with actual evidence items
+    items_by_id = {it["evidence_id"]: it for it in items if it.get("evidence_id")}
+    for plan_sec in narrative_plan:
+        raw_sources = plan_sec.get("relevant_sources") or plan_sec.get("relevant_evidence_ids") or []
+        matched_eids = []
+        for s in raw_sources:
+            if s in items_by_id:
+                matched_eids.append(s)
+                continue
+            for it in items:
+                it_src_ids = it.get("source_ids") or []
+                if s in it_src_ids:
+                    matched_eids.append(it["evidence_id"])
+                elif s and it.get("source_url") and s.lower() in it["source_url"].lower():
+                    matched_eids.append(it["evidence_id"])
+                elif s and len(s) > 3 and s.lower() in (it.get("title") or "").lower():
+                    matched_eids.append(it["evidence_id"])
+        if matched_eids:
+            plan_sec["relevant_evidence_ids"] = list(dict.fromkeys(matched_eids))
+
     return {
         "topic": topic,
         "scope": scope.value,
         "seed_source_url": seed_source_url,
         "evidence_count": len(items),
         "items": items,
+        "narrative_plan": narrative_plan,
     }
+
+
+def build_already_covered_context(
+    completed_sections: list[dict[str, Any]],
+    current_heading: str | None = None,
+    current_purpose: str | None = None,
+    current_idx: int | None = None,
+) -> str:
+    """
+    Deterministically build compact, bounded (~200 tokens) anti-repetition guidance
+    from completed sections to prevent narrative looping without LLM calls.
+    """
+    if not completed_sections:
+        return ""
+
+    lines = ["ALREADY COVERED IN PREVIOUS SECTIONS (DO NOT REPEAT):"]
+    recent_secs = completed_sections[-3:] if len(completed_sections) > 3 else completed_sections
+    if len(completed_sections) > 3:
+        earlier_headings = [s.get("heading", f"Section {s.get('section_index')}") for s in completed_sections[:-3]]
+        lines.append(f"- Earlier sections: {', '.join(earlier_headings)}")
+
+    for s in recent_secs:
+        s_idx = s.get("section_index", "?")
+        s_head = s.get("heading", f"Section {s_idx}")
+        kp = s.get("key_points")
+        if kp and isinstance(kp, list):
+            kp_text = "; ".join(str(k)[:60] for k in kp[:2])
+        else:
+            kp_text = (s.get("purpose") or "")[:60]
+        lines.append(f"- Section {s_idx}: {s_head} - covered {kp_text}")
+
+    used_eids: list[str] = []
+    for s in completed_sections:
+        for eid in s.get("relevant_evidence_ids", []):
+            if eid and str(eid) not in used_eids:
+                used_eids.append(str(eid))
+    if used_eids:
+        lines.append(f"Evidence already introduced: {', '.join(used_eids[:10])}")
+
+    last_narr = completed_sections[-1].get("narration", "").strip()
+    sentences = re.findall(r"[^.!?]+[.!?]+", last_narr)
+    closing_sentence = sentences[-1].strip() if sentences else (last_narr[-120:].strip() if last_narr else "")
+    if len(closing_sentence) > 140:
+        closing_sentence = closing_sentence[-140:].strip()
+    if closing_sentence:
+        lines.append(f'Previous section ended with: "{closing_sentence}"')
+
+    if current_heading and current_purpose:
+        c_idx_str = f"Section {current_idx}" if current_idx is not None else "Current Section"
+        lines.append(
+            f"Your task for {c_idx_str} ({current_heading}):\n"
+            f"Focus exclusively on {current_purpose}. Advance the narrative. Do NOT re-explain concepts from earlier sections."
+        )
+
+    return "\n".join(lines)
 
 
 def build_episode_outline(
@@ -500,12 +658,17 @@ def build_episode_outline(
     """
     Build structured episode outline with topic/evidence-specific section headings,
     explicit target ranges, assigned key points, and anti-repetition guidance.
+
+    Prioritizes model-generated topic-specific narrative plans from grounded research.
+    Retains domain archetypes ONLY as deterministic fallback when research plan is unavailable.
+    Preserves semantic evidence associations over positional slicing.
     """
     target_budget = get_target_word_budget(target_minutes)
     is_auto = target_budget is None
 
     items = evidence_packet.get("items", [])
-    evidence_ids = [it["evidence_id"] for it in items]
+    items_by_id = {it["evidence_id"]: it for it in items if it.get("evidence_id")}
+    evidence_ids = list(items_by_id.keys())
 
     source_words = len((source_ledger.get("clean_text", "") if source_ledger else "").split())
 
@@ -520,95 +683,182 @@ def build_episode_outline(
             )
             evidence_supported_target = max_legitimate_words
 
-    # Section counts and target word distribution
-    if is_auto:
-        if scope == EvidenceScope.SOURCE_ONLY and source_ledger:
-            sec_count = max(2, min(len(source_ledger.get("headings", [])) or len(items) or 3, 6))
+    # 1. Check for topic-specific narrative plan from grounded research
+    narrative_plan = evidence_packet.get("narrative_plan")
+    use_narrative_plan = (
+        scope != EvidenceScope.SOURCE_ONLY
+        and isinstance(narrative_plan, list)
+        and len(narrative_plan) >= 2
+    )
+
+    if use_narrative_plan:
+        sec_count = len(narrative_plan)
+        section_proposals = list(narrative_plan)
+    else:
+        # Build proposals from source ledger, research focus areas, or items
+        headings_pool: list[dict[str, Any]] = []
+        if scope == EvidenceScope.SOURCE_ONLY and source_ledger and source_ledger.get("headings"):
+            for h in source_ledger["headings"]:
+                headings_pool.append({
+                    "heading": h,
+                    "purpose": f"Explore source content on: {h}",
+                    "relevant_evidence_ids": [],
+                    "key_points": [],
+                })
         elif research_plan and research_plan.get("focus_areas"):
-            sec_count = max(2, len(research_plan["focus_areas"]))
+            for fa in research_plan["focus_areas"]:
+                headings_pool.append({
+                    "heading": fa["name"],
+                    "purpose": fa.get("focus", f"Explore {fa['name']}"),
+                    "relevant_evidence_ids": [],
+                    "key_points": [],
+                })
+        elif items:
+            for it in items:
+                t = it.get("title") or it.get("focus_area")
+                if t and not any(p["heading"] == t for p in headings_pool):
+                    headings_pool.append({
+                        "heading": t,
+                        "purpose": f"Analyze key facts and findings regarding {t}.",
+                        "relevant_evidence_ids": [it["evidence_id"]],
+                        "key_points": [it.get("snippet", "")[:120]] if it.get("snippet") else [],
+                    })
+
+        # Fallback to domain templates ONLY if pool is empty
+        if not headings_pool:
+            domain_plan = build_research_plan(topic=topic, research_depth="high", scope=scope)
+            for fa in domain_plan.get("focus_areas", []):
+                headings_pool.append({
+                    "heading": fa["name"],
+                    "purpose": fa.get("focus", f"Explore {fa['name']}"),
+                    "relevant_evidence_ids": [],
+                    "key_points": [],
+                })
+
+        # Section counts and target word distribution for non-narrative-plan flow
+        if is_auto:
+            sec_count = max(2, min(len(headings_pool), 6))
         else:
-            sec_count = max(2, min(len(items), 6))
+            if evidence_supported_target <= 1500:
+                nominal_sec_count = 3
+            elif evidence_supported_target <= 3000:
+                nominal_sec_count = 5
+            elif evidence_supported_target <= 4500:
+                nominal_sec_count = 7
+            elif evidence_supported_target <= 6000:
+                nominal_sec_count = 9
+            else:
+                nominal_sec_count = 11
+
+            if evidence_ids:
+                if scope == EvidenceScope.SOURCE_ONLY:
+                    max_supported_secs = max(2, min(len(evidence_ids), len(headings_pool) or len(evidence_ids)))
+                else:
+                    max_supported_secs = max(2, min(len(evidence_ids) + 1, nominal_sec_count))
+                sec_count = min(nominal_sec_count, max_supported_secs)
+            else:
+                sec_count = nominal_sec_count
+
+        section_proposals = []
+        for i in range(sec_count):
+            if i < len(headings_pool):
+                section_proposals.append(headings_pool[i])
+            else:
+                base = headings_pool[i % len(headings_pool)]
+                section_proposals.append({
+                    "heading": f"{base['heading']} (Part {i+1})",
+                    "purpose": f"Deepen exploration of {base['heading']}.",
+                    "relevant_evidence_ids": list(base.get("relevant_evidence_ids", [])),
+                    "key_points": list(base.get("key_points", [])),
+                })
+
+    if is_auto:
         section_word_budget = None
         effective_total_words = None
     else:
         effective_total_words = evidence_supported_target
-        if evidence_supported_target <= 1500:
-            nominal_sec_count = 3
-        elif evidence_supported_target <= 3000:
-            nominal_sec_count = 5
-        elif evidence_supported_target <= 4500:
-            nominal_sec_count = 7
-        elif evidence_supported_target <= 6000:
-            nominal_sec_count = 9
-        else:
-            nominal_sec_count = 11
-
-        if evidence_ids:
-            if scope == EvidenceScope.SOURCE_ONLY:
-                max_supported_secs = max(2, min(len(evidence_ids), len(source_ledger.get("headings", [])) or len(evidence_ids)))
-            elif research_plan and research_plan.get("focus_areas"):
-                max_supported_secs = max(len(research_plan["focus_areas"]), min(len(evidence_ids), nominal_sec_count))
-            else:
-                max_supported_secs = max(2, min(len(evidence_ids) + 1, nominal_sec_count))
-            sec_count = min(nominal_sec_count, max_supported_secs)
-        else:
-            sec_count = nominal_sec_count
-
         section_word_budget = evidence_supported_target // sec_count
 
-    # Build topic-specific section headings and narrative purposes
-    headings_pool = []
-    if scope == EvidenceScope.SOURCE_ONLY and source_ledger and source_ledger.get("headings"):
-        for h in source_ledger["headings"]:
-            headings_pool.append((h, f"Explore source content on: {h}"))
-    elif research_plan and research_plan.get("focus_areas"):
-        for fa in research_plan["focus_areas"]:
-            headings_pool.append((fa["name"], fa["focus"]))
-    elif items:
+    # 2. Semantic Evidence Mapping
+    # Validate proposed evidence IDs against items_by_id and assign based on thematic relevance
+    section_evidence_assignments: list[list[str]] = []
+    assigned_any_semantic = False
+
+    for prop in section_proposals:
+        matched_eids: list[str] = []
+        # Validate explicit evidence IDs
+        for eid in prop.get("relevant_evidence_ids", []):
+            if eid in items_by_id and eid not in matched_eids:
+                matched_eids.append(eid)
+
+        # Match evidence by focus area or heading/purpose keyword overlap
+        heading_words = {w.lower() for w in re.findall(r"\w{4,}", prop.get("heading", ""))}
+        purpose_words = {w.lower() for w in re.findall(r"\w{4,}", prop.get("purpose", ""))}
+        kw_set = heading_words | purpose_words
+
         for it in items:
-            t = it.get("title") or it.get("focus_area")
-            if t and (t, f"Analyze findings on: {t}") not in headings_pool:
-                headings_pool.append((t, f"Analyze key facts and findings regarding {t}."))
+            eid = it.get("evidence_id")
+            if not eid or eid in matched_eids:
+                continue
+            fa = (it.get("focus_area") or "").lower()
+            title = (it.get("title") or "").lower()
+            snip = (it.get("snippet") or "")[:200].lower()
+            if any(w in fa or w in title for w in kw_set if len(w) > 3):
+                matched_eids.append(eid)
+            elif sum(1 for w in kw_set if w in snip) >= 2:
+                matched_eids.append(eid)
 
-    # Fallback to domain-tailored focus areas if pool is empty or insufficient
-    if not headings_pool:
-        domain_plan = build_research_plan(topic=topic, research_depth="high", scope=scope)
-        for fa in domain_plan["focus_areas"]:
-            headings_pool.append((fa["name"], fa["focus"]))
+        if matched_eids:
+            assigned_any_semantic = True
+        section_evidence_assignments.append(matched_eids)
 
+    # Positional slicing ONLY as fallback when no thematic association exists
+    if not assigned_any_semantic and evidence_ids:
+        for i in range(sec_count):
+            if len(evidence_ids) <= sec_count:
+                chunk_idx = (i * len(evidence_ids)) // sec_count
+                section_evidence_assignments[i] = [evidence_ids[chunk_idx]]
+            else:
+                start_ev = (i * len(evidence_ids)) // sec_count
+                end_ev = ((i + 1) * len(evidence_ids)) // sec_count
+                section_evidence_assignments[i] = evidence_ids[start_ev:max(start_ev + 1, end_ev)]
+    else:
+        # Ensure no evidence is orphaned: assign unassigned items to best-matching section
+        assigned_all_eids = {eid for sec_eids in section_evidence_assignments for eid in sec_eids}
+        for it in items:
+            eid = it.get("evidence_id")
+            if eid and eid not in assigned_all_eids:
+                # Find best section by keyword match, or section 0 if none
+                best_sec_idx = 0
+                max_score = 0
+                it_text = f"{it.get('title', '')} {it.get('snippet', '')[:150]}".lower()
+                for s_idx, prop in enumerate(section_proposals):
+                    score = sum(1 for w in re.findall(r"\w{4,}", prop.get("heading", "").lower()) if w in it_text)
+                    if score > max_score:
+                        max_score = score
+                        best_sec_idx = s_idx
+                section_evidence_assignments[best_sec_idx].append(eid)
+                assigned_all_eids.add(eid)
+
+    # 3. Assemble sections
     sections = []
-    items_by_id = {it["evidence_id"]: it for it in items if it.get("evidence_id")}
-
-    for i in range(sec_count):
+    for i, prop in enumerate(section_proposals):
         idx = i + 1
-        if i < len(headings_pool):
-            heading, purpose = headings_pool[i]
-        else:
-            base_heading, base_purpose = headings_pool[i % len(headings_pool)]
-            heading = f"{base_heading} (Part {idx})"
-            purpose = f"Deepen the exploration of {base_heading}."
+        heading = prop["heading"]
+        purpose = prop["purpose"]
+        assigned_ev = section_evidence_assignments[i] if i < len(section_evidence_assignments) else []
 
-        # Assign relevant evidence deliberately
-        if not evidence_ids:
-            assigned_ev = []
-        elif len(evidence_ids) <= sec_count:
-            chunk_idx = (i * len(evidence_ids)) // sec_count
-            assigned_ev = [evidence_ids[chunk_idx]]
-        else:
-            start_ev = (i * len(evidence_ids)) // sec_count
-            end_ev = ((i + 1) * len(evidence_ids)) // sec_count
-            assigned_ev = evidence_ids[start_ev:max(start_ev + 1, end_ev)]
-
-        # Extract compact key points from assigned evidence
-        key_points = []
-        for eid in assigned_ev:
-            if eid in items_by_id:
-                it = items_by_id[eid]
-                snip = it.get("snippet", "").strip()
-                if snip:
-                    first_sent = re.split(r"(?<=[.!?])\s+", snip)[0].strip()
-                    if first_sent and len(first_sent) > 10:
-                        key_points.append(first_sent[:120])
+        # Extract compact key points from assigned evidence or proposal
+        key_points = list(prop.get("key_points") or [])
+        if not key_points:
+            for eid in assigned_ev:
+                if eid in items_by_id:
+                    it = items_by_id[eid]
+                    snip = it.get("snippet", "").strip()
+                    if snip:
+                        first_sent = re.split(r"(?<=[.!?])\s+", snip)[0].strip()
+                        if first_sent and len(first_sent) > 10:
+                            key_points.append(first_sent[:120])
         if not key_points and purpose:
             key_points.append(purpose[:120])
 
@@ -638,7 +888,7 @@ def build_episode_outline(
         "episode_description": f"An in-depth exploration of {topic}.",
         "requested_target_words": get_target_word_budget(target_minutes),
         "target_total_words": effective_total_words,
-        "section_count": sec_count,
+        "section_count": len(sections),
         "sections": sections,
         "is_auto": is_auto,
     }
@@ -649,9 +899,10 @@ def generate_single_section(
     section_info: dict[str, Any],
     topic: str,
     evidence_packet: dict[str, Any],
-    previous_summary: str | None,
-    scope: EvidenceScope,
+    previous_summary: str | None = None,
+    scope: EvidenceScope = EvidenceScope.SOURCE_ONLY,
     db: Any = None,
+    covered_context: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate one section of the long-form podcast script grounded strictly in assigned evidence.
@@ -677,11 +928,16 @@ def generate_single_section(
 
     evidence_text = "\n\n".join(assigned_snippets) or f"Evidence regarding {topic}."
 
-    prev_context = (
-        f"Previous section covered: {previous_summary}. Do NOT repeat those introductory facts. Continue the narrative naturally with a smooth spoken transition."
-        if previous_summary
-        else "This is the opening section. Hook the listener and state the central premise directly without meta-announcements."
-    )
+    anti_rep_context = covered_context or previous_summary
+    if anti_rep_context:
+        if "ALREADY COVERED" in anti_rep_context:
+            prev_context = anti_rep_context
+        else:
+            prev_context = (
+                f"Previous section covered: {anti_rep_context}. Do NOT repeat those introductory facts. Continue the narrative naturally with a smooth spoken transition."
+            )
+    else:
+        prev_context = "This is the opening section. Hook the listener and state the central premise directly without meta-announcements."
 
     budget_instruction = (
         f"Target Word Range: approximately {budget_min}–{budget_max} words (nominal target: {budget} words). "
@@ -1362,15 +1618,19 @@ def execute_unified_long_form_pipeline(
         if status_notifier:
             status_notifier(f"Writing section {sec_idx} of {len(sections_def)}: {sec_def['heading']}...")
 
-        prev_narration = completed_sections[-1]["narration"] if completed_sections else None
-        prev_summary = prev_narration[:200] if prev_narration else None
+        covered_ctx = build_already_covered_context(
+            completed_sections,
+            current_heading=sec_def.get("heading"),
+            current_purpose=sec_def.get("purpose"),
+            current_idx=sec_idx,
+        )
 
         sec_result = generate_single_section(
             job=job,
             section_info=sec_def,
             topic=topic,
             evidence_packet=evidence_packet,
-            previous_summary=prev_summary,
+            previous_summary=covered_ctx if completed_sections else None,
             scope=effective_scope,
             db=db,
         )
@@ -1442,14 +1702,19 @@ def execute_unified_long_form_pipeline(
                     "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
                     "transition_intent": "Explore additional uncovered evidence",
                 }
-                prev_narr = completed_sections[-1]["narration"] if completed_sections else ""
+                covered_ctx = build_already_covered_context(
+                    completed_sections,
+                    current_heading=uncovered_heading,
+                    current_purpose=uncovered_sec_def["purpose"],
+                    current_idx=uncovered_sec_def["section_index"],
+                )
                 try:
                     extra_sec = generate_single_section(
                         job=job,
                         section_info=uncovered_sec_def,
                         topic=topic,
                         evidence_packet=evidence_packet,
-                        previous_summary=prev_narr[:250],
+                        previous_summary=covered_ctx,
                         scope=effective_scope,
                         db=db,
                     )
@@ -1459,6 +1724,19 @@ def execute_unified_long_form_pipeline(
                         completed_sections.append(extra_sec)
                         job.section_progress_json = completed_sections
                         total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
+                        record_job_diagnostic_event(
+                            job.id,
+                            "INFO",
+                            "duration",
+                            "UNCOVERED_EVIDENCE_SECTION_GENERATED",
+                            f"Generated bounded extra section on uncovered evidence: {uncovered_heading}",
+                            metadata={
+                                "extra_section_heading": uncovered_heading,
+                                "word_count": extra_sec.get("word_count", 0),
+                                "uncovered_evidence_ids": uncovered_sec_def["relevant_evidence_ids"],
+                            },
+                            db=db,
+                        )
                         db.commit()
                 except Exception as extra_err:
                     logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
@@ -1520,7 +1798,12 @@ def execute_unified_long_form_pipeline(
     job.program_duration_seconds = dur_info.get("predicted_duration_seconds")
 
     # Run deterministic local quality gate
-    cleaned_script, q_report = run_quality_gate(job.script_json)
+    cleaned_script, q_report = run_quality_gate(
+        job.script_json,
+        job=job,
+        outline=outline,
+        fidelity_audit=audit_res,
+    )
     job.script_json = cleaned_script
     if q_report.has_warnings:
         record_job_diagnostic_event(

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from herald.ai.long_form import (
     EvidenceScope,
+    build_already_covered_context,
     build_episode_outline,
     build_research_plan,
     execute_unified_long_form_pipeline,
@@ -282,3 +283,394 @@ def test_remove_generic_catchup_section():
     # Must NOT have generic catch-up section
     headings = [seg.heading for seg in res.segments]
     assert "Comprehensive Analysis and Evidence Synthesis" not in headings
+
+
+def test_a_topic_specific_narrative_planning():
+    """Test A: Grounded research returns topic-specific narrative proposal, outline uses it directly, zero extra LLM calls."""
+    narrative_plan = [
+        {"heading": "Plant Genetics & CRISPR", "purpose": "Explain Cas9 editing in crop genomes", "relevant_evidence_ids": ["ev_crispr_1"]},
+        {"heading": "Off-Target Mutations", "purpose": "Analyze mutation frequencies and phenotyping", "relevant_evidence_ids": ["ev_crispr_2"]},
+        {"heading": "Agricultural Deployment", "purpose": "Discuss field trials and yield stability", "relevant_evidence_ids": ["ev_crispr_3"]},
+    ]
+    packet = {
+        "topic": "CRISPR off-target mutations in plant breeding",
+        "scope": "research",
+        "items": [
+            {"evidence_id": "ev_crispr_1", "title": "CRISPR in Plants", "snippet": "Cas9 applications in crops."},
+            {"evidence_id": "ev_crispr_2", "title": "Off-Target Mutations", "snippet": "Whole genome sequencing of edited plants."},
+            {"evidence_id": "ev_crispr_3", "title": "Field Trials", "snippet": "Yield impacts across test plots."},
+        ],
+        "narrative_plan": narrative_plan,
+    }
+    outline = build_episode_outline(
+        topic="CRISPR off-target mutations in plant breeding",
+        evidence_packet=packet,
+        target_minutes="15",
+        scope=EvidenceScope.RESEARCH,
+    )
+    headings = [s["heading"] for s in outline["sections"]]
+    assert headings == ["Plant Genetics & CRISPR", "Off-Target Mutations", "Agricultural Deployment"]
+    # Verify no fixed domain archetype headings
+    assert not any("Mechanisms, Data & Methodology" in h or "Frontier & Unresolved Questions" in h for h in headings)
+    assert outline["section_count"] == 3
+
+
+def test_b_fallback_narrative_planning_on_degraded_research():
+    """Test B: Degraded research produces a valid outline locally with fallback domain archetypes."""
+    packet_empty = {
+        "topic": "CRISPR off-target mutations in plant breeding",
+        "scope": "research",
+        "items": [],
+    }
+    outline = build_episode_outline(
+        topic="CRISPR off-target mutations in plant breeding",
+        evidence_packet=packet_empty,
+        target_minutes="15",
+        scope=EvidenceScope.RESEARCH,
+    )
+    assert outline is not None
+    assert len(outline["sections"]) >= 2
+    # In fallback mode without items or narrative plan, domain archetypes are safely utilized
+    headings = [s["heading"] for s in outline["sections"]]
+    assert any("Foundational" in h or "Origins" in h or "Mechanisms" in h for h in headings)
+
+
+def test_c_semantic_evidence_mapping_and_validation():
+    """Test C: Evidence mapped semantically, invalid IDs safely ignored, no orphaned items."""
+    narrative_plan = [
+        {"heading": "Roman Military System", "purpose": "Explore legions and tactical reforms", "relevant_evidence_ids": ["invalid_id_999", "ev_mil_1"]},
+        {"heading": "Economic Crisis & Inflation", "purpose": "Analyze currency debasement and trade collapse", "relevant_evidence_ids": ["ev_econ_1"]},
+    ]
+    packet = {
+        "topic": "Fall of the Western Roman Empire",
+        "scope": "research",
+        "items": [
+            {"evidence_id": "ev_econ_1", "title": "Currency Debasement", "snippet": "Silver content dropped."},
+            {"evidence_id": "ev_mil_1", "title": "Legion Shortages", "snippet": "Recruitment shortfalls in 5th century."},
+            {"evidence_id": "ev_extra_1", "title": "Barbarian Federati", "snippet": "Treaties with Gothic tribes."},
+        ],
+        "narrative_plan": narrative_plan,
+    }
+    outline = build_episode_outline(
+        topic="Fall of the Western Roman Empire",
+        evidence_packet=packet,
+        target_minutes="10",
+        scope=EvidenceScope.RESEARCH,
+    )
+    secs = outline["sections"]
+    assert len(secs) == 2
+    # Section 1 should have ev_mil_1, invalid_id_999 safely ignored
+    assert "invalid_id_999" not in secs[0]["relevant_evidence_ids"]
+    assert "ev_mil_1" in secs[0]["relevant_evidence_ids"]
+    # Section 2 has ev_econ_1
+    assert "ev_econ_1" in secs[1]["relevant_evidence_ids"]
+    # All items including ev_extra_1 assigned across sections (no orphaned evidence)
+    all_assigned = {eid for s in secs for eid in s["relevant_evidence_ids"]}
+    assert "ev_extra_1" in all_assigned
+    assert "ev_mil_1" in all_assigned
+    assert "ev_econ_1" in all_assigned
+
+
+def test_d_anti_repetition_context_is_bounded_and_structured():
+    """Test D: Anti-repetition context is compact, bounded (~200 tokens), covers headings/evidence, no full narration."""
+    completed = [
+        {
+            "section_index": 1,
+            "heading": "Origins of Roman Military",
+            "purpose": "Early organization of Roman legions.",
+            "narration": "Rome began with citizen soldier levies. " * 50 + "Over centuries this evolved into a professional standing force.",
+            "relevant_evidence_ids": ["ev_mil_1"],
+            "key_points": ["Citizen levies", "Professional standing army"],
+        },
+        {
+            "section_index": 2,
+            "heading": "The 5th Century Collapse",
+            "purpose": "Examine recruitment breakdown.",
+            "narration": "Recruitment broke down completely in the provinces. " * 50 + "Federates filled the ranks under autonomous chieftains.",
+            "relevant_evidence_ids": ["ev_mil_2"],
+            "key_points": ["Recruitment breakdown", "Federati dependence"],
+        },
+    ]
+    ctx = build_already_covered_context(
+        completed,
+        current_heading="The Sack of 476",
+        current_purpose="Detail the final deposition of Romulus Augustulus.",
+        current_idx=3,
+    )
+    assert "ALREADY COVERED IN PREVIOUS SECTIONS" in ctx
+    assert "Origins of Roman Military" in ctx
+    assert "The 5th Century Collapse" in ctx
+    assert "ev_mil_1" in ctx and "ev_mil_2" in ctx
+    assert 'Previous section ended with: "Federates filled the ranks under autonomous chieftains."' in ctx
+    assert "Your task for Section 3 (The Sack of 476)" in ctx
+    # Ensure bounded: token/word count is small (far less than full narration)
+    words = ctx.split()
+    assert len(words) < 250
+
+
+def test_e_quality_gate_wiring_in_production():
+    """Test E: Quality gate duration, budget, and fidelity checks fire when wired."""
+    from herald.services.quality_gate import run_quality_gate
+    mock_job = MagicMock()
+    mock_job.target_minutes = "5"  # ~750 words
+    mock_job.custom_speed = 1.0
+
+    outline = {
+        "sections": [
+            {"section_index": 1, "heading": "Sec 1", "word_budget": 300},
+            {"section_index": 2, "heading": "Sec 2", "word_budget": 300},
+        ]
+    }
+    # Script where section 1 heavily diverges from 300 words (800 words > 2.5x of 300)
+    # and total duration diverges from 5 min target
+    script = {
+        "episode_title": "Test Gate",
+        "segments": [
+            {"order": 1, "heading": "Sec 1", "narration": " ".join(["word"] * 800)},
+            {"order": 2, "heading": "Sec 2", "narration": " ".join(["word"] * 800)},
+        ],
+    }
+    fidelity_audit = {
+        "status": "unresolved_issue_remains",
+        "has_material_issues": True,
+        "content_warning": True,
+        "repair_instructions": "Fix fact errors.",
+    }
+    cleaned, report = run_quality_gate(
+        script,
+        job=mock_job,
+        outline=outline,
+        fidelity_audit=fidelity_audit,
+    )
+    codes = [w.code for w in report.warnings]
+    assert "SECTION_BUDGET_DIVERGENCE" in codes
+    assert "DURATION_DIVERGENCE" in codes
+    assert "UNRESOLVED_FIDELITY_FINDING" in codes
+
+
+def test_f_dynamic_budget_resume_behavior():
+    """Test F: Resume from section_progress_json reconstructs cumulative words, recalculates subsequent targets, does not re-generate completed sections."""
+    sections_def = [
+        {"section_index": 1, "heading": "Sec 1", "purpose": "P1", "word_budget": 500},
+        {"section_index": 2, "heading": "Sec 2", "purpose": "P2", "word_budget": 500},
+        {"section_index": 3, "heading": "Sec 3", "purpose": "P3", "word_budget": 500},
+    ]
+    outline = {
+        "episode_title": "Resume Test",
+        "target_total_words": 1500,
+        "sections": sections_def,
+    }
+    # Sec 1 was completed already with 300 words (underfill by 200)
+    completed_sec1 = {
+        "section_index": 1,
+        "heading": "Sec 1",
+        "purpose": "P1",
+        "narration": " ".join(["word"] * 300),
+        "word_count": 300,
+        "target_word_budget": 500,
+        "completed": True,
+    }
+    mock_db = MagicMock()
+    job = PodcastJob(
+        id="job-resume",
+        source_hash="h-resume",
+        source_text="Source",
+        content_mode="topic",
+        target_minutes="10",
+        outline_json=outline,
+        evidence_packet_json={"topic": "T", "items": []},
+        section_progress_json=[completed_sec1],
+    )
+
+    executed_sections = []
+
+    def mock_gen_sec(job, section_info, topic, evidence_packet, previous_summary, scope, db=None):
+        executed_sections.append(section_info["section_index"])
+        return {
+            "section_index": section_info["section_index"],
+            "heading": section_info["heading"],
+            "narration": " ".join(["word"] * section_info["word_budget"]),
+            "word_count": section_info["word_budget"],
+            "target_word_budget": section_info["word_budget"],
+            "completed": True,
+        }
+
+    with patch("herald.ai.long_form.generate_single_section", side_effect=mock_gen_sec), \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Resume Topic",
+            scope=EvidenceScope.RESEARCH,
+            target_minutes="10",
+            source_text="Source",
+        )
+
+    assert res is not None
+    # 1. Sec 1 was NOT re-executed
+    assert 1 not in executed_sections
+    assert executed_sections == [2, 3]
+    # 2. Remaining target (1500 - 300 = 1200) was redistributed over 2 remaining sections -> 600 each
+    sec2 = next(s for s in job.section_progress_json if s["section_index"] == 2)
+    assert sec2["target_word_budget"] == 600
+    assert len(job.section_progress_json) == 3
+
+
+def test_g_underfill_recovery_uncovered_vs_no_uncovered():
+    """Test G: Underfill with uncovered generates 1 extra section; without uncovered generates 0 and records warning."""
+    # Subtest 1: With uncovered evidence -> exactly 1 extra section
+    sections_def = [
+        {"section_index": 1, "heading": "S1", "purpose": "P1", "word_budget": 500, "relevant_evidence_ids": ["ev1"]},
+        {"section_index": 2, "heading": "S2", "purpose": "P2", "word_budget": 500, "relevant_evidence_ids": ["ev2"]},
+    ]
+    outline = {
+        "episode_title": "Underfill Test",
+        "target_total_words": 1200,
+        "sections": sections_def,
+    }
+    mock_db = MagicMock()
+    job = PodcastJob(
+        id="job-uf-1",
+        source_hash="h-uf",
+        source_text="Source",
+        content_mode="topic",
+        target_minutes="8",
+        outline_json=outline,
+        evidence_packet_json={
+            "topic": "T",
+            "items": [
+                {"evidence_id": "ev1", "snippet": "snip1"},
+                {"evidence_id": "ev2", "snippet": "snip2"},
+                {"evidence_id": "ev3_uncovered", "title": "Uncovered Breakthrough", "snippet": "snip3"},
+            ],
+        },
+    )
+
+    # Generated words total 700 (<80% of 1200 = 960)
+    def mock_gen_sec(job, section_info, topic, evidence_packet, previous_summary, scope, db=None):
+        return {
+            "section_index": section_info["section_index"],
+            "heading": section_info["heading"],
+            "narration": " ".join(["word"] * 350),
+            "word_count": 350,
+            "target_word_budget": section_info.get("word_budget"),
+            "relevant_evidence_ids": section_info.get("relevant_evidence_ids", []),
+            "completed": True,
+        }
+
+    with patch("herald.ai.long_form.generate_single_section", side_effect=mock_gen_sec), \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})), \
+         patch("herald.ai.long_form.record_job_diagnostic_event") as mock_diag:
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="T",
+            scope=EvidenceScope.RESEARCH,
+            target_minutes="8",
+            source_text="Source",
+        )
+    # Exactly 3 segments (2 original + 1 extra)
+    assert len(res.segments) == 3
+    assert res.segments[2].heading == "Uncovered Breakthrough"
+    # Diagnostics event recorded
+    recorded_events = [c[0][3] for c in mock_diag.call_args_list]
+    assert "UNCOVERED_EVIDENCE_SECTION_GENERATED" in recorded_events
+
+    # Subtest 2: NO uncovered evidence -> 0 extra sections, warning recorded
+    job2 = PodcastJob(
+        id="job-uf-2",
+        source_hash="h-uf2",
+        source_text="Source",
+        content_mode="topic",
+        target_minutes="8",
+        outline_json=outline,
+        evidence_packet_json={
+            "topic": "T",
+            "items": [
+                {"evidence_id": "ev1", "snippet": "snip1"},
+                {"evidence_id": "ev2", "snippet": "snip2"},
+            ],
+        },
+    )
+    with patch("herald.ai.long_form.generate_single_section", side_effect=mock_gen_sec), \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})), \
+         patch("herald.ai.long_form.record_job_diagnostic_event") as mock_diag2:
+        res2 = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job2,
+            topic="T",
+            scope=EvidenceScope.RESEARCH,
+            target_minutes="8",
+            source_text="Source",
+        )
+    assert len(res2.segments) == 2
+    recorded_events2 = [c[0][3] for c in mock_diag2.call_args_list]
+    assert "DURATION_UNDERFILL_ACCEPTED" in recorded_events2
+
+
+def test_h_call_count_regression_five_sections():
+    """Test H: A 5-section episode executes exactly 1 research call + 5 section calls + 0 outline calls."""
+    mock_db = MagicMock()
+    job = PodcastJob(
+        id="job-call-count",
+        source_hash="h-cc",
+        source_text="Seed",
+        content_mode="topic",
+        target_minutes="15",
+    )
+    narrative_plan = [
+        {"heading": f"Sec {i}", "purpose": f"Purp {i}", "relevant_evidence_ids": [f"ev_{i}"]}
+        for i in range(1, 6)
+    ]
+    research_mock_data = {
+        "topic": "5-Sec Topic",
+        "search_count": 3,
+        "source_count": 5,
+        "narrative_plan": narrative_plan,
+        "search_results": [{"title": f"Source {i}", "url": f"http://s{i}.com", "content": f"Text {i}"} for i in range(1, 6)],
+        "synthesized_research": "Research body text with detailed facts.",
+    }
+
+    call_counts = {"research": 0, "section": 0, "outline": 0, "fidelity": 0}
+
+    def mock_failover(job, operation, execute_fn, **kwargs):
+        provider = MagicMock()
+        if operation == "grounded_research":
+            call_counts["research"] += 1
+            provider.generate_grounded_research.return_value = research_mock_data
+            return execute_fn(provider, 1, kwargs.get("source_text", ""))
+        elif operation == "section_generation":
+            call_counts["section"] += 1
+            provider.generate_script.return_value = PodcastScriptResponse(
+                episode_title="Title",
+                episode_description="Desc",
+                segments=[PodcastSegment(order=1, heading="H", narration=" ".join(["word"] * 450))],
+                warnings=[],
+            )
+            return execute_fn(provider, 1, kwargs.get("source_text", ""))
+        elif operation in ("verification", "research_audit"):
+            call_counts["fidelity"] += 1
+            res_audit = MagicMock()
+            res_audit.has_material_issues = False
+            res_audit.model_dump.return_value = {"status": "clean"}
+            return res_audit
+        raise AssertionError(f"Unexpected LLM operation called: {operation}")
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover):
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="5-Sec Topic",
+            scope=EvidenceScope.RESEARCH,
+            target_minutes="15",
+            source_text="Seed",
+        )
+
+    # Exactly 1 research + 5 section calls + 0 outline calls
+    assert call_counts["research"] == 1
+    assert call_counts["section"] == 5
+    assert call_counts["outline"] == 0
+    assert len(res.segments) == 5
+    total_llm_calls = call_counts["research"] + call_counts["section"] + call_counts["outline"]
+    assert total_llm_calls == 6
+

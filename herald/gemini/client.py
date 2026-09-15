@@ -357,12 +357,23 @@ Your goal:
 2. Search for authoritative primary and original sources (government agencies, standards bodies, academic papers, official technical documentation).
 3. Find useful explanatory context, updates, or recent developments.
 4. Identify any meaningful contradictions, outdated claims, or uncertainty.
+5. In addition to your detailed findings, propose a compact, topic-specific narrative progression of 3 to 7 sections for a podcast episode, formatted exactly as:
+<NARRATIVE_PLAN>
+[
+  {{
+    "heading": "Topic-Specific Section Title",
+    "purpose": "Specific narrative purpose of this section",
+    "key_points": ["Key point 1", "Key point 2"],
+    "relevant_sources": ["Source query, URL, or S1, S2 identifier"]
+  }}
+]
+</NARRATIVE_PLAN>
 
 <PRIMARY_SOURCE>
 {source_text}
 </PRIMARY_SOURCE>
 
-Report your comprehensive grounded findings in detail.
+Report your comprehensive grounded findings in detail, concluding with the compact <NARRATIVE_PLAN> block.
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -554,12 +565,17 @@ Report your comprehensive grounded findings in detail.
             )
             interaction_recorded = True
 
+            from herald.ai.long_form import extract_narrative_plan_from_research_text
+
+            narrative_plan = extract_narrative_plan_from_research_text(raw_text)
+
             return {
                 "raw_text": raw_text,
                 "grounding_metadata": grounding_meta,
                 "search_count": len(web_queries),
                 "source_count": len(research_sources),
                 "research_sources": research_sources,
+                "narrative_plan": narrative_plan,
             }
 
         except Exception as e:

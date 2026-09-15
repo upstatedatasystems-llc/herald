@@ -1583,7 +1583,12 @@ def execute_script_generation(
         if not isinstance(cfg, dict):
             cfg = {}
         if not cfg.get("quality_gate"):
-            cleaned_script, q_report = run_quality_gate(script_obj)
+            cleaned_script, q_report = run_quality_gate(
+                script_obj,
+                job=job,
+                outline=getattr(job, "outline_json", None),
+                fidelity_audit=getattr(job, "fidelity_audit_json", None),
+            )
             job.script_json = cleaned_script
             script_obj = cleaned_script
             cfg["quality_gate"] = q_report.to_dict()
