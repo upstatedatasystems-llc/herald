@@ -476,6 +476,7 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
 
             item = {
                 "chunk_index": c.chunk_index,
+                "segment_type": "BODY",
                 "status": c.status,
                 "text_hash": c.text_hash,
                 "canonical_text": redact_text(chk_obj.canonical_text) if chk_obj else None,
@@ -496,7 +497,71 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
             }
             chunk_list.append(item)
 
-        (staging_dir / "tts-chunks.json").write_text(json.dumps(chunk_list, indent=2), encoding="utf-8")
+        # Include branding chunks if present in job directory
+        from herald.audio.ffmpeg_builder import inspect_pcm_wav_file
+
+        chunks_dir = Path(settings.HERALD_WORK_DIR) / "jobs" / job.id / "chunks"
+        intro_items: list[dict[str, Any]] = []
+        outro_items: list[dict[str, Any]] = []
+        if chunks_dir.exists():
+            for intro_p in sorted(chunks_dir.glob("branding_intro*.wav")):
+                meta_p = intro_p.with_suffix(".meta.json")
+                meta = {}
+                if meta_p.exists():
+                    try:
+                        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                s_info = measure_wav_silence(intro_p)
+                winfo = inspect_pcm_wav_file(intro_p)
+                intro_items.append({
+                    "chunk_index": 0,
+                    "segment_type": "INTRO",
+                    "status": "COMPLETED",
+                    "text_hash": meta.get("text_hash"),
+                    "canonical_text": redact_text(meta.get("canonical_text")),
+                    "spoken_text": redact_text(meta.get("spoken_text")),
+                    "transformations": meta.get("transformations", []),
+                    "boundary_type": "BRANDING",
+                    "pause_duration_ms": 1200,
+                    "voice": meta.get("voice") or job.kokoro_voice or getattr(settings, "KOKORO_VOICE", "af_heart"),
+                    "speed": meta.get("speed") or job.kokoro_speed or getattr(settings, "KOKORO_SPEED", 1.0),
+                    "audio_duration": winfo.get("duration_seconds") if winfo else None,
+                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)),
+                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)),
+                })
+                break
+
+            for outro_p in sorted(chunks_dir.glob("branding_outro*.wav")):
+                meta_p = outro_p.with_suffix(".meta.json")
+                meta = {}
+                if meta_p.exists():
+                    try:
+                        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                s_info = measure_wav_silence(outro_p)
+                winfo = inspect_pcm_wav_file(outro_p)
+                outro_items.append({
+                    "chunk_index": len(chunks) + 1,
+                    "segment_type": "OUTRO",
+                    "status": "COMPLETED",
+                    "text_hash": meta.get("text_hash"),
+                    "canonical_text": redact_text(meta.get("canonical_text")),
+                    "spoken_text": redact_text(meta.get("spoken_text")),
+                    "transformations": meta.get("transformations", []),
+                    "boundary_type": "BRANDING",
+                    "pause_duration_ms": 0,
+                    "voice": meta.get("voice") or job.kokoro_voice or getattr(settings, "KOKORO_VOICE", "af_heart"),
+                    "speed": meta.get("speed") or job.kokoro_speed or getattr(settings, "KOKORO_SPEED", 1.0),
+                    "audio_duration": winfo.get("duration_seconds") if winfo else None,
+                    "leading_silence_ms": int(round(s_info["leading_silence_s"] * 1000)),
+                    "trailing_silence_ms": int(round(s_info["trailing_silence_s"] * 1000)),
+                })
+                break
+
+        full_diagnostic_chunks = intro_items + chunk_list + outro_items
+        (staging_dir / "tts-chunks.json").write_text(json.dumps(full_diagnostic_chunks, indent=2), encoding="utf-8")
         included_files.append("tts-chunks.json")
 
         # 8. diagnostic-events.jsonl

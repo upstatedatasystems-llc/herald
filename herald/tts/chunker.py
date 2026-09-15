@@ -7,31 +7,12 @@ assigning semantic boundary types, and preventing invalid splits within protecte
 
 from __future__ import annotations
 
-import enum
 import re
 from typing import Any
 
+from herald.audio.pause_policy import PAUSE_BY_BOUNDARY, BoundaryType
 from herald.tts.lexicon import PronunciationLexicon
 from herald.tts.normalizer import TransformationRecord, normalize_for_speech
-
-
-class BoundaryType(str, enum.Enum):
-    """Semantic boundary classification for audio pacing."""
-
-    TECHNICAL_SPLIT = "TECHNICAL_SPLIT"
-    SENTENCE = "SENTENCE"
-    PARAGRAPH = "PARAGRAPH"
-    SECTION = "SECTION"
-    BRANDING = "BRANDING"
-
-
-PAUSE_BY_BOUNDARY: dict[BoundaryType, float] = {
-    BoundaryType.TECHNICAL_SPLIT: 0.0,
-    BoundaryType.SENTENCE: 0.5,
-    BoundaryType.PARAGRAPH: 0.8,
-    BoundaryType.SECTION: 1.2,
-    BoundaryType.BRANDING: 1.2,
-}
 
 
 class TTSChunk:

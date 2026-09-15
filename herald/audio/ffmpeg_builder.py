@@ -14,25 +14,16 @@ from typing import Any
 import mutagen
 from mutagen.id3 import COMM, ID3, TALB, TDRC, TIT2, TPE1
 
+from herald.audio.pause_policy import (
+    PAUSE_DURATION_BY_BOUNDARY,
+    PAUSE_PADDING_END,
+    PAUSE_PADDING_START,
+    PAUSE_SECTION,
+    PAUSE_SENTENCE,
+)
 from herald.config import settings
 
 logger = logging.getLogger("herald.audio.ffmpeg")
-
-PAUSE_TECHNICAL_SPLIT = 0.0
-PAUSE_SENTENCE = 0.5
-PAUSE_PARAGRAPH = 0.8
-PAUSE_SECTION = 1.2
-PAUSE_BRANDING = 1.2
-PAUSE_PADDING_START = 0.8
-PAUSE_PADDING_END = 0.8
-
-PAUSE_DURATION_BY_BOUNDARY = {
-    "TECHNICAL_SPLIT": PAUSE_TECHNICAL_SPLIT,
-    "SENTENCE": PAUSE_SENTENCE,
-    "PARAGRAPH": PAUSE_PARAGRAPH,
-    "SECTION": PAUSE_SECTION,
-    "BRANDING": PAUSE_BRANDING,
-}
 
 
 def measure_wav_silence(file_path: Path, threshold_amplitude: int = 500) -> dict[str, float]:

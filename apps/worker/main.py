@@ -658,6 +658,10 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     render_intro_narration,
                     synthesize_branding_segment,
                 )
+                from herald.audio.pause_policy import PAUSE_BRANDING
+                from herald.tts.lexicon import load_lexicon
+
+                lexicon = load_lexicon(getattr(settings, "HERALD_PRONUNCIATION_LEXICON_PATH", None))
 
                 try:
                     intro_text = render_intro_narration(
@@ -676,6 +680,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         kokoro_client=kokoro_client,
                         voice=voice,
                         speed=speed,
+                        lexicon=lexicon,
                         segment_name="intro branding",
                         timeout=synthesis_timeout,
                         global_semaphore=semaphores.global_tts,
@@ -684,7 +689,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     final_chunk_paths.insert(0, intro_wav_path)
                     final_is_section_end.insert(0, True)
                     final_boundary_types.insert(0, "BRANDING")
-                    final_pause_durations.insert(0, 1.2)
+                    final_pause_durations.insert(0, PAUSE_BRANDING)
                 except Exception as b_err:
                     logger.warning(f"Intro branding synthesis failed non-fatally: {b_err}")
 
@@ -693,6 +698,9 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                     render_outro_narration,
                     synthesize_branding_segment,
                 )
+                from herald.tts.lexicon import load_lexicon
+
+                lexicon = load_lexicon(getattr(settings, "HERALD_PRONUNCIATION_LEXICON_PATH", None))
 
                 try:
                     outro_text = render_outro_narration()
@@ -703,6 +711,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         kokoro_client=kokoro_client,
                         voice=voice,
                         speed=speed,
+                        lexicon=lexicon,
                         segment_name="outro branding",
                         timeout=synthesis_timeout,
                         global_semaphore=semaphores.global_tts,

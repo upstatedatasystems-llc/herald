@@ -247,9 +247,9 @@ def normalize_for_speech(
 
     # Match year with contextual lookaround or common prepositions
     year_pattern = re.compile(
-        r"(\b(?:in|since|by|from|year|during|around|until|before|after|between|[A-Z][a-z]+)\s+)"
+        r"(\b(?:in|since|by|from|to|until|through|year|during|around|before|after|between|[A-Z][a-z]+)\s+)"
         r"(19\d{2}|20\d{2})"
-        r"([,\.]?(?:\s+|$))"
+        r"(['\"”’]?[,\.]?(?:\s+|$))"
     )
     working = year_pattern.sub(_replace_year, working)
 

@@ -4,6 +4,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from herald.audio.pause_policy import (
+    PAUSE_BRANDING,
+    PAUSE_PADDING_END,
+    PAUSE_PADDING_START,
+    PAUSE_PARAGRAPH,
+    PAUSE_SECTION,
+    PAUSE_SENTENCE,
+)
 from herald.config import settings
 from herald.db.models import JobState, PodcastJob
 
@@ -12,6 +20,7 @@ def calculate_script_duration(
     script_json: dict,
     kokoro_speed: float = 1.0,
     db: Session | None = None,
+    include_branding: bool = False,
 ) -> dict[str, Any]:
     """
     Centralized programmatic duration & word count calculator.
@@ -68,17 +77,29 @@ def calculate_script_duration(
     speed = float(kokoro_speed or 1.0)
     wpm_effective = effective_base_wpm * speed
 
-    # 4. Semantic boundary pause overheads (sections/branding baseline + paragraphs + sentences)
+    # 4. Semantic boundary pause overheads deriving from authoritative pause policy:
+    # - Section pauses occur at each section boundary (PAUSE_SECTION = 1.2s)
+    # - Paragraph pauses occur at paragraph breaks that are not section transitions (PAUSE_PARAGRAPH = 0.8s)
+    # - Sentence pauses occur at sentence terminations that are not paragraph/section transitions (PAUSE_SENTENCE = 0.5s)
+    # - Technical splits contribute PAUSE_TECHNICAL_SPLIT = 0.0s (deterministic zero overhead)
+    # - When branding is modeled, intro branding adds PAUSE_BRANDING (1.2s) and stream padding adds START + END (1.6s)
     total_paragraphs = 0
     for narration in all_narrations:
         paras = [p for p in re.split(r"\n\s*\n|\r\n\s*\r\n", narration) if p.strip()]
         total_paragraphs += max(1, len(paras))
 
     section_count = len(segments)
-    section_pause_allowance = section_count * 1.5
-    paragraph_pause_allowance = max(0, total_paragraphs - section_count) * 0.5
-    sentence_pause_allowance = max(0, sentence_count - total_paragraphs) * 0.25
-    pause_allowance_sec = section_pause_allowance + paragraph_pause_allowance + sentence_pause_allowance
+    section_pause_allowance = section_count * PAUSE_SECTION
+    paragraph_pause_allowance = max(0, total_paragraphs - section_count) * PAUSE_PARAGRAPH
+    sentence_pause_allowance = max(0, sentence_count - total_paragraphs) * PAUSE_SENTENCE
+    branding_pause_allowance = (PAUSE_BRANDING + PAUSE_PADDING_START + PAUSE_PADDING_END) if include_branding else 0.0
+
+    pause_allowance_sec = (
+        section_pause_allowance
+        + paragraph_pause_allowance
+        + sentence_pause_allowance
+        + branding_pause_allowance
+    )
     speech_duration_sec = (total_words / wpm_effective) * 60.0 if total_words > 0 else 0.0
 
     predicted_seconds = (
