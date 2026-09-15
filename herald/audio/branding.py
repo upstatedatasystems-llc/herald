@@ -145,10 +145,10 @@ def render_intro_narration(
             if act_mins < req_mins * 0.6:
                 effective_mins = act_mins
 
-        lead = INTRO_EPISODE_DURATION_TEMPLATE.format(
-            platform_name=platform_name,
-            episode_title=clean_title,
-            target_minutes=effective_mins,
+        min_unit = "minute" if effective_mins == 1 else "minutes"
+        lead = (
+            f"This is {platform_name}. Today's episode is '{clean_title}', "
+            f"running approximately {effective_mins} {min_unit}."
         )
     else:
         lead = INTRO_EPISODE_TEMPLATE.format(
