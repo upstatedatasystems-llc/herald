@@ -25,8 +25,8 @@ logger = logging.getLogger("herald.tts.chunk_manager")
 
 
 def compute_chunk_text_hash(chunk_text: str, voice: str, speed: float) -> str:
-    """Compute SHA-256 hash for chunk content and synthesis parameters."""
-    raw = f"{voice.strip()}:{round(float(speed), 2)}:{chunk_text.strip()}"
+    """Compute SHA-256 hash for spoken chunk content and synthesis parameters."""
+    raw = f"v2:{voice.strip()}:{round(float(speed), 2)}:{chunk_text.strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
