@@ -568,19 +568,26 @@ def normalize_evidence_packet(
         raw_sources = plan_sec.get("relevant_sources") or plan_sec.get("relevant_evidence_ids") or []
         matched_eids = []
         for s in raw_sources:
-            if s in items_by_id:
-                matched_eids.append(s)
+            if not s or not isinstance(s, str):
                 continue
+            s_clean = s.strip()
+            # 1. Direct evidence ID match (validated against items_by_id)
+            if s_clean in items_by_id:
+                matched_eids.append(s_clean)
+                continue
+            s_lower = s_clean.lower()
+            # 2. Source URL or domain match
             for it in items:
-                it_src_ids = it.get("source_ids") or []
-                if s in it_src_ids:
-                    matched_eids.append(it["evidence_id"])
-                elif s and it.get("source_url") and s.lower() in it["source_url"].lower():
-                    matched_eids.append(it["evidence_id"])
-                elif s and len(s) > 3 and s.lower() in (it.get("title") or "").lower():
-                    matched_eids.append(it["evidence_id"])
-        if matched_eids:
-            plan_sec["relevant_evidence_ids"] = list(dict.fromkeys(matched_eids))
+                it_url = (it.get("source_url") or "").lower()
+                it_title = (it.get("title") or "").lower()
+                it_eid = it["evidence_id"]
+                if it_url and (s_lower in it_url or it_url in s_lower):
+                    matched_eids.append(it_eid)
+                elif len(s_clean) > 3 and (s_lower in it_title or it_title in s_lower):
+                    matched_eids.append(it_eid)
+                elif it.get("source_ids") and any(s_clean == sid for sid in it["source_ids"]):
+                    matched_eids.append(it_eid)
+        plan_sec["relevant_evidence_ids"] = list(dict.fromkeys(matched_eids))
 
     return {
         "topic": topic,
@@ -647,6 +654,155 @@ def build_already_covered_context(
     return "\n".join(lines)
 
 
+def adapt_narrative_plan_to_generation_sections(
+    narrative_plan: list[dict[str, Any]],
+    target_count: int,
+    items_by_id: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Deterministically adapt narrative chapters into generation sections.
+    Separates narrative structure (determined by research) from generation granularity (determined by word budget).
+    - If target_count == len(narrative_plan): 1-to-1 mapping
+    - If target_count < len(narrative_plan): deterministically merges adjacent chapters
+    - If target_count > len(narrative_plan): deterministically subdivides chapters using key points & evidence
+    Zero LLM calls are made.
+    """
+    if not narrative_plan:
+        return []
+
+    items_by_id = items_by_id or {}
+    n = len(narrative_plan)
+
+    if target_count <= 0 or target_count == n:
+        return [dict(c) for c in narrative_plan]
+
+    if target_count < n:
+        # Merge adjacent chapters into target_count generation sections
+        merged_sections: list[dict[str, Any]] = []
+        for i in range(target_count):
+            start_idx = (i * n) // target_count
+            end_idx = ((i + 1) * n) // target_count
+            group = narrative_plan[start_idx:end_idx]
+
+            if not group:
+                continue
+
+            if len(group) == 1:
+                merged_sections.append(dict(group[0]))
+            else:
+                headings = [c.get("heading", "").strip() for c in group if c.get("heading")]
+                if len(headings) == 2:
+                    combined_heading = f"{headings[0]} & {headings[1]}" if headings[0] != headings[1] else headings[0]
+                elif len(headings) > 2:
+                    combined_heading = f"{headings[0]} through {headings[-1]}"
+                else:
+                    combined_heading = "Synthesized Section"
+
+                purposes = [c.get("purpose", "").strip() for c in group if c.get("purpose")]
+                combined_purpose = "; ".join(purposes) if purposes else f"Explore {combined_heading}."
+
+                combined_kp = []
+                for c in group:
+                    for kp in c.get("key_points", []):
+                        if kp and kp not in combined_kp:
+                            combined_kp.append(kp)
+
+                combined_eids = []
+                for c in group:
+                    for eid in c.get("relevant_evidence_ids", []):
+                        if eid and eid not in combined_eids:
+                            combined_eids.append(eid)
+
+                merged_sections.append({
+                    "heading": combined_heading,
+                    "purpose": combined_purpose,
+                    "key_points": combined_kp,
+                    "relevant_evidence_ids": combined_eids,
+                })
+        return merged_sections
+
+    # target_count > n: Subdivide chapters
+    allocations = [1] * n
+    extra_slots = target_count - n
+
+    while extra_slots > 0:
+        best_idx = 0
+        best_score = -1e9
+        for idx, c in enumerate(narrative_plan):
+            kp_count = len(c.get("key_points", []))
+            ev_count = len(c.get("relevant_evidence_ids", []))
+            curr_alloc = allocations[idx]
+            score = (kp_count + ev_count * 2) - (curr_alloc - 1) * 3
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        allocations[best_idx] += 1
+        extra_slots -= 1
+
+    subdivided_sections: list[dict[str, Any]] = []
+    for idx, c in enumerate(narrative_plan):
+        k = allocations[idx]
+        if k == 1:
+            subdivided_sections.append(dict(c))
+            continue
+
+        kp_list = list(c.get("key_points", []))
+        eid_list = list(c.get("relevant_evidence_ids", []))
+        base_heading = c.get("heading", f"Chapter {idx+1}")
+        base_purpose = c.get("purpose", f"Explore {base_heading}")
+
+        # Semantic candidate labels from evidence titles and key points
+        sub_candidates: list[str] = []
+        for eid in eid_list:
+            if eid in items_by_id:
+                it = items_by_id[eid]
+                it_title = (it.get("title") or it.get("focus_area") or "").strip()
+                if it_title:
+                    clean_t = re.sub(r"^(?:source\s*\d+:?|section\s*\d+:?)\s*", "", it_title, flags=re.IGNORECASE).strip()
+                    if clean_t and clean_t.lower() not in base_heading.lower() and clean_t not in sub_candidates:
+                        sub_candidates.append(clean_t)
+
+        if len(sub_candidates) < k and kp_list:
+            for kp in kp_list:
+                phrase = re.split(r"[:;,\.\-—]", kp)[0].strip()
+                if phrase and 3 < len(phrase) < 40 and phrase.lower() not in base_heading.lower() and phrase not in sub_candidates:
+                    sub_candidates.append(phrase)
+
+        for j in range(k):
+            # Key points slice
+            if kp_list:
+                s_kp = (j * len(kp_list)) // k
+                e_kp = ((j + 1) * len(kp_list)) // k
+                sub_kp = kp_list[s_kp:max(s_kp + 1, e_kp)]
+            else:
+                sub_kp = []
+
+            # Evidence slice
+            if eid_list:
+                s_ev = (j * len(eid_list)) // k
+                e_ev = ((j + 1) * len(eid_list)) // k
+                sub_eids = eid_list[s_ev:max(s_ev + 1, e_ev)]
+            else:
+                sub_eids = []
+
+            if j < len(sub_candidates):
+                sub_label = sub_candidates[j]
+                sub_heading = f"{base_heading} — {sub_label}"
+                sub_purpose = f"{base_purpose} Focus specifically on {sub_label}."
+            else:
+                sub_heading = f"{base_heading} (Part {j+1})"
+                sub_purpose = f"{base_purpose} (Part {j+1})."
+
+            subdivided_sections.append({
+                "heading": sub_heading,
+                "purpose": sub_purpose,
+                "key_points": sub_kp,
+                "relevant_evidence_ids": sub_eids,
+            })
+
+    return subdivided_sections
+
+
 def build_episode_outline(
     topic: str,
     evidence_packet: dict[str, Any],
@@ -660,6 +816,7 @@ def build_episode_outline(
     explicit target ranges, assigned key points, and anti-repetition guidance.
 
     Prioritizes model-generated topic-specific narrative plans from grounded research.
+    Separates narrative structure from generation granularity (subdivides/merges deterministically).
     Retains domain archetypes ONLY as deterministic fallback when research plan is unavailable.
     Preserves semantic evidence associations over positional slicing.
     """
@@ -683,7 +840,7 @@ def build_episode_outline(
             )
             evidence_supported_target = max_legitimate_words
 
-    # 1. Check for topic-specific narrative plan from grounded research
+    # 1. Determine target generation section count based on budget
     narrative_plan = evidence_packet.get("narrative_plan")
     use_narrative_plan = (
         scope != EvidenceScope.SOURCE_ONLY
@@ -691,9 +848,27 @@ def build_episode_outline(
         and len(narrative_plan) >= 2
     )
 
+    if is_auto:
+        nominal_sec_count = max(2, min(len(narrative_plan) if narrative_plan else 5, 6))
+    else:
+        if evidence_supported_target <= 1500:
+            nominal_sec_count = 3
+        elif evidence_supported_target <= 3000:
+            nominal_sec_count = 5
+        elif evidence_supported_target <= 4500:
+            nominal_sec_count = 7
+        elif evidence_supported_target <= 6000:
+            nominal_sec_count = 9
+        else:
+            nominal_sec_count = 11
+
     if use_narrative_plan:
-        sec_count = len(narrative_plan)
-        section_proposals = list(narrative_plan)
+        section_proposals = adapt_narrative_plan_to_generation_sections(
+            narrative_plan=narrative_plan,
+            target_count=nominal_sec_count,
+            items_by_id=items_by_id,
+        )
+        sec_count = len(section_proposals)
     else:
         # Build proposals from source ledger, research focus areas, or items
         headings_pool: list[dict[str, Any]] = []
@@ -739,17 +914,6 @@ def build_episode_outline(
         if is_auto:
             sec_count = max(2, min(len(headings_pool), 6))
         else:
-            if evidence_supported_target <= 1500:
-                nominal_sec_count = 3
-            elif evidence_supported_target <= 3000:
-                nominal_sec_count = 5
-            elif evidence_supported_target <= 4500:
-                nominal_sec_count = 7
-            elif evidence_supported_target <= 6000:
-                nominal_sec_count = 9
-            else:
-                nominal_sec_count = 11
-
             if evidence_ids:
                 if scope == EvidenceScope.SOURCE_ONLY:
                     max_supported_secs = max(2, min(len(evidence_ids), len(headings_pool) or len(evidence_ids)))

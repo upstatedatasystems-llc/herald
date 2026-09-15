@@ -357,14 +357,14 @@ Your goal:
 2. Search for authoritative primary and original sources (government agencies, standards bodies, academic papers, official technical documentation).
 3. Find useful explanatory context, updates, or recent developments.
 4. Identify any meaningful contradictions, outdated claims, or uncertainty.
-5. In addition to your detailed findings, propose a compact, topic-specific narrative progression of 3 to 7 sections for a podcast episode, formatted exactly as:
+5. In addition to your detailed findings, propose a compact, topic-specific narrative progression of key chapters for a podcast episode, formatted exactly as:
 <NARRATIVE_PLAN>
 [
   {{
-    "heading": "Topic-Specific Section Title",
-    "purpose": "Specific narrative purpose of this section",
+    "heading": "Topic-Specific Chapter Title",
+    "purpose": "Specific narrative purpose of this chapter",
     "key_points": ["Key point 1", "Key point 2"],
-    "relevant_sources": ["Source query, URL, or S1, S2 identifier"]
+    "relevant_sources": ["Source URL, title, or domain"]
   }}
 ]
 </NARRATIVE_PLAN>

@@ -12,11 +12,13 @@ from unittest.mock import MagicMock, patch
 
 from herald.ai.long_form import (
     EvidenceScope,
+    adapt_narrative_plan_to_generation_sections,
     build_already_covered_context,
     build_episode_outline,
     build_research_plan,
     execute_unified_long_form_pipeline,
     generate_single_section,
+    normalize_evidence_packet,
 )
 from herald.ai.schema import PodcastScriptResponse, PodcastSegment
 from herald.db.models import PodcastJob
@@ -285,38 +287,169 @@ def test_remove_generic_catchup_section():
     assert "Comprehensive Analysis and Evidence Synthesis" not in headings
 
 
-def test_a_topic_specific_narrative_planning():
-    """Test A: Grounded research returns topic-specific narrative proposal, outline uses it directly, zero extra LLM calls."""
-    narrative_plan = [
-        {"heading": "Plant Genetics & CRISPR", "purpose": "Explain Cas9 editing in crop genomes", "relevant_evidence_ids": ["ev_crispr_1"]},
-        {"heading": "Off-Target Mutations", "purpose": "Analyze mutation frequencies and phenotyping", "relevant_evidence_ids": ["ev_crispr_2"]},
-        {"heading": "Agricultural Deployment", "purpose": "Discuss field trials and yield stability", "relevant_evidence_ids": ["ev_crispr_3"]},
+def test_a_long_episode_granularity_expansion():
+    """Test A (Long Episode): ~7,800-word target with 5 chapters expands to ~11 generation sections with reasonable word ranges and preserved order."""
+    chapters = [
+        {"heading": f"Chapter {i}", "purpose": f"Purpose {i}", "key_points": [f"KP {i}.1", f"KP {i}.2"], "relevant_evidence_ids": [f"ev_{i}"]}
+        for i in range(1, 6)
     ]
     packet = {
-        "topic": "CRISPR off-target mutations in plant breeding",
+        "topic": "Astrophysical Wonders of the Cosmos",
         "scope": "research",
         "items": [
-            {"evidence_id": "ev_crispr_1", "title": "CRISPR in Plants", "snippet": "Cas9 applications in crops."},
-            {"evidence_id": "ev_crispr_2", "title": "Off-Target Mutations", "snippet": "Whole genome sequencing of edited plants."},
-            {"evidence_id": "ev_crispr_3", "title": "Field Trials", "snippet": "Yield impacts across test plots."},
+            {"evidence_id": f"ev_{i}", "title": f"Evidence {i}", "snippet": f"Snippet {i}."}
+            for i in range(1, 6)
         ],
-        "narrative_plan": narrative_plan,
+        "narrative_plan": chapters,
     }
+    # 60 minutes = 7,800 words
     outline = build_episode_outline(
-        topic="CRISPR off-target mutations in plant breeding",
+        topic="Astrophysical Wonders of the Cosmos",
         evidence_packet=packet,
-        target_minutes="15",
+        target_minutes="60",
         scope=EvidenceScope.RESEARCH,
     )
-    headings = [s["heading"] for s in outline["sections"]]
-    assert headings == ["Plant Genetics & CRISPR", "Off-Target Mutations", "Agricultural Deployment"]
-    # Verify no fixed domain archetype headings
-    assert not any("Mechanisms, Data & Methodology" in h or "Frontier & Unresolved Questions" in h for h in headings)
+    # Granularity must expand to ~11 generation sections
+    assert outline["section_count"] == 11
+    sections = outline["sections"]
+    assert len(sections) == 11
+    # Each section receives a reasonable word budget (~709 words, range ~600-815)
+    for s in sections:
+        assert s["word_budget"] is not None
+        assert 500 <= s["word_budget"] <= 900
+        assert s["word_budget_min"] <= s["word_budget"] <= s["word_budget_max"]
+    # Narrative order is preserved: sections derived from Chapter 1 appear before Chapter 2, etc.
+    headings = [s["heading"] for s in sections]
+    assert any("Chapter 1" in h for h in headings[:3])
+    assert any("Chapter 5" in h for h in headings[-3:])
+
+
+def test_b_medium_episode_granularity_preservation():
+    """Test B (Medium Episode): ~3,000-word target with 5 chapters stays at ~5 generation sections with no unnecessary splitting."""
+    chapters = [
+        {"heading": f"Chapter {i}", "purpose": f"Purpose {i}", "key_points": [f"KP {i}"], "relevant_evidence_ids": [f"ev_{i}"]}
+        for i in range(1, 6)
+    ]
+    packet = {
+        "topic": "Texas Roadhouse History",
+        "scope": "research",
+        "items": [
+            {"evidence_id": f"ev_{i}", "title": f"Evidence {i}", "snippet": f"Snippet {i}."}
+            for i in range(1, 6)
+        ],
+        "narrative_plan": chapters,
+    }
+    # 20 minutes = 3,000 words
+    outline = build_episode_outline(
+        topic="Texas Roadhouse History",
+        evidence_packet=packet,
+        target_minutes="20",
+        scope=EvidenceScope.RESEARCH,
+    )
+    assert outline["section_count"] == 5
+    assert len(outline["sections"]) == 5
+    assert [s["heading"] for s in outline["sections"]] == [f"Chapter {i}" for i in range(1, 6)]
+    assert 500 <= outline["sections"][0]["word_budget"] <= 650
+
+
+def test_c_short_episode_granularity_merging():
+    """Test C (Short Episode): ~1,200-word target with 6-7 chapters merges to ~3 sections without tiny sections or LLM calls."""
+    chapters = [
+        {"heading": f"Arc {i}", "purpose": f"Purpose {i}", "key_points": [f"KP {i}"], "relevant_evidence_ids": [f"ev_{i}"]}
+        for i in range(1, 7)
+    ]
+    packet = {
+        "topic": "Microbial Genetics",
+        "scope": "research",
+        "items": [
+            {"evidence_id": f"ev_{i}", "title": f"Evidence {i}", "snippet": f"Snippet {i}."}
+            for i in range(1, 7)
+        ],
+        "narrative_plan": chapters,
+    }
+    # 8 minutes * 130 WPM = 1,040 words (~1,200-word target) -> nominal ~3 sections
+    outline = build_episode_outline(
+        topic="Microbial Genetics",
+        evidence_packet=packet,
+        target_minutes="8",
+        scope=EvidenceScope.RESEARCH,
+    )
     assert outline["section_count"] == 3
+    sections = outline["sections"]
+    assert len(sections) == 3
+    # Adjacent material merged: section 1 combines Arc 1 & Arc 2
+    assert "Arc 1" in sections[0]["heading"] and "Arc 2" in sections[0]["heading"]
+    assert "ev_1" in sections[0]["relevant_evidence_ids"] and "ev_2" in sections[0]["relevant_evidence_ids"]
+    assert "KP 1" in sections[0]["key_points"] and "KP 2" in sections[0]["key_points"]
+    # Section budget is ~340-400 words
+    assert 300 <= sections[0]["word_budget"] <= 450
 
 
-def test_b_fallback_narrative_planning_on_degraded_research():
-    """Test B: Degraded research produces a valid outline locally with fallback domain archetypes."""
+def test_d_semantic_subdivision_labels_and_evidence():
+    """Test D (Semantic Subdivision): Chapter key points and evidence drive deterministic subsection labels and purposes."""
+    chapter = {
+        "heading": "How Black Holes Form and Grow",
+        "purpose": "Examine the formation from stellar collapse and subsequent accretion growth.",
+        "key_points": ["Stellar collapse triggers core singularity", "Super-Eddington accretion fuels rapid mass growth"],
+        "relevant_evidence_ids": ["ev_form", "ev_grow"],
+    }
+    items_by_id = {
+        "ev_form": {"evidence_id": "ev_form", "title": "Formation Dynamics", "snippet": "Core collapse in massive stars."},
+        "ev_grow": {"evidence_id": "ev_grow", "title": "Growth Mechanisms", "snippet": "Accretion disks feed the central horizon."},
+    }
+    # Adapt 1 chapter into 2 generation sections
+    subdivided = adapt_narrative_plan_to_generation_sections(
+        narrative_plan=[chapter],
+        target_count=2,
+        items_by_id=items_by_id,
+    )
+    assert len(subdivided) == 2
+    # Check that semantic labels were derived from evidence titles
+    assert "Formation Dynamics" in subdivided[0]["heading"]
+    assert "Growth Mechanisms" in subdivided[1]["heading"]
+    # Check evidence association
+    assert "ev_form" in subdivided[0]["relevant_evidence_ids"]
+    assert "ev_grow" in subdivided[1]["relevant_evidence_ids"]
+    # Check purpose reflects semantic job
+    assert "Formation Dynamics" in subdivided[0]["purpose"]
+    assert "Growth Mechanisms" in subdivided[1]["purpose"]
+
+
+def test_e_source_references_normalization_and_prompt_contract():
+    """Test E (Source References): URL/title references resolve to valid IDs, nonexistent ignored, prompt does not use S1/S2."""
+    import inspect
+
+    from herald.gemini.client import generate_grounded_research
+    src = inspect.getsource(generate_grounded_research)
+    # Verify prompt no longer suggests S1, S2 identifiers
+    assert "S1, S2 identifier" not in src
+    assert "Source URL, title, or domain" in src
+
+    raw_research_data = {
+        "topic": "Roman Collapse",
+        "raw_text": "Research text",
+        "narrative_plan": [
+            {
+                "heading": "Military Decline",
+                "purpose": "Analyze military collapse",
+                "relevant_sources": ["https://en.wikipedia.org/wiki/Late_Roman_army", "britannica.com", "Nonexistent Source URL"],
+            }
+        ],
+    }
+    norm_packet = normalize_evidence_packet(
+        topic="Roman Collapse",
+        scope=EvidenceScope.RESEARCH,
+        grounded_research_data=raw_research_data,
+        seed_source_text="Seed text",
+    )
+    plan = norm_packet["narrative_plan"]
+    assert len(plan) == 1
+    assigned = plan[0].get("relevant_evidence_ids", [])
+    assert "Nonexistent Source URL" not in assigned
+
+
+def test_fallback_narrative_planning_on_degraded_research():
+    """Verify degraded research produces a valid outline locally with fallback domain archetypes."""
     packet_empty = {
         "topic": "CRISPR off-target mutations in plant breeding",
         "scope": "research",
@@ -333,42 +466,6 @@ def test_b_fallback_narrative_planning_on_degraded_research():
     # In fallback mode without items or narrative plan, domain archetypes are safely utilized
     headings = [s["heading"] for s in outline["sections"]]
     assert any("Foundational" in h or "Origins" in h or "Mechanisms" in h for h in headings)
-
-
-def test_c_semantic_evidence_mapping_and_validation():
-    """Test C: Evidence mapped semantically, invalid IDs safely ignored, no orphaned items."""
-    narrative_plan = [
-        {"heading": "Roman Military System", "purpose": "Explore legions and tactical reforms", "relevant_evidence_ids": ["invalid_id_999", "ev_mil_1"]},
-        {"heading": "Economic Crisis & Inflation", "purpose": "Analyze currency debasement and trade collapse", "relevant_evidence_ids": ["ev_econ_1"]},
-    ]
-    packet = {
-        "topic": "Fall of the Western Roman Empire",
-        "scope": "research",
-        "items": [
-            {"evidence_id": "ev_econ_1", "title": "Currency Debasement", "snippet": "Silver content dropped."},
-            {"evidence_id": "ev_mil_1", "title": "Legion Shortages", "snippet": "Recruitment shortfalls in 5th century."},
-            {"evidence_id": "ev_extra_1", "title": "Barbarian Federati", "snippet": "Treaties with Gothic tribes."},
-        ],
-        "narrative_plan": narrative_plan,
-    }
-    outline = build_episode_outline(
-        topic="Fall of the Western Roman Empire",
-        evidence_packet=packet,
-        target_minutes="10",
-        scope=EvidenceScope.RESEARCH,
-    )
-    secs = outline["sections"]
-    assert len(secs) == 2
-    # Section 1 should have ev_mil_1, invalid_id_999 safely ignored
-    assert "invalid_id_999" not in secs[0]["relevant_evidence_ids"]
-    assert "ev_mil_1" in secs[0]["relevant_evidence_ids"]
-    # Section 2 has ev_econ_1
-    assert "ev_econ_1" in secs[1]["relevant_evidence_ids"]
-    # All items including ev_extra_1 assigned across sections (no orphaned evidence)
-    all_assigned = {eid for s in secs for eid in s["relevant_evidence_ids"]}
-    assert "ev_extra_1" in all_assigned
-    assert "ev_mil_1" in all_assigned
-    assert "ev_econ_1" in all_assigned
 
 
 def test_d_anti_repetition_context_is_bounded_and_structured():
@@ -673,4 +770,72 @@ def test_h_call_count_regression_five_sections():
     assert len(res.segments) == 5
     total_llm_calls = call_counts["research"] + call_counts["section"] + call_counts["outline"]
     assert total_llm_calls == 6
+
+
+def test_f_call_topology_eleven_generation_sections():
+    """Test F (Call Topology): For an 11-generation-section long episode, exactly 1 research + 11 section calls + 0 outline calls."""
+    mock_db = MagicMock()
+    job = PodcastJob(
+        id="job-topology-11",
+        source_hash="h-top-11",
+        source_text="Seed",
+        content_mode="topic",
+        target_minutes="60",  # 60 min (~7,800 words) -> 11 sections
+    )
+    chapters = [
+        {"heading": f"Chapter {i}", "purpose": f"Purpose {i}", "key_points": [f"KP {i}"], "relevant_evidence_ids": [f"ev_{i}"]}
+        for i in range(1, 6)
+    ]
+    research_mock_data = {
+        "topic": "Long 60-min Topic",
+        "search_count": 3,
+        "source_count": 5,
+        "narrative_plan": chapters,
+        "search_results": [{"title": f"Source {i}", "url": f"http://s{i}.com", "content": f"Text {i}"} for i in range(1, 6)],
+        "synthesized_research": "Research body text with detailed facts.",
+    }
+
+    call_counts = {"research": 0, "section": 0, "outline": 0, "fidelity": 0}
+
+    def mock_failover(job, operation, execute_fn, **kwargs):
+        provider = MagicMock()
+        if operation == "grounded_research":
+            call_counts["research"] += 1
+            provider.generate_grounded_research.return_value = research_mock_data
+            return execute_fn(provider, 1, kwargs.get("source_text", ""))
+        elif operation == "section_generation":
+            call_counts["section"] += 1
+            provider.generate_script.return_value = PodcastScriptResponse(
+                episode_title="Title",
+                episode_description="Desc",
+                segments=[PodcastSegment(order=1, heading="H", narration=" ".join(["word"] * 700))],
+                warnings=[],
+            )
+            return execute_fn(provider, 1, kwargs.get("source_text", ""))
+        elif operation in ("verification", "research_audit"):
+            call_counts["fidelity"] += 1
+            res_audit = MagicMock()
+            res_audit.has_material_issues = False
+            res_audit.model_dump.return_value = {"status": "clean"}
+            return res_audit
+        raise AssertionError(f"Unexpected LLM operation called: {operation}")
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover):
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Long 60-min Topic",
+            scope=EvidenceScope.RESEARCH,
+            target_minutes="60",
+            source_text="Seed",
+        )
+
+    # Exactly 1 research + 11 section calls + 0 outline/merge/split calls
+    assert call_counts["research"] == 1
+    assert call_counts["section"] == 11
+    assert call_counts["outline"] == 0
+    assert len(res.segments) == 11
+    total_generation_calls = call_counts["research"] + call_counts["section"] + call_counts["outline"]
+    assert total_generation_calls == 12  # 1 research + 11 sections
+
 
