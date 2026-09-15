@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     TTS_MAX_CHUNK_CHARS: int = 500  # Legacy fallback alias
     KOKORO_HEALTH_GRACE_SECONDS: int = 120
     KOKORO_SYNTHESIS_TIMEOUT_SECONDS: int = 180
+    HERALD_PRONUNCIATION_LEXICON_PATH: str = ""
 
     # ETA Calculation & Narration Rate
     NARRATION_WORDS_PER_MINUTE: float = 130.0
