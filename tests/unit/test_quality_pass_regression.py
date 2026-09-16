@@ -89,5 +89,290 @@ def test_ffmpeg_mastering_records_true_peak_telemetry(monkeypatch, tmp_path):
             job_id="job-master-01",
         )
 
+        assert "true_peak_target_dbtp" in res
+        assert res["true_peak_target_dbtp"] == getattr(settings, "HERALD_AUDIO_TRUE_PEAK_DBTP", -1.5)
         assert "true_peak_dbtp" in res
-        assert res["true_peak_dbtp"] == getattr(settings, "HERALD_AUDIO_TRUE_PEAK_DBTP", -1.5)
+        assert "measured_true_peak_dbtp" in res
+        assert "measured_integrated_lufs" in res
+
+
+def test_long_form_orchestration_duration_expansion_rebalances_budget():
+    """
+    Integration reachability: Real long-form orchestration triggers section expansion
+    when words fall below threshold and uses expanded word count in downstream budget redistribution.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "Part 1", "purpose": "P1", "word_budget": 400, "relevant_evidence_ids": ["E1"]},
+        {"section_index": 2, "heading": "Part 2", "purpose": "P2", "word_budget": 400, "relevant_evidence_ids": ["E2"]},
+    ]
+    outline = {
+        "episode_title": "Test Title",
+        "target_total_words": 800,
+        "sections": sections_def,
+    }
+    job = PodcastJob(
+        id="job-orchestrate-dur-01",
+        source_hash="h1",
+        content_mode="source",
+        outline_json=outline,
+        evidence_packet_json={"topic": "Test", "items": [{"evidence_id": "E1", "snippet": "Snippet 1"}, {"evidence_id": "E2", "snippet": "Snippet 2"}]},
+    )
+
+    # Initial generator produces underfilled 200 words for Sec 1 (< 85% of 400 = 340)
+    def mock_gen_sec(job, section_info, topic, evidence_packet, previous_summary, scope, db=None):
+        return {
+            "section_index": section_info["section_index"],
+            "heading": section_info["heading"],
+            "narration": " ".join(["draft"] * 200),
+            "word_count": 200,
+            "target_word_budget": section_info.get("word_budget"),
+            "relevant_evidence_ids": section_info.get("relevant_evidence_ids", []),
+            "completed": True,
+        }
+
+    # Expansion succeeds and adds 150 words -> 350 words total
+    def mock_expand(job, section_info, current_narration, actual_words, target_budget, topic, evidence_packet, scope, covered_context=None, db=None):
+        expanded_narr = " ".join(["expanded"] * 350)
+        return {
+            "success": True,
+            "narration": expanded_narr,
+            "word_count": 350,
+            "words_added": 150,
+        }
+
+    with patch("herald.ai.long_form.generate_single_section", side_effect=mock_gen_sec), \
+         patch("herald.ai.long_form.expand_single_section", side_effect=mock_expand) as mock_exp_call, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})), \
+         patch("herald.ai.long_form.record_job_diagnostic_event"):
+
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Test Topic",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="6",
+            source_text="Test source",
+        )
+
+        assert mock_exp_call.called
+        # Section 1 narration in result reflects expanded content (350 words)
+        sec1_result = res.segments[0]
+        assert len(sec1_result.narration.split()) == 350
+        assert "expanded" in sec1_result.narration
+
+
+def test_long_form_orchestration_invokes_duplicate_repair_and_reruns_quality_gate():
+    """
+    Integration reachability: Quality gate duplicate findings trigger duplicate repair pass
+    in orchestration, which then reruns the quality gate and retains before/after findings.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "S1", "purpose": "P1", "word_budget": 300, "relevant_evidence_ids": ["E1"], "narration": "Narration 1"},
+        {"section_index": 2, "heading": "S2", "purpose": "P2", "word_budget": 300, "relevant_evidence_ids": ["E2"], "narration": "Narration 2"},
+    ]
+    job = PodcastJob(
+        id="job-orchestrate-dup-01",
+        content_mode="standard",
+        outline_json={"episode_title": "T", "target_total_words": 600, "sections": sections_def},
+        evidence_packet_json={"items": []},
+    )
+
+    dup_warning = QualityWarning(
+        code="NEAR_DUPLICATE_PASSAGE",
+        message="Section 2 repeats Section 1",
+        section_index=2,
+        severity=QualitySeverity.WARNING,
+        metadata={"section_a": 1, "section_b": 2, "passage_b": "Repeated passage", "similarity": 0.85},
+    )
+    report_with_dup = QualityReport(
+        status=QualityStatus.WARN,
+        warnings=[dup_warning],
+    )
+    report_clean = QualityReport(status=QualityStatus.PASS, warnings=[])
+
+    call_count = 0
+    def mock_gate(script, job=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return script, report_with_dup
+        return script, report_clean
+
+    def mock_gen_sec(job, section_info, topic, evidence_packet, previous_summary, scope, db=None):
+        return {
+            "section_index": section_info["section_index"],
+            "heading": section_info["heading"],
+            "narration": "Narration " * 50,
+            "word_count": 50,
+            "relevant_evidence_ids": [],
+            "completed": True,
+        }
+
+    with patch("herald.ai.long_form.generate_single_section", side_effect=mock_gen_sec), \
+         patch("herald.services.quality_gate.run_quality_gate", side_effect=mock_gate), \
+         patch("herald.ai.long_form.repair_script_duplicates", return_value=(sections_def, {"repair_attempted": True, "repaired_count": 1})) as mock_rep, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Test",
+            scope=EvidenceScope.SOURCE_PLUS_RESEARCH,
+            target_minutes="4",
+        )
+
+        assert mock_rep.called
+        # Quality gate was rerun after repair pass (call_count >= 2)
+        assert call_count >= 2
+        assert len(res.segments) >= 1
+
+
+def test_metadata_cleanup_revises_headings_without_altering_narration():
+    """
+    Integration reachability: Semantic metadata cleanup revises headings/title
+    while leaving narration completely unchanged.
+    """
+    from herald.ai.schema import PodcastScriptResponse, PodcastSegment
+
+    job = PodcastJob(id="job-meta-clean-01", request_mode="standard")
+    original_narration = "Exact spoken text that must remain unaltered word for word."
+    script_dict = {
+        "episode_title": "Section 1: Redundant Episode Title",
+        "segments": [
+            {"order": 1, "heading": "Reading Part 1", "narration": original_narration}
+        ],
+    }
+    cleaned_segments = [
+        PodcastSegment(order=1, heading="Early Discoveries", narration=original_narration)
+    ]
+    mock_resp = PodcastScriptResponse(
+        episode_title="Cosmic Evolution",
+        episode_description="Clean summary",
+        segments=cleaned_segments,
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res = cleanup_script_metadata(job=job, script_dict=script_dict, topic="Cosmos")
+
+        assert res["episode_title"] == "Cosmic Evolution"
+        assert res["segments"][0]["heading"] == "Early Discoveries"
+        assert res["segments"][0]["narration"] == original_narration
+
+
+def test_worker_tts_path_invokes_preflight_and_records_diagnostics(tmp_path, monkeypatch):
+    """
+    Integration reachability: Worker's actual process_next_job path executes
+    pronunciation preflight/normalization and records PRONUNCIATION_PREFLIGHT diagnostic event.
+    """
+    from unittest.mock import MagicMock
+
+    from apps.worker.main import process_next_job
+    from herald.db.models import JobState
+
+    monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "HERALD_MIN_DISK_MB", 1)
+
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+    mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+    fake_job = PodcastJob(
+        id="job-worker-preflight-01",
+        status=JobState.SYNTHESIZING.value,
+        synthesis_attempt_count=1,
+        attempt_count=1,
+        custom_voice="af_bella",
+        script_json={
+            "episode_title": "Preflight Episode",
+            "segments": [
+                {"order": 1, "heading": "Intro", "narration": "NASA launched the telescope in 2025."}
+            ],
+        },
+    )
+    mock_db.query.return_value.filter.return_value.first.return_value = fake_job
+
+    mock_kokoro = MagicMock()
+
+    with patch("apps.worker.main.claim_next_job", return_value=fake_job), \
+         patch("apps.worker.main.check_free_disk_mb", return_value=5000), \
+         patch("apps.worker.main.process_tts_chunks_parallel", return_value=[tmp_path / "chunk_0001.wav"]), \
+         patch("apps.worker.main.join_and_normalize_audio", return_value={"output_path": str(tmp_path / "out.mp3"), "duration_seconds": 10, "file_bytes": 500, "true_peak_target_dbtp": -1.5, "sha256": "mock_sha"}), \
+         patch("apps.worker.main.run_pronunciation_preflight") as mock_preflight, \
+         patch("apps.worker.main.record_job_diagnostic_event") as mock_diag:
+
+        mock_preflight.return_value.total_tokens = 6
+        mock_preflight.return_value.type_breakdown = {"INITIALISM_ACRONYM": 1, "NUMBER_SEQUENCE": 1}
+        mock_preflight.return_value.to_dict.return_value = {"total_tokens": 6}
+
+        process_next_job(mock_db, kokoro_client=mock_kokoro, worker_id="test-w1")
+
+        assert mock_preflight.called
+        # Assert diagnostic event was recorded
+        diag_calls = [c for c in mock_diag.call_args_list if c[0][3] == "PRONUNCIATION_PREFLIGHT"]
+        assert len(diag_calls) >= 1
+
+
+def test_stored_voice_snapshot_passed_to_kokoro(tmp_path, monkeypatch):
+    """
+    Integration reachability: Stored selected voice survives intake snapshot
+    and is the exact voice parameter passed to Kokoro synthesis.
+    """
+    from unittest.mock import MagicMock
+
+    from apps.worker.main import process_next_job
+    from herald.db.models import JobState
+
+    monkeypatch.setattr(settings, "HERALD_WORK_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "HERALD_MIN_DISK_MB", 1)
+
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+    mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+    # User requested bm_fable (British English)
+    fake_job = PodcastJob(
+        id="job-worker-voice-01",
+        status=JobState.SYNTHESIZING.value,
+        synthesis_attempt_count=1,
+        attempt_count=1,
+        custom_voice="bm_fable",
+        custom_speed=1.1,
+        script_json={
+            "episode_title": "Voice Snapshot Episode",
+            "segments": [
+                {"order": 1, "heading": "S1", "narration": "Testing British voice delivery."}
+            ],
+        },
+    )
+    mock_db.query.return_value.filter.return_value.first.return_value = fake_job
+
+    mock_kokoro = MagicMock()
+
+    with patch("apps.worker.main.claim_next_job", return_value=fake_job), \
+         patch("apps.worker.main.check_free_disk_mb", return_value=5000), \
+         patch("apps.worker.main.process_tts_chunks_parallel") as mock_parallel, \
+         patch("apps.worker.main.join_and_normalize_audio", return_value={"output_path": str(tmp_path / "out.mp3"), "duration_seconds": 10, "file_bytes": 500, "true_peak_target_dbtp": -1.5, "sha256": "mock_sha"}):
+
+        mock_parallel.return_value = [tmp_path / "chunk_0001.wav"]
+
+        process_next_job(mock_db, kokoro_client=mock_kokoro, worker_id="test-w1")
+
+        assert mock_parallel.called
+        kwargs = mock_parallel.call_args[1]
+        assert kwargs["voice"] == "bm_fable"
+        assert kwargs["speed"] == 1.1

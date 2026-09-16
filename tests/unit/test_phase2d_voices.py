@@ -64,9 +64,12 @@ def test_voice_sample_uses_identical_comparison_phrase_across_all_voices(db_sess
     for v in voices_to_test:
         ensure_voice_sample(voice=v, kokoro_client=mock_kokoro, db=db_session)
 
+    from herald.tts.normalizer import normalize_for_speech
+    expected_spoken_text = normalize_for_speech(VOICE_SAMPLE_TEXT).spoken_text
+
     assert len(synthesized_texts) == len(voices_to_test)
     for voice_name, text_used in synthesized_texts:
-        assert text_used == VOICE_SAMPLE_TEXT
+        assert text_used == expected_spoken_text
         assert voice_name not in text_used
 
 

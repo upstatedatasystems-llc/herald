@@ -269,10 +269,9 @@ def tts_slot_lock(
 
         base_key = getattr(settings, "HERALD_TTS_SLOT_BASE", TTS_ADVISORY_SLOT_BASE)
         num_slots = get_effective_tts_global_slots()
-        t_start = time.monotonic()
         acquired_key = None
 
-        while (time.monotonic() - t_start) < timeout_seconds:
+        def _try_acquire_any_slot() -> int | None:
             for slot_idx in range(num_slots):
                 key = base_key + slot_idx
                 try:
@@ -280,13 +279,22 @@ def tts_slot_lock(
                         sa_text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
                     ).scalar()
                     if res is True or res == 1:
-                        acquired_key = key
-                        break
+                        return key
                 except Exception as e:
                     logger.debug(f"pg_try_advisory_lock failed on key {key}: {e}")
-            if acquired_key is not None:
-                break
-            time.sleep(0.1)
+            return None
+
+        # Immediate atomic attempt across all configured advisory slots
+        acquired_key = _try_acquire_any_slot()
+
+        # If not acquired on the first try and caller requested bounded waiting, retry until timeout
+        if acquired_key is None and timeout_seconds > 0:
+            t_start = time.monotonic()
+            while (time.monotonic() - t_start) < timeout_seconds:
+                time.sleep(0.1)
+                acquired_key = _try_acquire_any_slot()
+                if acquired_key is not None:
+                    break
 
         if acquired_key is None:
             raise TimeoutError(
@@ -302,7 +310,10 @@ def tts_slot_lock(
                 logger.warning(f"Failed to release pg_advisory_unlock for key {acquired_key}: {e}")
     else:
         sem = local_semaphore if local_semaphore is not None else get_semaphores().global_tts
-        acquired = sem.acquire(timeout=timeout_seconds)
+        if timeout_seconds <= 0:
+            acquired = sem.acquire(blocking=False)
+        else:
+            acquired = sem.acquire(timeout=timeout_seconds)
         if not acquired:
             raise TimeoutError(
                 f"Timed out waiting for local TTS semaphore after {timeout_seconds}s"

@@ -252,6 +252,35 @@ def run_acceptance_suite(is_live: bool = False) -> int:
     except Exception as e:
         record_result("7. Voice Preview Concurrency Protection", False, str(e))
 
+    # 8. Voice Preview Happy Path (Free TTS Slot)
+    try:
+        from unittest.mock import MagicMock, patch
+
+        mock_client = KokoroClient()
+        def _mock_synth(text, output_path, voice=None, speed=None, timeout=None):
+            Path(output_path).write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+
+        mock_client.synthesize_chunk = MagicMock(side_effect=_mock_synth)
+
+        with patch("herald.services.voice_manager.is_tts_actively_synthesizing", return_value=False), \
+             patch("herald.services.voice_manager.convert_wav_to_mp3", side_effect=lambda w, m: Path(m).write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00MOCK_MP3_DATA")), \
+             patch("herald.services.voice_manager.is_valid_sample_audio", return_value=True), \
+             patch("herald.services.voice_manager.normalize_for_speech", side_effect=lambda t: t.upper()) as mock_norm:
+
+            sample_path = ensure_voice_sample("af_heart", speed=1.0, kokoro_client=mock_client, force=True)
+            ok = (
+                sample_path.exists()
+                and mock_client.synthesize_chunk.called
+                and mock_norm.called
+            )
+            record_result(
+                "8. Voice Preview Happy Path (Free Slot)",
+                ok,
+                f"Generated preview at {sample_path.name}; normalizer and Kokoro invoked with free TTS slot.",
+            )
+    except Exception as e:
+        record_result("8. Voice Preview Happy Path (Free Slot)", False, str(e))
+
     print("-" * 70)
     print(f"RESULTS: {passed_tests}/{total_tests} tests passed.")
     print("=" * 70)

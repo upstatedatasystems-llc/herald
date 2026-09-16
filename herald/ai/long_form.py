@@ -25,7 +25,7 @@ from herald.ai.schema import (
     parse_isolated_section_response,
 )
 from herald.config import settings
-from herald.db.models import PodcastJob
+from herald.db.models import ContentMode, PodcastJob
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
 
 logger = logging.getLogger("herald.ai.long_form")
@@ -1297,6 +1297,15 @@ def expand_single_section(
 
     evidence_text = "\n\n".join(assigned_snippets) or f"Evidence regarding {topic}."
 
+    source_only_rule = ""
+    if scope == EvidenceScope.SOURCE_ONLY:
+        source_only_rule = (
+            "\n6. SOURCE-ONLY GROUNDING REQUIREMENT: Use ONLY the supplied source/evidence. "
+            "Do NOT introduce outside facts, speculation, or external knowledge merely to reach duration. "
+            "If the supplied source material cannot support additional grounded detail, "
+            "gracefully retain the existing text without adding empty filler."
+        )
+
     expansion_instructions = f"""You are expanding Section {sec_idx} of a long-form podcast about: {topic}
 Section Heading: {heading}
 Section Purpose: {purpose}
@@ -1318,7 +1327,7 @@ EXPANSION CONTRACT:
 2. DO NOT simply restate, summarize, or paraphrase material already in the current draft.
 3. Write in seamless, natural spoken prose with varied sentence cadence and natural contractions.
 4. Output schema: Provide a complete updated section response where the expansion is seamlessly integrated into the narration. Response-local numbering must begin with order=1.
-5. All assertions must be strictly grounded in the provided evidence.
+5. All assertions must be strictly grounded in the provided evidence.{source_only_rule}
 """
 
     t0 = datetime.now(UTC)
@@ -2221,9 +2230,14 @@ def execute_unified_long_form_pipeline(
         allocated_target = sec_def.get("word_budget")
         threshold_words = int(round(allocated_target * min_ratio)) if allocated_target else None
 
+        is_literal = (
+            getattr(job, "content_mode", None) == ContentMode.LITERAL.value
+            or str(getattr(job, "content_mode", "")).lower() == "literal"
+        )
+
         if (
             expansion_enabled
-            and effective_scope != EvidenceScope.SOURCE_ONLY
+            and not is_literal
             and allocated_target is not None
             and allocated_target >= 250
             and sec_words < threshold_words

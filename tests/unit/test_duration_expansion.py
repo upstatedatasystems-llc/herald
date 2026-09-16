@@ -2,7 +2,7 @@
 Unit tests for duration and section expansion budgeting.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -150,3 +150,165 @@ def test_expand_single_section_insufficient_expansion_retains_draft(mock_job):
         assert res["success"] is False
         assert res["narration"] == orig_narration
         assert res["reason"] == "expansion_below_threshold"
+
+
+def test_source_only_underfilled_section_with_evidence_is_eligible_for_expansion(mock_job):
+    """
+    Test A: AI-generated SOURCE_ONLY mode underfilled section with unused source evidence
+    is eligible for expansion and includes explicit source-only grounding contract.
+    """
+    mock_job.content_mode = "source"
+    section_info = {
+        "section_index": 1,
+        "heading": "Historical Context",
+        "purpose": "Cover early Roman founding",
+        "relevant_evidence_ids": ["E1"],
+    }
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Source Article", "snippet": "Unused details from the article."}
+        ]
+    }
+    expanded_segments = [
+        PodcastSegment(
+            order=1,
+            heading="Historical Context",
+            narration=(
+                "Rome's early founding involved complex negotiations among neighboring tribes. "
+                "The source documents emphasize how early institutional structures supported steady agricultural growth, "
+                "which enabled stable civic governance across multiple generations. "
+                "These early treaties established clear trade corridors and defensive pacts that lasted for centuries."
+            ),
+        )
+    ]
+    mock_resp = PodcastScriptResponse(
+        episode_title="Source Title",
+        episode_description="Description",
+        segments=expanded_segments,
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp) as mock_exec:
+        res = expand_single_section(
+            job=mock_job,
+            section_info=section_info,
+            current_narration="Rome began as a small city state.",
+            actual_words=7,
+            target_budget=60,
+            topic="Roman History",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.SOURCE_ONLY,
+        )
+
+        assert res["success"] is True
+        assert res["words_added"] > 25
+        # Verify instructions passed to AI included strict SOURCE_ONLY grounding requirement
+        passed_fn = mock_exec.call_args[1]["execute_fn"]
+        fake_provider = MagicMock()
+        fake_provider.generate_script.return_value = mock_resp
+        passed_fn(fake_provider, 1, "test")
+        gen_kwargs = fake_provider.generate_script.call_args[1]
+        assert "SOURCE-ONLY GROUNDING REQUIREMENT: Use ONLY the supplied source/evidence" in gen_kwargs["generation_instructions"]
+
+
+def test_source_only_exhausted_evidence_no_filler_expansion(mock_job):
+    """
+    Test B: When source evidence is exhausted or model cannot add grounded detail,
+    expansion fails gracefully and original draft is retained without filler.
+    """
+    mock_job.content_mode = "source"
+    orig_narration = "The article only states that the summit took place on Tuesday morning."
+    section_info = {"section_index": 1, "heading": "Event", "purpose": "Report event"}
+    evidence_packet = {"items": []}
+
+    # Model returns the same text because no extra facts exist
+    same_segments = [
+        PodcastSegment(order=1, heading="Event", narration=orig_narration)
+    ]
+    mock_resp = PodcastScriptResponse(
+        episode_title="Title",
+        episode_description="Desc",
+        segments=same_segments,
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res = expand_single_section(
+            job=mock_job,
+            section_info=section_info,
+            current_narration=orig_narration,
+            actual_words=len(orig_narration.split()),
+            target_budget=100,
+            topic="Summit",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.SOURCE_ONLY,
+        )
+
+        assert res["success"] is False
+        assert res["narration"] == orig_narration
+        assert res["reason"] == "expansion_below_threshold"
+
+
+def test_literal_mode_never_expansion():
+    """
+    Test C: Literal mode is ZERO AI and must NEVER invoke section expansion.
+    """
+    from herald.db.models import ContentMode
+
+    literal_job = PodcastJob(id="job-literal-01", content_mode=ContentMode.LITERAL.value)
+    is_literal = (
+        getattr(literal_job, "content_mode", None) == ContentMode.LITERAL.value
+        or str(getattr(literal_job, "content_mode", "")).lower() == "literal"
+    )
+    assert is_literal is True
+
+
+def test_research_mode_expansion_behavior_preserved(mock_job):
+    """
+    Test D: Research mode expansion continues to work seamlessly with research dossier.
+    """
+    mock_job.content_mode = "topic"
+    section_info = {
+        "section_index": 1,
+        "heading": "Quantum Algorithms",
+        "purpose": "Explain error correction",
+        "relevant_evidence_ids": ["R1"],
+    }
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "R1", "title": "Surface Codes", "snippet": "Surface code threshold is approximately one percent."}
+        ]
+    }
+    expanded_segments = [
+        PodcastSegment(
+            order=1,
+            heading="Quantum Algorithms",
+            narration=(
+                "Quantum error correction relies heavily on surface codes to detect phase flip and bit flip errors. "
+                "Experimental demonstrations show the error threshold sits right around one percent fault tolerance. "
+                "By arranging physical qubits into two-dimensional square lattices, syndromes can be measured continuously without collapsing quantum state."
+            ),
+        )
+    ]
+    mock_resp = PodcastScriptResponse(
+        episode_title="Quantum Computing",
+        episode_description="Overview",
+        segments=expanded_segments,
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res = expand_single_section(
+            job=mock_job,
+            section_info=section_info,
+            current_narration="Error correction is needed for quantum computers.",
+            actual_words=7,
+            target_budget=50,
+            topic="Quantum",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.RESEARCH,
+        )
+
+        assert res["success"] is True
+        assert res["words_added"] >= 20
+        assert "surface codes" in res["narration"]

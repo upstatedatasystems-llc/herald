@@ -250,3 +250,60 @@ def test_local_sqlite_two_workers_two_slots_concurrency_bounded(
     assert max_active_in_kokoro <= 2
     assert active_in_kokoro == 0
     reset_semaphores_for_tests()
+
+
+def test_postgres_tts_slot_lock_timeout_zero_free_slot():
+    """
+    Test A: PostgreSQL-style timeout=0 + free slot -> acquisition succeeds immediately.
+    """
+    from herald.concurrency import tts_slot_lock
+
+    mock_db = MagicMock()
+    mock_db.get_bind.return_value.dialect.name = "postgresql"
+    mock_db.execute.return_value.scalar.return_value = 1
+
+    with tts_slot_lock(db=mock_db, timeout_seconds=0) as acquired_key:
+        assert acquired_key is not None
+        assert acquired_key >= 920000
+
+    unlock_calls = [
+        c for c in mock_db.execute.call_args_list
+        if "pg_advisory_unlock" in str(getattr(c[0][0], "text", c[0][0]))
+    ]
+    assert len(unlock_calls) == 1
+
+
+def test_postgres_tts_slot_lock_timeout_zero_occupied_slot():
+    """
+    Test B: PostgreSQL-style timeout=0 + occupied slot -> immediate TimeoutError.
+    """
+    from herald.concurrency import tts_slot_lock
+
+    mock_db = MagicMock()
+    mock_db.get_bind.return_value.dialect.name = "postgresql"
+    mock_db.execute.return_value.scalar.return_value = 0
+
+    t0 = time.monotonic()
+    with pytest.raises(TimeoutError, match="Could not acquire global TTS synthesis slot"):
+        with tts_slot_lock(db=mock_db, timeout_seconds=0):
+            pass
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.2
+
+
+def test_local_semaphore_timeout_zero_free_and_occupied():
+    """
+    Test SQLite/local semaphore non-blocking semantics with timeout_seconds=0.
+    """
+    from threading import Semaphore
+
+    from herald.concurrency import tts_slot_lock
+
+    sem = Semaphore(1)
+    with tts_slot_lock(db=None, local_semaphore=sem, timeout_seconds=0):
+        with pytest.raises(TimeoutError):
+            with tts_slot_lock(db=None, local_semaphore=sem, timeout_seconds=0):
+                pass
+
+    with tts_slot_lock(db=None, local_semaphore=sem, timeout_seconds=0):
+        pass

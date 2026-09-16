@@ -30,6 +30,7 @@ from herald.tts.kokoro_client import (
     KokoroTTSError,
     KokoroTTSTimeoutError,
 )
+from herald.tts.normalizer import run_pronunciation_preflight
 
 setup_service_logging("herald-worker")
 logger = logging.getLogger("herald.worker")
@@ -545,6 +546,22 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
 
             if not segments:
                 raise ValueError("Job script_json contains no segments to synthesize.")
+
+            # Pronunciation & Spoken-Text Preflight before TTS synthesis
+            try:
+                all_narration = " ".join(s.get("narration", "") for s in segments)
+                preflight_report = run_pronunciation_preflight(all_narration)
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "tts",
+                    "PRONUNCIATION_PREFLIGHT",
+                    f"Pronunciation preflight classified {preflight_report.total_tokens} tokens across {len(preflight_report.type_breakdown)} categories",
+                    metadata=preflight_report.to_dict(),
+                    db=db,
+                )
+            except Exception as pe:
+                logger.debug(f"Pronunciation preflight failed non-fatally for job '{job.id}': {pe}")
 
             t_chunking_start = datetime.now(UTC)
             target_chunk_chars = job.tts_chunk_chars or getattr(settings, "TTS_CHUNK_DEFAULT_CHARS", 500)

@@ -19,6 +19,7 @@ from herald.audio.ffmpeg_builder import validate_audio_file
 from herald.concurrency import get_tts_slot_wait_timeout_seconds, tts_slot_lock
 from herald.config import settings
 from herald.tts.kokoro_client import KokoroClient, is_tts_actively_synthesizing
+from herald.tts.normalizer import normalize_for_speech
 
 logger = logging.getLogger("herald.services.voice_manager")
 
@@ -188,7 +189,7 @@ def get_selectable_voices(
 
         diagnostic["fallback_mode"] = "fail_closed_preserved"
         diagnostic["preserved_voices"] = preserved
-        diagnostic["warning"] = "Runtime voice discovery failed; advertising only verified safe voices."
+        diagnostic["warning"] = "Runtime voice discovery failed; selectable voices restricted to the stored/configured fallback set."
         logger.warning(f"Voice discovery failed closed. Selectable voices restricted to: {preserved}")
         return preserved, diagnostic
 
@@ -325,8 +326,10 @@ def ensure_voice_sample(
                     return cached
 
             try:
+                norm_res = normalize_for_speech(VOICE_SAMPLE_TEXT)
+                spoken_sample_text = norm_res.spoken_text if hasattr(norm_res, "spoken_text") else str(norm_res)
                 client.synthesize_chunk(
-                    text=VOICE_SAMPLE_TEXT,
+                    text=spoken_sample_text,
                     output_path=temp_wav,
                     voice=v_clean,
                     speed=speed,

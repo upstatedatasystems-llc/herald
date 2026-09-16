@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -391,6 +392,57 @@ def compute_file_sha256(file_path: Path) -> str:
     return sha256.hexdigest()
 
 
+def measure_audio_loudness_and_peak(file_path: Path) -> dict[str, float | None]:
+    """
+    Measure integrated LUFS and true peak dBTP of a final audio file using FFmpeg ebur128.
+    Returns None for measured values if FFmpeg is unavailable or measurement cannot be completed.
+    Never fabricates measured metrics from filter targets.
+    """
+    if not shutil.which("ffmpeg") or not file_path.exists():
+        return {
+            "measured_true_peak_dbtp": None,
+            "measured_integrated_lufs": None,
+        }
+    try:
+        cmd = [
+            "ffmpeg",
+            "-nostats",
+            "-i", str(file_path),
+            "-filter_complex", "ebur128=peak=true",
+            "-f", "null",
+            "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
+        out = res.stderr or ""
+        measured_tp: float | None = None
+        measured_lufs: float | None = None
+
+        m_tp = re.search(r"True peak:\s+([-\d.]+)\s+dBFS", out)
+        if m_tp:
+            try:
+                measured_tp = float(m_tp.group(1))
+            except ValueError:
+                pass
+
+        m_lufs = re.search(r"I:\s+([-\d.]+)\s+LUFS", out)
+        if m_lufs:
+            try:
+                measured_lufs = float(m_lufs.group(1))
+            except ValueError:
+                pass
+
+        return {
+            "measured_true_peak_dbtp": measured_tp,
+            "measured_integrated_lufs": measured_lufs,
+        }
+    except Exception as e:
+        logger.debug(f"Audio loudness measurement failed for '{file_path}': {e}")
+        return {
+            "measured_true_peak_dbtp": None,
+            "measured_integrated_lufs": None,
+        }
+
+
 def join_and_normalize_audio(
     chunk_paths: list[Path],
     output_mp3_path: Path,
@@ -398,6 +450,8 @@ def join_and_normalize_audio(
     episode_description: str = "",
     job_id: str = "",
     insert_pauses: bool = True,
+    crossfade_duration_seconds: float = 0.0,
+    measure_loudness: bool = False,
     is_section_end_list: list[bool] | None = None,
     boundary_types: list[Any] | None = None,
     pause_durations: list[float] | None = None,
@@ -464,7 +518,7 @@ def join_and_normalize_audio(
             f"TP={settings.LOUDNORM_TARGET_TP}:"
             f"LRA={settings.LOUDNORM_TARGET_LRA}"
         )
-        audio_filter = f"{loudnorm_str},alimiter=limit={limit_str}:level=false"
+        audio_filter = f"{loudnorm_str},alimiter=limit={limit_str}:level=disabled"
 
         cmd = [
             "ffmpeg",
@@ -487,7 +541,10 @@ def join_and_normalize_audio(
                     "output_path": str(output_mp3_path),
                     "file_bytes": output_mp3_path.stat().st_size,
                     "duration_seconds": 10,
+                    "true_peak_target_dbtp": peak_limit,
                     "true_peak_dbtp": peak_limit,
+                    "measured_true_peak_dbtp": None,
+                    "measured_integrated_lufs": None,
                     "sha256": compute_file_sha256(output_mp3_path),
                 }
             raise FFmpegExecutionError("FFmpeg binary is not found in PATH.")
@@ -531,6 +588,11 @@ def join_and_normalize_audio(
         embed_id3_metadata(output_mp3_path, title=episode_title, description=episode_description, job_id=job_id)
 
         checksum = compute_file_sha256(output_mp3_path)
+        measured = (
+            measure_audio_loudness_and_peak(output_mp3_path)
+            if measure_loudness
+            else {"measured_true_peak_dbtp": None, "measured_integrated_lufs": None}
+        )
         log_entry = {
             "timestamp": datetime.now(UTC).isoformat(),
             "job_id": job_id,
@@ -538,7 +600,10 @@ def join_and_normalize_audio(
             "result": "SUCCESS",
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
+            "true_peak_target_dbtp": peak_limit,
             "true_peak_dbtp": peak_limit,
+            "measured_true_peak_dbtp": measured["measured_true_peak_dbtp"],
+            "measured_integrated_lufs": measured["measured_integrated_lufs"],
             "sha256": checksum,
         }
         logger.info(json.dumps(log_entry))
@@ -547,7 +612,10 @@ def join_and_normalize_audio(
             "output_path": str(output_mp3_path),
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
+            "true_peak_target_dbtp": peak_limit,
             "true_peak_dbtp": peak_limit,
+            "measured_true_peak_dbtp": measured["measured_true_peak_dbtp"],
+            "measured_integrated_lufs": measured["measured_integrated_lufs"],
             "sha256": checksum,
         }
 
