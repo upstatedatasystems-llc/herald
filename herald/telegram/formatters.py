@@ -1114,21 +1114,90 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
     return card
 
 
-def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
+def format_voice_accent_groups(current_default: str) -> tuple[str, dict[str, Any]]:
     """
-    Format interactive voice browser message and generate inline keyboard markup.
-    Returns:
-        (text, reply_markup_dict)
+    Format top-level voice accent group selector for /settings -> Voice.
+    Groups: American English and British English.
     """
-    from herald.services.voice_manager import get_all_voice_metadata
+    from herald.services.voice_manager import VOICE_METADATA
 
     curr_clean = current_default.lower().strip()
-    voices = get_all_voice_metadata()
+    curr_meta = VOICE_METADATA.get(curr_clean, {})
+    curr_name = curr_meta.get("display_name", curr_clean)
+    curr_accent = curr_meta.get("accent_display", "Custom")
 
     lines = [
         "🗣️ <b>Herald Voice Catalog</b>\n",
-        "Select a voice below to preview a sample or set your default voice:\n",
+        f"Current Default Voice: <b>{html.escape(curr_name)}</b> (<code>{html.escape(curr_clean)}</code> — <i>{html.escape(curr_accent)}</i>)\n",
+        "Select an accent library below to explore voices:\n",
     ]
+
+    keyboard = [
+        [
+            {
+                "text": "🇺🇸 American English",
+                "callback_data": "h2:voice:group:american_english",
+            },
+            {
+                "text": "🇬🇧 British English",
+                "callback_data": "h2:voice:group:british_english",
+            },
+        ],
+        [
+            {
+                "text": "🌐 All Curated Voices",
+                "callback_data": "h2:voice:group:all",
+            },
+        ],
+        [
+            {
+                "text": "← Back to Settings",
+                "callback_data": "h2:settings:main",
+            },
+        ],
+    ]
+
+    lines.append("<i>Tip: You can also override the voice per-request using <code>Voice: &lt;name&gt;</code>.</i>")
+    return "\n".join(lines), {"inline_keyboard": keyboard}
+
+
+def format_voices_browser(
+    current_default: str,
+    accent_group: str | None = None,
+    selectable_voices: list[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Format interactive voice browser message and generate inline keyboard markup.
+    Supports filtering by accent_group and filtering to selectable_voices (fail-closed discovery).
+    Returns:
+        (text, reply_markup_dict)
+    """
+    from herald.services.voice_manager import get_all_voice_metadata, get_voices_by_accent_group
+
+    curr_clean = current_default.lower().strip()
+    if accent_group and accent_group.lower().strip() != "all":
+        voices = get_voices_by_accent_group(accent_group)
+        group_title = (
+            "American English"
+            if "american" in accent_group.lower()
+            else ("British English" if "british" in accent_group.lower() else accent_group.capitalize())
+        )
+        lines = [
+            f"🗣️ <b>Herald Voice Catalog — {html.escape(group_title)}</b>\n",
+            "Select a voice below to preview a sample or set your default voice:\n",
+        ]
+    else:
+        voices = get_all_voice_metadata()
+        lines = [
+            "🗣️ <b>Herald Voice Catalog</b>\n",
+            "Select a voice below to preview a sample or set your default voice:\n",
+        ]
+
+    selectable_set = (
+        set(v.lower().strip() for v in selectable_voices)
+        if selectable_voices is not None
+        else None
+    )
 
     keyboard = []
     for meta in voices:
@@ -1137,9 +1206,13 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
         gender = meta["gender"]
         desc = meta["description"]
         is_curr = vid == curr_clean
+        is_available = selectable_set is None or vid in selectable_set
 
         marker = " 🟢 <i>(Default)</i>" if is_curr else ""
-        lines.append(f"• <b>{html.escape(dname)}</b> (<code>{html.escape(vid)}</code>) — <i>{html.escape(gender)}</i>{marker}\n  {html.escape(desc)}")
+        avail_marker = "" if is_available else " ⚠️ <i>(Unavailable in runtime)</i>"
+        lines.append(
+            f"• <b>{html.escape(dname)}</b> (<code>{html.escape(vid)}</code>) — <i>{html.escape(gender)}</i>{marker}{avail_marker}\n  {html.escape(desc)}"
+        )
 
         btn_sample = {
             "text": f"🔊 Sample {dname}",
@@ -1151,18 +1224,24 @@ def format_voices_browser(current_default: str) -> tuple[str, dict[str, Any]]:
         }
         keyboard.append([btn_sample, btn_set])
 
-    keyboard.append([
-        {
-            "text": "← Back to Settings",
-            "callback_data": "h2:settings:main",
-        }
-    ])
+    nav_row = []
+    if accent_group and accent_group.lower().strip() != "all":
+        nav_row.append({
+            "text": "← Back to Accent Groups",
+            "callback_data": "h2:settings:voice",
+        })
+    nav_row.append({
+        "text": "← Back to Settings",
+        "callback_data": "h2:settings:main",
+    })
+    keyboard.append(nav_row)
 
     lines.append("\n<i>Tip: You can also use <code>Voice: &lt;name&gt;</code> at the top of any message.</i>")
     text = "\n".join(lines)
     reply_markup = {"inline_keyboard": keyboard}
 
     return text, reply_markup
+
 
 
 def format_first_chunk_progress(

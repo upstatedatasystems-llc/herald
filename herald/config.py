@@ -106,9 +106,17 @@ class Settings(BaseSettings):
     DEFAULT_RESEARCH_DEPTH: str = "medium"
 
     # Directives Bounds
-    ALLOWED_VOICES: str = "af_heart,af_bella,af_sarah,am_adam,am_michael"
+    ALLOWED_VOICES: str = "af_heart,af_bella,af_nicole,am_michael,am_fenrir,am_puck,bf_emma,bf_isabella,bm_fable,bm_george,af_sarah,am_adam"
     MIN_SPEED: float = 0.8
     MAX_SPEED: float = 1.2
+
+    # Quality Pass: Duration Expansion & Anti-Repetition
+    HERALD_SECTION_EXPANSION_ENABLED: bool = True
+    HERALD_SECTION_MIN_BUDGET_RATIO: float = 0.85
+    HERALD_DUPLICATE_REPAIR_ENABLED: bool = True
+    HERALD_DUPLICATE_REPAIR_COUNT_THRESHOLD: int = 3
+    HERALD_DUPLICATE_REPAIR_MAX_ATTEMPTS: int = 1
+    HERALD_VOICE_DISCOVERY_ENABLED: bool = True
 
     # Audio & FFmpeg
     AUDIO_OUTPUT_BITRATE: str = "64k"
@@ -117,6 +125,7 @@ class Settings(BaseSettings):
     LOUDNORM_TARGET_I: float = -16.0
     LOUDNORM_TARGET_TP: float = -1.5
     LOUDNORM_TARGET_LRA: float = 11.0
+    HERALD_AUDIO_TRUE_PEAK_DBTP: float = -1.5
 
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""

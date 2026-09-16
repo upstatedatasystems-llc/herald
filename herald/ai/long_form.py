@@ -603,6 +603,95 @@ def normalize_evidence_packet(
     }
 
 
+class CoverageLedger:
+    """
+    Compact cross-section coverage ledger.
+    Retains structured facts:
+    - major claims already explained (short snippets <= 60 chars)
+    - evidence IDs consumed
+    - key examples used
+    - concepts introduced (should not be re-explained)
+    Enforces a strict size guard (<= 1200 chars / ~250 tokens) with deterministic compaction.
+    """
+
+    def __init__(self):
+        self.claims: list[dict[str, str]] = []
+        self.consumed_evidence_ids: list[str] = []
+        self.used_examples: list[str] = []
+        self.introduced_concepts: list[str] = []
+
+    def record_section(self, section_data: dict[str, Any]) -> None:
+        # Extract evidence IDs
+        for eid in section_data.get("relevant_evidence_ids", []):
+            if eid and str(eid) not in self.consumed_evidence_ids:
+                self.consumed_evidence_ids.append(str(eid))
+
+        # Extract claims / key points
+        kp = section_data.get("key_points") or []
+        for p in kp:
+            p_clean = str(p).strip()[:60]
+            if p_clean and not any(c.get("snippet") == p_clean for c in self.claims):
+                self.claims.append({
+                    "section_index": str(section_data.get("section_index", "?")),
+                    "snippet": p_clean,
+                })
+
+        # Extract concepts from heading
+        h = section_data.get("heading")
+        if h:
+            h_clean = str(h).strip()[:40]
+            if h_clean not in self.introduced_concepts:
+                self.introduced_concepts.append(h_clean)
+
+        # Extract examples if mentioned
+        narr = section_data.get("narration", "")
+        ex_matches = re.findall(r"(?:for example|such as|including)\s+([a-zA-Z0-9\s,]{4,35})[,.]", narr, re.IGNORECASE)
+        for ex in ex_matches[:2]:
+            ex_clean = ex.strip()[:35]
+            if ex_clean and ex_clean not in self.used_examples:
+                self.used_examples.append(ex_clean)
+
+    def format_context(
+        self,
+        current_heading: str | None = None,
+        current_purpose: str | None = None,
+        current_idx: int | None = None,
+        last_closing_sentence: str | None = None,
+    ) -> str:
+        lines = ["ALREADY COVERED IN PREVIOUS SECTIONS (COVERAGE LEDGER - ADVANCE WITHOUT RE-EXPLAINING):"]
+
+        if self.introduced_concepts:
+            c_slice = self.introduced_concepts[-5:]
+            lines.append(f"- Concepts introduced: {', '.join(c_slice)}")
+
+        if self.claims:
+            c_slice = self.claims[-4:]
+            c_strs = [f"Sec {c['section_index']}: {c['snippet']}" for c in c_slice]
+            lines.append(f"- Claims covered: {'; '.join(c_strs)}")
+
+        if self.used_examples:
+            e_slice = self.used_examples[-3:]
+            lines.append(f"- Examples already used: {', '.join(e_slice)}")
+
+        if self.consumed_evidence_ids:
+            lines.append(f"- Evidence consumed: {', '.join(self.consumed_evidence_ids[-8:])}")
+
+        if last_closing_sentence:
+            lines.append(f'Previous section ended with: "{last_closing_sentence}"')
+
+        if current_heading and current_purpose:
+            c_idx_str = f"Section {current_idx}" if current_idx is not None else "Current Section"
+            lines.append(
+                f"Your task for {c_idx_str} ({current_heading}):\n"
+                f"Focus on {current_purpose}. Introduce new evidence. Do not repeat facts from above."
+            )
+
+        res = "\n".join(lines)
+        if len(res) > 1200:
+            res = res[:1150] + "\n[Ledger compacted for length]"
+        return res
+
+
 def build_already_covered_context(
     completed_sections: list[dict[str, Any]],
     current_heading: str | None = None,
@@ -610,52 +699,28 @@ def build_already_covered_context(
     current_idx: int | None = None,
 ) -> str:
     """
-    Deterministically build compact, bounded (~200 tokens) anti-repetition guidance
-    from completed sections to prevent narrative looping without LLM calls.
+    Deterministically build compact, bounded (~200-250 tokens) anti-repetition guidance
+    using CoverageLedger to prevent narrative looping without LLM calls.
     """
     if not completed_sections:
         return ""
 
-    lines = ["ALREADY COVERED IN PREVIOUS SECTIONS (DO NOT REPEAT):"]
-    recent_secs = completed_sections[-3:] if len(completed_sections) > 3 else completed_sections
-    if len(completed_sections) > 3:
-        earlier_headings = [s.get("heading", f"Section {s.get('section_index')}") for s in completed_sections[:-3]]
-        lines.append(f"- Earlier sections: {', '.join(earlier_headings)}")
-
-    for s in recent_secs:
-        s_idx = s.get("section_index", "?")
-        s_head = s.get("heading", f"Section {s_idx}")
-        kp = s.get("key_points")
-        if kp and isinstance(kp, list):
-            kp_text = "; ".join(str(k)[:60] for k in kp[:2])
-        else:
-            kp_text = (s.get("purpose") or "")[:60]
-        lines.append(f"- Section {s_idx}: {s_head} - covered {kp_text}")
-
-    used_eids: list[str] = []
+    ledger = CoverageLedger()
     for s in completed_sections:
-        for eid in s.get("relevant_evidence_ids", []):
-            if eid and str(eid) not in used_eids:
-                used_eids.append(str(eid))
-    if used_eids:
-        lines.append(f"Evidence already introduced: {', '.join(used_eids[:10])}")
+        ledger.record_section(s)
 
     last_narr = completed_sections[-1].get("narration", "").strip()
     sentences = re.findall(r"[^.!?]+[.!?]+", last_narr)
     closing_sentence = sentences[-1].strip() if sentences else (last_narr[-120:].strip() if last_narr else "")
-    if len(closing_sentence) > 140:
-        closing_sentence = closing_sentence[-140:].strip()
-    if closing_sentence:
-        lines.append(f'Previous section ended with: "{closing_sentence}"')
+    if len(closing_sentence) > 120:
+        closing_sentence = closing_sentence[-120:].strip()
 
-    if current_heading and current_purpose:
-        c_idx_str = f"Section {current_idx}" if current_idx is not None else "Current Section"
-        lines.append(
-            f"Your task for {c_idx_str} ({current_heading}):\n"
-            f"Focus exclusively on {current_purpose}. Advance the narrative. Do NOT re-explain concepts from earlier sections."
-        )
-
-    return "\n".join(lines)
+    return ledger.format_context(
+        current_heading=current_heading,
+        current_purpose=current_purpose,
+        current_idx=current_idx,
+        last_closing_sentence=closing_sentence or None,
+    )
 
 
 def adapt_narrative_plan_to_generation_sections(
@@ -1131,13 +1196,15 @@ IMPORTANT: The JSON response is a standalone response for this single section on
 
 {key_points_block}{anti_rep_block}Spoken-Writing Contract:
 1. Narration must be written specifically for LISTENING, not an essay: use conversational, explanatory prose and natural spoken transitions.
-2. Use generally short-to-medium sentences with one major idea per sentence where practical. Use contractions where natural.
-3. Explain technical jargon clearly before relying upon it. Avoid dense runs of unexpanded acronyms, statistics, dates, or mechanical lists.
-4. Ground all factual assertions strictly in the provided evidence. Preserve uncertainty and attribution accurately.
-5. NEVER mechanically announce section headings (e.g., do not say 'Section two: Technical Architecture').
-6. NEVER include a miniature conclusion, moral, or recap at the end of this section.
-7. Do not invent outside facts absent from the provided evidence.
-8. Output schema constraint: Regardless of this section's global index ({sec_idx}), this output is an isolated section response. Its segments array uses response-local numbering and MUST begin with order=1.
+2. Sentence Cadence & Rhythm: Varied sentence length is essential. Alternate short, punchy emphasis sentences (5–10 words) with medium explanatory sentences (15–25 words). Avoid monotonous, uniform pacing.
+3. Natural Contractions: Use contractions (it's, they've, don't, wasn't, there's, we've) wherever natural for spoken English narration.
+4. Rhetorical Questions & Transitions: Limit rhetorical questions to at most one per section. Avoid formulaic transition templates (never start a section with "In the previous section we explored..." or "Now let's turn our attention to..."). Advance directly into the narrative.
+5. Explain technical jargon clearly before relying upon it. Avoid dense runs of unexpanded acronyms, statistics, dates, or mechanical lists.
+6. Ground all factual assertions strictly in the provided evidence. Preserve uncertainty and attribution accurately.
+7. NEVER mechanically announce section headings (e.g., do not say 'Section two: Technical Architecture').
+8. NEVER include a miniature conclusion, moral, or recap at the end of this section.
+9. Do not invent outside facts absent from the provided evidence.
+10. Output schema constraint: Regardless of this section's global index ({sec_idx}), this output is an isolated section response. Its segments array uses response-local numbering and MUST begin with order=1.
 """
 
     t_sec0 = datetime.now(UTC)
@@ -1195,6 +1262,313 @@ IMPORTANT: The JSON response is a standalone response for this single section on
     }
 
 
+def expand_single_section(
+    job: PodcastJob,
+    section_info: dict[str, Any],
+    current_narration: str,
+    actual_words: int,
+    target_budget: int,
+    topic: str,
+    evidence_packet: dict[str, Any],
+    scope: EvidenceScope,
+    covered_context: str | None = None,
+    db: Any = None,
+) -> dict[str, Any]:
+    """
+    Perform a single controlled section expansion pass when generated words are
+    below the effective minimum/target word budget AND grounded evidence remains available.
+    Instructs the model to add new grounded value (mechanisms, consequences, context, examples)
+    without restating or paraphrasing existing material.
+    Uses normal provider failover; degrades gracefully if failover fails.
+    """
+    deficit = target_budget - actual_words
+    sec_idx = section_info["section_index"]
+    heading = section_info["heading"]
+    purpose = section_info["purpose"]
+    ev_ids = section_info.get("relevant_evidence_ids", [])
+
+    all_items = {it.get("evidence_id"): it for it in evidence_packet.get("items", []) if it.get("evidence_id")}
+    assigned_snippets = []
+    for eid in ev_ids:
+        if eid in all_items:
+            it = all_items[eid]
+            title_suffix = f" - {it['title']}" if it.get("title") else ""
+            assigned_snippets.append(f"[{it.get('evidence_id', eid)}{title_suffix}]:\n{it.get('snippet', '')}")
+
+    evidence_text = "\n\n".join(assigned_snippets) or f"Evidence regarding {topic}."
+
+    expansion_instructions = f"""You are expanding Section {sec_idx} of a long-form podcast about: {topic}
+Section Heading: {heading}
+Section Purpose: {purpose}
+Current Draft Word Count: {actual_words} words. Target Budget: approximately {target_budget} words.
+Remaining Word Deficit to Fulfill: approximately {deficit} words.
+
+CURRENT DRAFT FOR THIS SECTION:
+\"\"\"
+{current_narration}
+\"\"\"
+
+EXPANSION CONTRACT:
+1. Add NEW VALUE to fulfill the target budget through:
+   - concrete mechanisms and operational details from the evidence
+   - cause-and-effect consequences and implications
+   - historical or contextual chronology
+   - grounded illustrative examples
+   - nuanced distinctions and caveats
+2. DO NOT simply restate, summarize, or paraphrase material already in the current draft.
+3. Write in seamless, natural spoken prose with varied sentence cadence and natural contractions.
+4. Output schema: Provide a complete updated section response where the expansion is seamlessly integrated into the narration. Response-local numbering must begin with order=1.
+5. All assertions must be strictly grounded in the provided evidence.
+"""
+
+    t0 = datetime.now(UTC)
+
+    def _execute_expansion(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
+        try:
+            resp = p_inst.generate_script(
+                source_text=src,
+                request_mode="standard",
+                source_title=topic,
+                job_id=job.id,
+                generation_instructions=expansion_instructions,
+                is_isolated_section=True,
+            )
+        except TypeError as te:
+            if "is_isolated_section" in str(te):
+                resp = p_inst.generate_script(
+                    source_text=src,
+                    request_mode="standard",
+                    source_title=topic,
+                    job_id=job.id,
+                    generation_instructions=expansion_instructions,
+                )
+            else:
+                raise
+        if isinstance(resp, dict):
+            return parse_isolated_section_response(resp)
+        return resp
+
+    try:
+        res: PodcastScriptResponse = execute_with_failover(
+            job=job,
+            operation="section_expansion",
+            execute_fn=_execute_expansion,
+            db=db,
+            source_text=evidence_text,
+        )
+        expanded_narration = "\n\n".join(seg.narration for seg in res.segments).strip()
+        expanded_words = len(expanded_narration.split())
+        words_added = expanded_words - actual_words
+
+        # Only accept if expansion actually added words and did not shrink or corrupt
+        if expanded_words >= actual_words + 25:
+            elapsed = round((datetime.now(UTC) - t0).total_seconds(), 2)
+            logger.info(
+                f"Section {sec_idx} expansion successful: {actual_words} -> {expanded_words} words "
+                f"(+{words_added} words, target: {target_budget}) in {elapsed}s"
+            )
+            return {
+                "success": True,
+                "narration": expanded_narration,
+                "word_count": expanded_words,
+                "words_added": words_added,
+                "elapsed_seconds": elapsed,
+            }
+        else:
+            logger.info(
+                f"Section {sec_idx} expansion produced insufficient words ({expanded_words} vs {actual_words}); retaining draft."
+            )
+            return {
+                "success": False,
+                "narration": current_narration,
+                "word_count": actual_words,
+                "words_added": 0,
+                "reason": "expansion_below_threshold",
+            }
+    except Exception as e:
+        logger.warning(f"Section {sec_idx} expansion failed non-fatally; retaining original draft: {e}")
+        return {
+            "success": False,
+            "narration": current_narration,
+            "word_count": actual_words,
+            "words_added": 0,
+            "reason": f"expansion_error: {e}",
+        }
+
+
+def repair_script_duplicates(
+    job: PodcastJob,
+    sections: list[dict[str, Any]],
+    duplicate_warnings: list[Any],
+    evidence_packet: dict[str, Any],
+    topic: str,
+    db: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Pre-TTS bounded duplicate repair pass.
+    Receives only offending passages and neighboring context.
+    Asks AI to replace redundant material with new grounded material or condense.
+    Bounded to max 1 repair pass.
+    """
+    if not duplicate_warnings:
+        return sections, {"repair_attempted": False, "repaired_count": 0}
+
+    logger.info(f"Triggering pre-TTS duplicate repair for job {job.id} on {len(duplicate_warnings)} duplicate warnings.")
+    repaired_sections = [dict(s) for s in sections]
+    repaired_count = 0
+
+    sec_to_dups: dict[int, list[dict[str, Any]]] = {}
+    for w in duplicate_warnings:
+        meta = w.metadata if hasattr(w, "metadata") else (w.get("metadata", {}) if isinstance(w, dict) else {})
+        sec_b = meta.get("section_b")
+        if sec_b:
+            sec_to_dups.setdefault(sec_b, []).append(meta)
+
+    for sec_idx, dups in sec_to_dups.items():
+        if sec_idx < 1 or sec_idx > len(repaired_sections):
+            continue
+        sec_data = repaired_sections[sec_idx - 1]
+        orig_narr = sec_data.get("narration", "")
+
+        redundant_snippets = [d.get("passage_b", "") for d in dups if d.get("passage_b")]
+        if not redundant_snippets:
+            continue
+
+        prompt = f"""You are repairing a duplicate passage in Section {sec_idx} of a podcast about: {topic}
+Section Heading: {sec_data.get('heading', '')}
+
+REDUNDANT PASSAGES IDENTIFIED (Already covered in an earlier section):
+{chr(10).join(f'- "{snip}"' for snip in redundant_snippets)}
+
+CURRENT SECTION NARRATION:
+\"\"\"
+{orig_narr}
+\"\"\"
+
+REPAIR CONTRACT:
+1. Replace or condense the redundant material so it does NOT repeat facts or explanations from earlier sections.
+2. If new grounded evidence is available, introduce fresh relevant details. If not, cleanly condense or prune the repetitive sentences.
+3. Preserve the natural spoken flow, narrative rhythm, and tone of the rest of the section.
+4. Output the complete, revised narration for Section {sec_idx} only. Response-local numbering must begin with order=1.
+"""
+
+        def _exec_dup_repair(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
+            try:
+                resp = p_inst.generate_script(
+                    source_text=src,
+                    request_mode="standard",
+                    source_title=topic,
+                    job_id=job.id,
+                    generation_instructions=prompt,
+                    is_isolated_section=True,
+                )
+            except TypeError as te:
+                if "is_isolated_section" in str(te):
+                    resp = p_inst.generate_script(
+                        source_text=src,
+                        request_mode="standard",
+                        source_title=topic,
+                        job_id=job.id,
+                        generation_instructions=prompt,
+                    )
+                else:
+                    raise
+            if isinstance(resp, dict):
+                return parse_isolated_section_response(resp)
+            return resp
+
+        try:
+            ev_items = evidence_packet.get("items", []) if evidence_packet else []
+            src_ev = "\n\n".join(it.get("snippet", "") for it in ev_items[:4]) or topic
+            res: PodcastScriptResponse = execute_with_failover(
+                job=job,
+                operation="duplicate_repair",
+                execute_fn=_exec_dup_repair,
+                db=db,
+                source_text=src_ev,
+            )
+            repaired_narr = "\n\n".join(seg.narration for seg in res.segments).strip()
+            if repaired_narr and len(repaired_narr.split()) >= 10:
+                sec_data["narration"] = repaired_narr
+                sec_data["word_count"] = len(repaired_narr.split())
+                repaired_count += 1
+        except Exception as e:
+            logger.warning(f"Duplicate repair for section {sec_idx} failed non-fatally: {e}")
+
+    return repaired_sections, {
+        "repair_attempted": True,
+        "repaired_count": repaired_count,
+        "original_warnings_count": len(duplicate_warnings),
+    }
+
+
+def cleanup_script_metadata(
+    job: PodcastJob,
+    script_dict: dict[str, Any],
+    topic: str,
+    db: Any = None,
+) -> dict[str, Any]:
+    """
+    Perform a single bounded AI metadata cleanup pass on episode title and section headings ONLY.
+    Never alters or regenerates script narration.
+    Supports 'as of <date>' when topic is genuinely time-sensitive, using the job creation date.
+    """
+    curr_title = script_dict.get("episode_title", topic)
+    segments = script_dict.get("segments", [])
+    if not segments:
+        return script_dict
+
+    job_dt = getattr(job, "created_at", None) or datetime.now(UTC)
+    date_str = job_dt.strftime("%B %Y")
+
+    headings_summary = "\n".join(
+        f"- Section {s.get('order', idx)}: {s.get('heading', '')}"
+        for idx, s in enumerate(segments, 1)
+    )
+
+    instructions = f"""You are refining the title and section headings for a podcast about: {topic}
+Reference Date: {date_str}
+
+Current Episode Title: {curr_title}
+Current Headings:
+{headings_summary}
+
+METADATA CONTRACT:
+1. Episode Title: Provide a clean, compelling title. If the topic is a rapidly evolving comparison or current state (e.g. comparing frontier AI models), you may append 'as of {date_str}' if helpful. Do NOT add dates to historical, evergreen, or general scientific topics.
+2. Section Headings: Replace generic continuation labels (such as 'Part 2' or 'Reading Part 2') with distinct, topic-focused headings that describe the specific narrative content of each section.
+3. Remove trailing dangling punctuation (dashes, colons, commas).
+4. Return a script response with the updated episode_title and updated section headings.
+"""
+
+    def _exec_meta(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
+        return p_inst.generate_script(
+            source_text=src,
+            request_mode="brief",
+            source_title=topic,
+            job_id=job.id,
+            generation_instructions=instructions,
+        )
+
+    try:
+        res: PodcastScriptResponse = execute_with_failover(
+            job=job,
+            operation="metadata_cleanup",
+            execute_fn=_exec_meta,
+            db=db,
+            source_text=topic,
+        )
+        if res.episode_title and len(res.episode_title.strip()) > 3:
+            script_dict["episode_title"] = res.episode_title.strip()
+        if res.segments:
+            for idx, seg in enumerate(script_dict.get("segments", [])):
+                if idx < len(res.segments) and res.segments[idx].heading:
+                    seg["heading"] = res.segments[idx].heading.strip()
+    except Exception as e:
+        logger.warning(f"Metadata cleanup failed non-fatally: {e}")
+
+    return script_dict
+
+
 def audit_and_repair_fidelity(
     job: PodcastJob,
     sections: list[dict[str, Any]],
@@ -1238,7 +1612,24 @@ def audit_and_repair_fidelity(
     else:
         scoped_items = all_packet_items
 
-    dossier_data = {**(evidence_packet or {}), "items": scoped_items}
+    compact_items = [
+        {
+            "evidence_id": it.get("evidence_id", f"E{idx}"),
+            "title": it.get("title", ""),
+            "snippet": (it.get("snippet", "") or "")[:400],
+            "source_url": it.get("source_url") or it.get("url") or "",
+        }
+        for idx, it in enumerate(scoped_items, 1)
+    ]
+    dossier_data = {
+        "topic": (evidence_packet.get("topic") if evidence_packet else None) or job.custom_title or "Episode",
+        "scope": scope.value if hasattr(scope, "value") else str(scope),
+        "items": compact_items,
+        "section_plan": [
+            {"order": s.get("section_index", idx), "heading": s.get("heading", ""), "purpose": s.get("purpose", "")}
+            for idx, s in enumerate(sections, 1)
+        ],
+    }
 
     def _build_script_dict(secs: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -1822,6 +2213,86 @@ def execute_unified_long_form_pipeline(
             db=db,
         )
         sec_words = sec_result.get("word_count", 0)
+
+        # Controlled Section Expansion:
+        # Check if actual generated words fall below approximately 85% of effective budget
+        expansion_enabled = getattr(settings, "HERALD_SECTION_EXPANSION_ENABLED", True)
+        min_ratio = getattr(settings, "HERALD_SECTION_MIN_BUDGET_RATIO", 0.85)
+        allocated_target = sec_def.get("word_budget")
+        threshold_words = int(round(allocated_target * min_ratio)) if allocated_target else None
+
+        if (
+            expansion_enabled
+            and effective_scope != EvidenceScope.SOURCE_ONLY
+            and allocated_target is not None
+            and allocated_target >= 250
+            and sec_words < threshold_words
+        ):
+            assigned_eids = sec_def.get("relevant_evidence_ids") or []
+            assigned_kps = sec_def.get("key_points") or []
+            if assigned_eids or assigned_kps:
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "duration",
+                    "SECTION_EXPANSION_ATTEMPTED",
+                    f"Section {sec_idx} generated {sec_words} words (<{min_ratio:.0%} of {allocated_target} target). Attempting controlled expansion.",
+                    metadata={
+                        "section_index": sec_idx,
+                        "target_words": allocated_target,
+                        "original_words": sec_words,
+                        "threshold_words": threshold_words,
+                    },
+                    db=db,
+                )
+                exp_res = expand_single_section(
+                    job=job,
+                    section_info=sec_def,
+                    current_narration=sec_result["narration"],
+                    actual_words=sec_words,
+                    target_budget=allocated_target,
+                    topic=topic,
+                    evidence_packet=evidence_packet,
+                    scope=effective_scope,
+                    covered_context=covered_ctx,
+                    db=db,
+                )
+                if exp_res.get("success"):
+                    sec_result["narration"] = exp_res["narration"]
+                    sec_result["word_count"] = exp_res["word_count"]
+                    sec_result["expansion_attempted"] = True
+                    sec_result["expansion_words_added"] = exp_res.get("words_added", 0)
+                    sec_result["expansion_final_words"] = exp_res["word_count"]
+                    sec_words = exp_res["word_count"]
+                    record_job_diagnostic_event(
+                        job.id,
+                        "INFO",
+                        "duration",
+                        "SECTION_EXPANSION_SUCCEEDED",
+                        f"Section {sec_idx} expanded from {sec_words - exp_res.get('words_added', 0)} to {sec_words} words (+{exp_res.get('words_added', 0)} words).",
+                        metadata={
+                            "section_index": sec_idx,
+                            "original_words": sec_words - exp_res.get("words_added", 0),
+                            "final_words": sec_words,
+                            "words_added": exp_res.get("words_added", 0),
+                        },
+                        db=db,
+                    )
+                else:
+                    sec_result["expansion_attempted"] = True
+                    sec_result["expansion_words_added"] = 0
+                    sec_result["expansion_skipped_reason"] = exp_res.get("reason", "expansion_failed")
+            else:
+                sec_result["expansion_attempted"] = False
+                sec_result["expansion_skipped_reason"] = "grounded_evidence_exhausted"
+        else:
+            sec_result["expansion_attempted"] = False
+            sec_result["expansion_skipped_reason"] = (
+                "budget_satisfied"
+                if (threshold_words and sec_words >= threshold_words)
+                else "expansion_disabled_or_not_applicable"
+            )
+
         cumulative_words += sec_words
         unwritten_sections_count -= 1
 
@@ -1992,6 +2463,78 @@ def execute_unified_long_form_pipeline(
         fidelity_audit=audit_res,
     )
     job.script_json = cleaned_script
+
+    # Pre-TTS Duplicate Repair Gate (AI modes only, non-Literal)
+    duplicate_repair_enabled = getattr(settings, "HERALD_DUPLICATE_REPAIR_ENABLED", True)
+    if (
+        duplicate_repair_enabled
+        and effective_scope != EvidenceScope.SOURCE_ONLY
+        and q_report.duplicate_repair_recommended
+    ):
+        dup_warns = q_report.near_duplicate_warnings
+        repaired_secs, dup_meta = repair_script_duplicates(
+            job=job,
+            sections=repaired_sections,
+            duplicate_warnings=dup_warns,
+            evidence_packet=evidence_packet,
+            topic=topic,
+            db=db,
+        )
+        if dup_meta.get("repaired_count", 0) > 0:
+            repaired_sections = repaired_secs
+            final_script = assemble_and_smooth_script(
+                episode_title=job.script_json.get("episode_title", topic),
+                episode_description=outline.get("episode_description", f"Episode about {topic}"),
+                sections=repaired_sections,
+                source_title=source_title,
+                planned_target_words=planned_target,
+            )
+            job.script_json = final_script.model_dump()
+            cleaned_script, q_report = run_quality_gate(
+                job.script_json,
+                job=job,
+                outline=outline,
+                fidelity_audit=audit_res,
+            )
+            job.script_json = cleaned_script
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "quality_gate",
+                "DUPLICATE_REPAIR_PERFORMED",
+                f"Pre-TTS duplicate repair completed: repaired {dup_meta.get('repaired_count')} sections; remaining warnings: {len(q_report.near_duplicate_warnings)}",
+                metadata={
+                    "original_warnings": dup_meta.get("original_warnings_count"),
+                    "repaired_sections": dup_meta.get("repaired_count"),
+                    "remaining_warnings": len(q_report.near_duplicate_warnings),
+                },
+                db=db,
+            )
+
+    # Title & Heading Metadata Cleanup (AI modes only, non-Literal)
+    if effective_scope != EvidenceScope.SOURCE_ONLY and q_report.metadata_cleanup_recommended:
+        pol_script = cleanup_script_metadata(
+            job=job,
+            script_dict=dict(job.script_json),
+            topic=topic,
+            db=db,
+        )
+        job.script_json = pol_script
+        cleaned_script, q_report = run_quality_gate(
+            job.script_json,
+            job=job,
+            outline=outline,
+            fidelity_audit=audit_res,
+        )
+        job.script_json = cleaned_script
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "quality_gate",
+            "METADATA_CLEANUP_PERFORMED",
+            f"Polished episode metadata: title='{job.script_json.get('episode_title')}'",
+            db=db,
+        )
     if q_report.has_warnings:
         record_job_diagnostic_event(
             job.id,

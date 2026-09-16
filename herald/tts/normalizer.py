@@ -6,10 +6,64 @@ spoken narration for Kokoro. Never alters canonical scripts in storage.
 
 from __future__ import annotations
 
+import enum
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from herald.tts.lexicon import PronunciationLexicon, load_lexicon
+
+
+class TokenType(str, enum.Enum):
+    """Classification categories for narration tokens."""
+
+    NORMAL_WORD = "NORMAL_WORD"
+    LEXICON_ENTRY = "LEXICON_ENTRY"
+    ACRONYM = "ACRONYM"
+    INITIALISM = "INITIALISM"
+    SCIENTIFIC_CATALOG_IDENTIFIER = "SCIENTIFIC_CATALOG_IDENTIFIER"
+    PRODUCT_MODEL_IDENTIFIER = "PRODUCT_MODEL_IDENTIFIER"
+    MIXED_ALPHANUMERIC = "MIXED_ALPHANUMERIC"
+    URL_DOMAIN = "URL_DOMAIN"
+    NUMBER_DATE_UNIT = "NUMBER_DATE_UNIT"
+
+
+@dataclass
+class TokenClassification:
+    """Classification record for a single narration token."""
+
+    token: str
+    token_type: TokenType
+    spoken: str
+    origin: str  # "lexicon", "heuristic", "standard"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "token": self.token,
+            "token_type": self.token_type.value,
+            "spoken": self.spoken,
+            "origin": self.origin,
+        }
+
+
+@dataclass
+class PronunciationPreflightReport:
+    """Pre-TTS diagnostic inspection report of unusual or transformed narration tokens."""
+
+    total_tokens: int
+    unusual_token_count: int
+    lexicon_hits: int
+    heuristic_transformations: int
+    records: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_tokens": self.total_tokens,
+            "unusual_token_count": self.unusual_token_count,
+            "lexicon_hits": self.lexicon_hits,
+            "heuristic_transformations": self.heuristic_transformations,
+            "records": self.records,
+        }
 
 
 @dataclass
@@ -36,6 +90,228 @@ class NormalizationResult:
     canonical_text: str
     transformations: list[TransformationRecord] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    preflight_report: PronunciationPreflightReport | None = None
+
+
+KNOWN_ACRONYMS = {
+    "NASA", "NATO", "ALMA", "LIGO", "DARPA", "UNESCO", "RADAR", "LASER",
+    "SCUBA", "JADES", "SONAR", "OPEC", "PIN", "RAM", "ROM", "SIM", "ASAP",
+}
+
+KNOWN_INITIALISMS = {
+    "JWST", "USDA", "FBI", "CIA", "MIT", "CPU", "GPU", "DNA", "RNA",
+    "HTML", "API", "SDK", "URL", "HTTP", "HTTPS", "TCP", "IP", "AWS",
+    "GCP", "LLM", "TTS", "AI", "ML", "TXRH", "FRISC", "YMTC", "DRAM",
+    "GS", "ESA",
+}
+
+SCIENTIFIC_PREFIXES = (
+    "MoM", "JADES", "GW", "M87", "SN", "NGC", "SDSS", "HD", "HR",
+    "Kepler", "KIC", "TIC", "WASP", "OGLE", "CoRoT", "Gaia", "PSR",
+)
+
+
+def classify_token(
+    token: str,
+    lexicon: PronunciationLexicon | None = None,
+) -> TokenClassification:
+    """Classify a narration token into one of 9 classification categories."""
+    clean_tok = token.strip(".,;:!?\"'()[]{}")
+    if not clean_tok:
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.NORMAL_WORD,
+            spoken=token,
+            origin="standard",
+        )
+
+    if lexicon is None:
+        lexicon = load_lexicon()
+
+    # 1. Lexicon check
+    lex_spoken = lexicon.lookup(clean_tok)
+    if lex_spoken is not None:
+        # Determine subcategory of lexicon entry
+        if any(clean_tok.startswith(pfx) for pfx in SCIENTIFIC_PREFIXES) or "z14" in clean_tok:
+            t_type = TokenType.SCIENTIFIC_CATALOG_IDENTIFIER
+        elif re.match(r"^[A-Z]-\d{1,3}$", clean_tok) or clean_tok.startswith("GPT") or clean_tok.startswith("ARC-"):
+            t_type = TokenType.PRODUCT_MODEL_IDENTIFIER
+        elif clean_tok in KNOWN_ACRONYMS:
+            t_type = TokenType.ACRONYM
+        elif clean_tok in KNOWN_INITIALISMS:
+            t_type = TokenType.INITIALISM
+        elif re.search(r"\d", clean_tok):
+            t_type = TokenType.MIXED_ALPHANUMERIC
+        else:
+            t_type = TokenType.LEXICON_ENTRY
+
+        return TokenClassification(
+            token=token,
+            token_type=t_type,
+            spoken=lex_spoken,
+            origin="lexicon",
+        )
+
+    # 2. URL / Domain
+    if re.match(r"^(?:https?://|www\.)", clean_tok, re.IGNORECASE) or re.search(
+        r"\b[a-zA-Z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk|de|jp)\b", clean_tok, re.IGNORECASE
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.URL_DOMAIN,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 3. Currency / Percentage / Units / Numbers / Dates
+    if (
+        re.match(r"^[\$€£]\d+(?:[.,]\d+)*(?:\s*(?:trillion|billion|million|thousand))?$", clean_tok)
+        or re.match(r"^\d+(?:[.,]\d+)?\s*%$", clean_tok)
+        or re.match(r"^\d+(?:[.,]\d+)?\s*(?:GHz|MHz|kHz|THz|GB|MB|KB|TB|PB|km|kg|ms|cm|mm)$", clean_tok)
+        or re.match(r"^(?:19\d{2}|20\d{2})'?s?$", clean_tok)
+        or re.match(r"^\d+(?:[.,]\d+)*$", clean_tok)
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.NUMBER_DATE_UNIT,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 4. Product / Model / Defense identifiers (e.g. B-52, F-16, GPT-4o, Claude-3.5, Llama-3)
+    if (
+        re.match(r"^[A-Z]-\d{1,3}$", clean_tok)
+        or re.match(r"^(?:GPT|Claude|Llama|Gemini|Mistral|BERT)-[A-Za-z0-9.]+$", clean_tok, re.IGNORECASE)
+        or re.match(r"^(?:ARC-AGI|MiG|Boeing|Airbus)-[A-Za-z0-9.]+$", clean_tok, re.IGNORECASE)
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.PRODUCT_MODEL_IDENTIFIER,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 5. Scientific / Astronomical catalog identifiers
+    if (
+        any(clean_tok.startswith(pfx) for pfx in SCIENTIFIC_PREFIXES)
+        or re.match(r"^[A-Z]{2,5}-[A-Z]{2,4}-[a-z0-9-]+$", clean_tok)
+        or re.match(r"^(?:NGC|IC|SDSS|SN|GW)\s*\d+[A-Za-z0-9*+-]*$", clean_tok, re.IGNORECASE)
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.SCIENTIFIC_CATALOG_IDENTIFIER,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 6. Initialism (known initialisms or all caps 2-5 consonants)
+    if clean_tok in KNOWN_INITIALISMS or (
+        clean_tok.isupper()
+        and 2 <= len(clean_tok) <= 5
+        and not any(c in "0123456789-_" for c in clean_tok)
+        and sum(1 for c in clean_tok if c in "AEIOU") == 0
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.INITIALISM,
+            spoken=" ".join(list(clean_tok)),
+            origin="heuristic",
+        )
+
+    # 7. Acronym (known acronyms or all caps, pronounceable, 3-6 letters)
+    if clean_tok in KNOWN_ACRONYMS or (
+        clean_tok.isupper()
+        and 3 <= len(clean_tok) <= 6
+        and any(c in "AEIOU" for c in clean_tok)
+        and not any(c in "0123456789-_" for c in clean_tok)
+    ):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.ACRONYM,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 8. Mixed alphanumeric (e.g. HBM3E, GDDR6X, LPCAMM2, x86, 64-bit, v2, z14)
+    if re.search(r"[A-Za-z]", clean_tok) and re.search(r"\d", clean_tok):
+        return TokenClassification(
+            token=token,
+            token_type=TokenType.MIXED_ALPHANUMERIC,
+            spoken=clean_tok,
+            origin="heuristic",
+        )
+
+    # 9. Normal word
+    return TokenClassification(
+        token=token,
+        token_type=TokenType.NORMAL_WORD,
+        spoken=clean_tok,
+        origin="standard",
+    )
+
+
+def run_pronunciation_preflight(
+    text: str,
+    lexicon: PronunciationLexicon | None = None,
+) -> PronunciationPreflightReport:
+    """Pre-TTS diagnostic inspection of narration for unusual or transformed alphanumeric tokens.
+
+    Diagnostic and non-blocking. Records up to 50 unique classified tokens.
+    """
+    if not text:
+        return PronunciationPreflightReport(
+            total_tokens=0,
+            unusual_token_count=0,
+            lexicon_hits=0,
+            heuristic_transformations=0,
+            records=[],
+        )
+
+    if lexicon is None:
+        lexicon = load_lexicon()
+
+    raw_tokens = re.findall(r"[\$€£]?[\w.*'-]+", text)
+    total_tokens = len(raw_tokens)
+
+    seen_tokens: set[str] = set()
+    records: list[dict[str, Any]] = []
+    lex_hits = 0
+    heur_transforms = 0
+
+    # Also compute normalized version for comparison
+    norm_res = normalize_for_speech(text, lexicon=lexicon)
+    transform_map = {t.original: t.spoken for t in norm_res.transformations}
+
+    for tok in raw_tokens:
+        clean = tok.strip(".,;:!?\"'()[]{}")
+        if not clean or clean in seen_tokens:
+            continue
+        seen_tokens.add(clean)
+
+        classification = classify_token(clean, lexicon=lexicon)
+        spoken_val = transform_map.get(clean) or classification.spoken
+
+        if classification.origin == "lexicon":
+            lex_hits += 1
+        elif spoken_val != clean or classification.token_type != TokenType.NORMAL_WORD:
+            heur_transforms += 1
+
+        if classification.token_type != TokenType.NORMAL_WORD or spoken_val != clean:
+            if len(records) < 50:
+                records.append({
+                    "token": clean,
+                    "classified_type": classification.token_type.value,
+                    "spoken": spoken_val,
+                    "origin": classification.origin,
+                })
+
+    return PronunciationPreflightReport(
+        total_tokens=total_tokens,
+        unusual_token_count=len(records),
+        lexicon_hits=lex_hits,
+        heuristic_transformations=heur_transforms,
+        records=records,
+    )
 
 
 ONES = [

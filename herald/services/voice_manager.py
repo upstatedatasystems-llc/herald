@@ -18,42 +18,193 @@ from sqlalchemy.orm import Session
 from herald.audio.ffmpeg_builder import validate_audio_file
 from herald.concurrency import get_tts_slot_wait_timeout_seconds, tts_slot_lock
 from herald.config import settings
-from herald.tts.kokoro_client import KokoroClient
+from herald.tts.kokoro_client import KokoroClient, is_tts_actively_synthesizing
 
 logger = logging.getLogger("herald.services.voice_manager")
 
-# Standard fixed comparison text used across all voice previews
-VOICE_SAMPLE_TEXT = "Hello, this is Herald reading your text with Kokoro TTS."
+# Standard fixed comparison text used across all voice previews (testing names, dates, numbers, currency, acronyms)
+VOICE_SAMPLE_TEXT = (
+    "Welcome to Herald audio. Today is October 24th, 2025. We're tracking 3,450 active initiatives, "
+    "evaluating frontier AI models, and deploying over $1.2 million in NASA-backed research across 12 countries. "
+    "From DNA sequencing to quantum computing, we deliver concise, reliable analysis on every breakthrough."
+)
 
-HERALD_VOICE_SAMPLE_CACHE_VERSION = "v1"
+HERALD_VOICE_SAMPLE_CACHE_VERSION = "v2"
 
-VOICE_METADATA: dict[str, dict[str, str]] = {
+
+class VoicePreviewBusyError(Exception):
+    """Raised when voice preview generation cannot acquire TTS slot due to active podcast synthesis."""
+
+
+VOICE_METADATA: dict[str, dict[str, Any]] = {
+    # American English
     "af_heart": {
         "display_name": "Heart",
         "gender": "Female (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
         "description": "Warm, natural, default narrator voice",
     },
     "af_bella": {
         "display_name": "Bella",
         "gender": "Female (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
         "description": "Clear, expressive, dynamic",
+    },
+    "af_nicole": {
+        "display_name": "Nicole",
+        "gender": "Female (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
+        "description": "Crisp, professional, polished",
     },
     "af_sarah": {
         "display_name": "Sarah",
         "gender": "Female (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
         "description": "Bright, articulate, modern",
     },
     "am_adam": {
         "display_name": "Adam",
         "gender": "Male (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
         "description": "Deep, calm, authoritative",
     },
     "am_michael": {
         "display_name": "Michael",
         "gender": "Male (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
         "description": "Smooth, professional, balanced",
     },
+    "am_fenrir": {
+        "display_name": "Fenrir",
+        "gender": "Male (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
+        "description": "Rich, deep, commanding",
+    },
+    "am_puck": {
+        "display_name": "Puck",
+        "gender": "Male (US)",
+        "accent_group": "american_english",
+        "accent_display": "American English",
+        "description": "Friendly, engaging, energetic",
+    },
+    # British English
+    "bf_emma": {
+        "display_name": "Emma",
+        "gender": "Female (UK)",
+        "accent_group": "british_english",
+        "accent_display": "British English",
+        "description": "Refined, articulate, clear",
+    },
+    "bf_isabella": {
+        "display_name": "Isabella",
+        "gender": "Female (UK)",
+        "accent_group": "british_english",
+        "accent_display": "British English",
+        "description": "Warm, poised, expressive",
+    },
+    "bm_fable": {
+        "display_name": "Fable",
+        "gender": "Male (UK)",
+        "accent_group": "british_english",
+        "accent_display": "British English",
+        "description": "Engaging, storytelling, resonant",
+    },
+    "bm_george": {
+        "display_name": "George",
+        "gender": "Male (UK)",
+        "accent_group": "british_english",
+        "accent_display": "British English",
+        "description": "Classic, distinguished, measured",
+    },
 }
+
+
+def discover_runtime_voices(kokoro_client: KokoroClient | None = None) -> tuple[list[str], bool]:
+    """
+    Discover installed voices from Kokoro runtime.
+    Returns: (discovered_voice_ids, discovery_successful_boolean)
+    FAIL CLOSED: If discovery fails or is disabled, returns ([], False).
+    """
+    if not getattr(settings, "HERALD_VOICE_DISCOVERY_ENABLED", True):
+        logger.info("Voice discovery disabled by config; assuming curated allowlist.")
+        return settings.get_allowed_voices_list(), True
+
+    client = kokoro_client or KokoroClient()
+    try:
+        voices = client.get_available_voices()
+        logger.info(f"Kokoro runtime voice discovery succeeded: found {len(voices)} voices.")
+        return voices, True
+    except Exception as e:
+        logger.warning(f"Kokoro runtime voice discovery failed (failing closed): {e}")
+        return [], False
+
+
+def get_selectable_voices(
+    user_voice: str | None = None,
+    kokoro_client: KokoroClient | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """
+    Get selectable voices according to the strict fail-closed contract:
+      Normal selectable voices = discovered runtime voices ∩ Herald curated allowlist
+
+    If discovery fails:
+      - do NOT advertise every curated voice as available
+      - preserve the user's currently stored voice if it is already valid under existing Herald configuration
+      - preserve the configured known-safe default/fallback voice (settings.KOKORO_VOICE)
+      - expose useful diagnostic that discovery failed
+
+    Returns:
+      (selectable_voice_ids, diagnostic_info_dict)
+    """
+    curated = settings.get_allowed_voices_list()
+    default_fallback = getattr(settings, "KOKORO_VOICE", "af_heart").lower().strip()
+    if default_fallback not in curated and curated:
+        default_fallback = curated[0]
+
+    discovered, ok = discover_runtime_voices(kokoro_client=kokoro_client)
+
+    diagnostic: dict[str, Any] = {
+        "discovery_enabled": getattr(settings, "HERALD_VOICE_DISCOVERY_ENABLED", True),
+        "discovery_successful": ok,
+        "discovered_count": len(discovered),
+        "curated_count": len(curated),
+    }
+
+    if not ok:
+        # Discovery failed: FAIL CLOSED.
+        # Fall back to user's stored voice (if valid in curated) and configured default
+        preserved: list[str] = []
+        if user_voice and user_voice.lower().strip() in curated:
+            preserved.append(user_voice.lower().strip())
+        if default_fallback and default_fallback not in preserved:
+            preserved.append(default_fallback)
+
+        diagnostic["fallback_mode"] = "fail_closed_preserved"
+        diagnostic["preserved_voices"] = preserved
+        diagnostic["warning"] = "Runtime voice discovery failed; advertising only verified safe voices."
+        logger.warning(f"Voice discovery failed closed. Selectable voices restricted to: {preserved}")
+        return preserved, diagnostic
+
+    # Discovery succeeded: normal selectable = discovered ∩ curated
+    disc_set = set(v.lower().strip() for v in discovered)
+    selectable = [v for v in curated if v in disc_set]
+
+    # If intersection is unexpectedly empty, keep safe default
+    if not selectable and default_fallback:
+        selectable = [default_fallback]
+        diagnostic["warning"] = "No curated voices matched runtime voices; retaining safe default."
+
+    diagnostic["fallback_mode"] = "runtime_intersection"
+    diagnostic["selectable_count"] = len(selectable)
+    return selectable, diagnostic
+
 
 
 def get_voice_samples_dir() -> Path:
@@ -64,10 +215,12 @@ def get_voice_samples_dir() -> Path:
     return samples_dir
 
 
-def get_voice_sample_path(voice: str) -> Path:
+def get_voice_sample_path(voice: str, speed: float = 1.0) -> Path:
     """Return standard persistent path for a voice sample MP3."""
     v_clean = voice.lower().strip()
-    return get_voice_samples_dir() / f"sample_{v_clean}.mp3"
+    if abs(speed - 1.0) < 0.01:
+        return get_voice_samples_dir() / f"sample_{v_clean}.mp3"
+    return get_voice_samples_dir() / f"sample_{v_clean}_s{speed:.2f}.mp3"
 
 
 def is_valid_sample_audio(path: Path) -> bool:
@@ -120,15 +273,21 @@ def convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
 
 def ensure_voice_sample(
     voice: str,
+    speed: float = 1.0,
     kokoro_client: KokoroClient | None = None,
     force: bool = False,
     db: Session | None = None,
+    non_blocking: bool = False,
 ) -> Path:
     """
     Ensure standard voice sample MP3 exists on disk and is recorded in the manifest.
-    If force=False and get_cached_voice_sample(voice) is valid, returns it immediately.
+    If force=False and get_cached_voice_sample(voice, speed) is valid, returns it immediately.
     Otherwise, removes stale/orphan preview, synthesizes in a global TTS concurrency slot,
     converts to MP3 atomically, validates audio, and updates manifest.
+
+    Shared TTS slot concurrency lock:
+      Checks is_tts_actively_synthesizing(db). If busy, raises VoicePreviewBusyError.
+      Acquires tts_slot_lock with non-blocking / short timeout.
     """
     v_clean = voice.lower().strip()
     allowed = settings.get_allowed_voices_list()
@@ -136,12 +295,17 @@ def ensure_voice_sample(
         raise ValueError(f"Voice '{voice}' is not in allowed voices: {allowed}")
 
     if not force:
-        cached = get_cached_voice_sample(v_clean)
+        cached = get_cached_voice_sample(v_clean, speed=speed)
         if cached is not None:
             return cached
 
-    sample_mp3 = get_voice_sample_path(v_clean)
-    # Clean corrupt or stale cache file if present
+    # Concurrency check: podcast synthesis takes strict priority over previews
+    if is_tts_actively_synthesizing(db=db):
+        raise VoicePreviewBusyError(
+            "Voice preview is temporarily busy with podcast synthesis. Please try again in a moment."
+        )
+
+    sample_mp3 = get_voice_sample_path(v_clean, speed=speed)
     if sample_mp3.exists():
         sample_mp3.unlink(missing_ok=True)
 
@@ -151,50 +315,61 @@ def ensure_voice_sample(
     temp_mp3 = sample_mp3.with_name(f"{sample_mp3.stem}_{unique_suffix}.tmp.mp3")
 
     synth_timeout = float(getattr(settings, "KOKORO_SYNTHESIS_TIMEOUT_SECONDS", 180.0))
-    with tts_slot_lock(db=db, timeout_seconds=get_tts_slot_wait_timeout_seconds()):
-        if not force:
-            cached = get_cached_voice_sample(v_clean)
-            if cached is not None:
-                return cached
+    lock_timeout = 0.0 if non_blocking else get_tts_slot_wait_timeout_seconds()
 
-        try:
-            client.synthesize_chunk(
-                text=VOICE_SAMPLE_TEXT,
-                output_path=temp_wav,
-                voice=v_clean,
-                speed=1.0,
-                timeout=synth_timeout,
-            )
-            convert_wav_to_mp3(temp_wav, temp_mp3)
-            if not is_valid_sample_audio(temp_mp3):
-                raise RuntimeError(
-                    f"Synthesized voice sample for '{v_clean}' failed audio validation."
-                )
+    try:
+        with tts_slot_lock(db=db, timeout_seconds=lock_timeout):
+            if not force:
+                cached = get_cached_voice_sample(v_clean, speed=speed)
+                if cached is not None:
+                    return cached
 
-            os.replace(temp_mp3, sample_mp3)
-            logger.info(f"Generated and cached voice sample for '{v_clean}' at '{sample_mp3}'")
-
-            # Update persistent versioned manifest
             try:
-                manifest = load_voice_sample_manifest()
-                manifest[v_clean] = {
-                    "voice_id": v_clean,
-                    "sample_text_hash": compute_sample_text_hash(),
-                    "text_hash": compute_sample_text_hash(),
-                    "speed": 1.0,
-                    "format": "mp3",
-                    "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
-                    "file_path": str(sample_mp3),
-                    "generated_at": datetime.now(UTC).isoformat(),
-                }
-                save_voice_sample_manifest(manifest)
-            except Exception as me:
-                logger.debug(f"Failed to update voice sample manifest for '{v_clean}': {me}")
-        finally:
-            if temp_wav.exists():
-                temp_wav.unlink(missing_ok=True)
-            if temp_mp3.exists():
-                temp_mp3.unlink(missing_ok=True)
+                client.synthesize_chunk(
+                    text=VOICE_SAMPLE_TEXT,
+                    output_path=temp_wav,
+                    voice=v_clean,
+                    speed=speed,
+                    timeout=synth_timeout,
+                )
+                convert_wav_to_mp3(temp_wav, temp_mp3)
+                if not is_valid_sample_audio(temp_mp3):
+                    raise RuntimeError(
+                        f"Synthesized voice sample for '{v_clean}' failed audio validation."
+                    )
+
+                os.replace(temp_mp3, sample_mp3)
+                logger.info(f"Generated and cached voice sample for '{v_clean}' (speed={speed}) at '{sample_mp3}'")
+
+                # Update persistent versioned manifest
+                try:
+                    manifest = load_voice_sample_manifest()
+                    manifest_data = {
+                        "voice_id": v_clean,
+                        "sample_text_hash": compute_sample_text_hash(),
+                        "text_hash": compute_sample_text_hash(),
+                        "speed": speed,
+                        "format": "mp3",
+                        "cache_version": HERALD_VOICE_SAMPLE_CACHE_VERSION,
+                        "file_path": str(sample_mp3),
+                        "generated_at": datetime.now(UTC).isoformat(),
+                    }
+                    entry_key = f"{v_clean}_s{speed:.2f}" if abs(speed - 1.0) >= 0.01 else v_clean
+                    manifest[entry_key] = manifest_data
+                    if abs(speed - 1.0) < 0.01:
+                        manifest[v_clean] = manifest_data
+                    save_voice_sample_manifest(manifest)
+                except Exception as me:
+                    logger.debug(f"Failed to update voice sample manifest for '{v_clean}': {me}")
+            finally:
+                if temp_wav.exists():
+                    temp_wav.unlink(missing_ok=True)
+                if temp_mp3.exists():
+                    temp_mp3.unlink(missing_ok=True)
+    except TimeoutError as te:
+        raise VoicePreviewBusyError(
+            "Voice preview is temporarily busy with podcast synthesis. Please try again in a moment."
+        ) from te
 
     return sample_mp3
 
@@ -233,21 +408,24 @@ def compute_sample_text_hash(text: str = VOICE_SAMPLE_TEXT) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:16]
 
 
-def get_cached_voice_sample(voice: str) -> Path | None:
+def get_cached_voice_sample(voice: str, speed: float = 1.0) -> Path | None:
     """
     Check if a voice preview sample is already prewarmed, recorded in manifest, and valid on disk.
     Returns Path if available, None on cache miss.
     Rejects orphan files not tracked in the manifest or with mismatched version/settings.
     """
     v_clean = voice.lower().strip()
-    sample_mp3 = get_voice_sample_path(v_clean)
+    sample_mp3 = get_voice_sample_path(v_clean, speed=speed)
     if not is_valid_sample_audio(sample_mp3):
         return None
 
     manifest = load_voice_sample_manifest()
-    entry = manifest.get(v_clean)
+    entry_key = f"{v_clean}_s{speed:.2f}" if abs(speed - 1.0) >= 0.01 else v_clean
+    entry = manifest.get(entry_key)
+    if not entry and abs(speed - 1.0) < 0.01:
+        entry = manifest.get(f"{v_clean}_s1.00")
+
     if not entry or not isinstance(entry, dict):
-        # Reject orphan files without valid manifest entry
         return None
 
     if entry.get("voice_id") != v_clean:
@@ -256,7 +434,8 @@ def get_cached_voice_sample(voice: str) -> Path | None:
     text_hash = entry.get("sample_text_hash") or entry.get("text_hash")
     if text_hash != curr_hash:
         return None
-    if entry.get("speed") != 1.0:
+    entry_speed = float(entry.get("speed", 1.0))
+    if abs(entry_speed - speed) >= 0.05:
         return None
     if entry.get("format") != "mp3":
         return None
@@ -270,6 +449,7 @@ def prewarm_all_voice_samples(
     kokoro_client: KokoroClient | None = None,
     force: bool = False,
     db: Session | None = None,
+    speed: float = 1.0,
 ) -> dict[str, bool]:
     """
     Prewarm all allowed voice sample MP3s.
@@ -282,14 +462,14 @@ def prewarm_all_voice_samples(
 
     for v in allowed:
         try:
-            cached = get_cached_voice_sample(v)
+            cached = get_cached_voice_sample(v, speed=speed)
             if cached and not force:
                 logger.info(f"Voice sample for '{v}' already prewarmed: {cached}")
                 results[v] = True
                 continue
 
-            logger.info(f"Prewarming voice sample for '{v}' (force={force})...")
-            ensure_voice_sample(voice=v, kokoro_client=client, force=force, db=db)
+            logger.info(f"Prewarming voice sample for '{v}' (speed={speed}, force={force})...")
+            ensure_voice_sample(voice=v, speed=speed, kokoro_client=client, force=force, db=db)
             results[v] = True
         except Exception as e:
             logger.error(f"Failed to prewarm voice sample for '{v}': {e}")
@@ -308,6 +488,8 @@ def get_all_voice_metadata() -> list[dict[str, Any]]:
             {
                 "display_name": v.capitalize(),
                 "gender": "Unknown",
+                "accent_group": "american_english",
+                "accent_display": "American English",
                 "description": "Kokoro voice",
             },
         )
@@ -315,21 +497,30 @@ def get_all_voice_metadata() -> list[dict[str, Any]]:
     return results
 
 
+def get_voices_by_accent_group(accent_group: str | None = None) -> list[dict[str, Any]]:
+    """Return list of voice metadata filtered by accent group (e.g. 'american_english', 'british_english')."""
+    all_voices = get_all_voice_metadata()
+    if not accent_group or accent_group.lower().strip() == "all":
+        return all_voices
+    target = accent_group.lower().strip()
+    return [v for v in all_voices if v.get("accent_group", "").lower() == target]
+
+
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Herald Voice Prewarm CLI")
     parser.add_argument("--prewarm", action="store_true", help="Prewarm all voice samples")
     parser.add_argument(
         "--force", action="store_true", help="Force regenerate existing voice samples"
     )
+    parser.add_argument("--speed", type=float, default=1.0, help="Speed for preview samples")
     args = parser.parse_args()
 
     if args.prewarm:
-        import sys
-
         print("Prewarming all Herald voice preview samples...")
-        res = prewarm_all_voice_samples(force=args.force)
+        res = prewarm_all_voice_samples(force=args.force, speed=args.speed)
         all_ok = True
         for vid, ok in res.items():
             status_str = "SUCCESS" if ok else "FAILED"

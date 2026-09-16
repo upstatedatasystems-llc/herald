@@ -489,6 +489,7 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
         if queue_start and queue_start.tzinfo is None:
             queue_start = queue_start.replace(tzinfo=UTC)
         wait_ms = max(0, int((now - queue_start).total_seconds() * 1000))
+        queue_wait_sec = round(wait_ms / 1000.0, 2)
         record_stage_metric(
             job_id=job.id,
             stage="TTS_QUEUE_WAIT",
@@ -496,7 +497,20 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             finished_at=now,
             duration_ms=wait_ms,
             status="success",
-            metadata_json={"worker_id": worker_id},
+            metadata_json={"worker_id": worker_id, "queue_wait_seconds": queue_wait_sec},
+        )
+        record_job_diagnostic_event(
+            job.id,
+            "INFO",
+            "worker",
+            "TTS_CLAIMED",
+            f"Job claimed by worker '{worker_id}' after {queue_wait_sec:.1f}s in TTS queue",
+            metadata={
+                "worker_id": worker_id,
+                "queued_at": queue_start.isoformat(),
+                "synthesis_started_at": now.isoformat(),
+                "queue_wait_seconds": queue_wait_sec,
+            },
         )
     except Exception as me:
         logger.warning(f"Could not record TTS_QUEUE_WAIT metric for job '{job.id}': {me}")
@@ -812,6 +826,42 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             job.audio_sha256 = audio_info["sha256"]
             job.audio_ready_at = datetime.now(UTC)
 
+            # Record total synthesis time and turnaround telemetry
+            t_tts_total_finish = datetime.now(UTC)
+            synthesis_sec = round((t_tts_total_finish - t_tts_total_start).total_seconds(), 2)
+            c_at = job.created_at
+            if c_at and c_at.tzinfo is None:
+                c_at = c_at.replace(tzinfo=UTC)
+            total_turnaround_sec = round((t_tts_total_finish - c_at).total_seconds(), 2) if c_at else None
+
+            record_stage_metric(
+                job_id=job.id,
+                stage="TTS_SYNTHESIS_TOTAL",
+                started_at=t_tts_total_start,
+                finished_at=t_tts_total_finish,
+                status="success",
+                audio_duration_ms=int(audio_info["duration_seconds"] * 1000) if audio_info.get("duration_seconds") else None,
+                metadata_json={
+                    "worker_id": worker_id,
+                    "synthesis_seconds": synthesis_sec,
+                    "queue_wait_seconds": queue_wait_sec,
+                    "total_turnaround_seconds": total_turnaround_sec,
+                },
+            )
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "worker",
+                "JOB_TELEMETRY",
+                f"Podcast audio generation completed in {total_turnaround_sec or synthesis_sec:.1f}s (synthesis: {synthesis_sec:.1f}s, queue wait: {queue_wait_sec:.1f}s)",
+                metadata={
+                    "worker_id": worker_id,
+                    "synthesis_seconds": synthesis_sec,
+                    "queue_wait_seconds": queue_wait_sec,
+                    "total_turnaround_seconds": total_turnaround_sec,
+                    "audio_duration_seconds": audio_info.get("duration_seconds"),
+                },
+            )
 
             # Clear claim fields on successful completion
             job.claimed_at = None

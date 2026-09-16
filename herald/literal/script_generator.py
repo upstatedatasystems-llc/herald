@@ -140,8 +140,10 @@ def generate_literal_script(
 
         if current_length + len(spoken_block) > max_segment_chars and current_narration_chunks:
             flush_segment()
-            if current_heading == "Introduction" and segment_idx > 1:
-                current_heading = f"Reading Part {segment_idx}"
+            if segment_idx == 2:
+                current_heading = "Reading"
+            else:
+                current_heading = "Continued"
 
         current_narration_chunks.append(spoken_block)
         current_length += len(spoken_block)

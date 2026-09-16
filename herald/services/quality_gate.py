@@ -79,8 +79,42 @@ class QualityReport(BaseModel):
     def has_warnings(self) -> bool:
         return len(self.warnings) > 0
 
+    @property
+    def near_duplicate_warnings(self) -> list[QualityWarning]:
+        return [w for w in self.warnings if w.code == "NEAR_DUPLICATE_PASSAGE"]
+
+    @property
+    def duplicate_repair_recommended(self) -> bool:
+        dup_warns = self.near_duplicate_warnings
+        from herald.config import settings
+
+        threshold = getattr(settings, "HERALD_DUPLICATE_REPAIR_COUNT_THRESHOLD", 3)
+        if len(dup_warns) > threshold:
+            return True
+        for w in dup_warns:
+            sim = w.metadata.get("similarity", 0.0)
+            if sim >= 0.75:
+                return True
+        return False
+
+    @property
+    def metadata_cleanup_recommended(self) -> bool:
+        meta_codes = {
+            "SUSPICIOUS_TITLE_TRUNCATION",
+            "SUSPICIOUS_HEADING_TRUNCATION",
+            "GENERIC_PART_HEADING",
+            "GENERIC_CATCHUP_HEADING",
+            "DUPLICATE_HEADING",
+            "EXCESSIVE_TITLE_LENGTH",
+            "EXCESSIVE_HEADING_LENGTH",
+        }
+        return any(w.code in meta_codes for w in self.warnings)
+
     def to_dict(self) -> dict[str, Any]:
-        return self.model_dump()
+        d = self.model_dump()
+        d["duplicate_repair_recommended"] = self.duplicate_repair_recommended
+        d["metadata_cleanup_recommended"] = self.metadata_cleanup_recommended
+        return d
 
 
 def _extract_trigrams(text: str) -> set[tuple[str, str, str]]:
@@ -127,17 +161,32 @@ def run_quality_gate(
             ep_title = re.sub(pat, "", ep_title, flags=re.IGNORECASE).strip()
             cleanups.append(f"Stripped raw prefix from episode title ('{old_title}' -> '{ep_title}')")
             break
+
+    # Clean dangling trailing punctuation from title
+    ep_title_clean = re.sub(r"[:,\-–—]\s*$", "", ep_title).strip()
+    if ep_title_clean != ep_title:
+        cleanups.append(f"Stripped trailing punctuation from episode title ('{ep_title}' -> '{ep_title_clean}')")
+        ep_title = ep_title_clean
     cleaned_script["episode_title"] = ep_title
 
-    # Title truncation inside a word check
-    if ep_title and (ep_title.endswith("-") or re.search(r"\b(?:the|a|an|of|in|and)\s*$", ep_title, re.IGNORECASE)):
-        warnings.append(
-            QualityWarning(
-                code="SUSPICIOUS_TITLE_TRUNCATION",
-                message=f"Episode title appears truncated: '{ep_title}'",
-                severity=QualitySeverity.WARNING,
+    # Title truncation / quality checks
+    if ep_title:
+        if ep_title.endswith("-") or re.search(r"\b(?:the|a|an|of|in|and|or|for|to|with|by|from)\s*$", ep_title, re.IGNORECASE):
+            warnings.append(
+                QualityWarning(
+                    code="SUSPICIOUS_TITLE_TRUNCATION",
+                    message=f"Episode title appears truncated: '{ep_title}'",
+                    severity=QualitySeverity.WARNING,
+                )
             )
-        )
+        if len(ep_title) > 130:
+            warnings.append(
+                QualityWarning(
+                    code="EXCESSIVE_TITLE_LENGTH",
+                    message=f"Episode title exceeds 130 characters ({len(ep_title)} chars): '{ep_title}'",
+                    severity=QualitySeverity.WARNING,
+                )
+            )
 
     # 2. Check headings and narration across segments
     seen_headings: dict[str, int] = {}
@@ -157,6 +206,12 @@ def run_quality_gate(
                 h_raw = re.sub(pat, "", h_raw, flags=re.IGNORECASE).strip()
                 cleanups.append(f"Stripped raw prefix from section {idx} heading ('{old_h}' -> '{h_raw}')")
                 break
+
+        # Clean dangling trailing punctuation from heading
+        h_clean = re.sub(r"[:,\-–—]\s*$", "", h_raw).strip()
+        if h_clean != h_raw:
+            cleanups.append(f"Stripped trailing punctuation from section {idx} heading ('{h_raw}' -> '{h_clean}')")
+            h_raw = h_clean
         seg_clean["heading"] = h_raw
 
         # Check for generic catch-up headings
@@ -171,6 +226,37 @@ def run_quality_gate(
                         severity=QualitySeverity.WARNING,
                     )
                 )
+
+        # Check for generic continuation / Part N headings
+        if re.match(r"^(?:part\s+\d+|reading\s+part\s+\d+|\(part\s+\d+\))$", h_lower) or re.search(r"\s*\(part\s+\d+\)$", h_lower):
+            warnings.append(
+                QualityWarning(
+                    code="GENERIC_PART_HEADING",
+                    message=f"Section {idx} uses generic continuation heading: '{h_raw}'",
+                    section_index=idx,
+                    severity=QualitySeverity.WARNING,
+                )
+            )
+
+        # Check for heading truncation or excessive length
+        if re.search(r"\b(?:the|a|an|of|in|and|or|for|to|with|by|from)\s*$", h_raw, re.IGNORECASE) or h_raw.endswith("-"):
+            warnings.append(
+                QualityWarning(
+                    code="SUSPICIOUS_HEADING_TRUNCATION",
+                    message=f"Section {idx} heading appears truncated: '{h_raw}'",
+                    section_index=idx,
+                    severity=QualitySeverity.WARNING,
+                )
+            )
+        if len(h_raw) > 90:
+            warnings.append(
+                QualityWarning(
+                    code="EXCESSIVE_HEADING_LENGTH",
+                    message=f"Section {idx} heading exceeds 90 characters ({len(h_raw)} chars): '{h_raw}'",
+                    section_index=idx,
+                    severity=QualitySeverity.WARNING,
+                )
+            )
 
         # Duplicate heading check
         norm_h = re.sub(r"\s+", " ", h_lower).strip()
@@ -281,7 +367,14 @@ def run_quality_gate(
                             code="NEAR_DUPLICATE_PASSAGE",
                             message=f"Sections {idx_a} and {idx_b} contain near-duplicate passages ({jaccard:.0%} similarity).",
                             severity=QualitySeverity.WARNING,
-                            metadata={"section_a": idx_a, "section_b": idx_b, "similarity": round(jaccard, 2)},
+                            metadata={
+                                "section_a": idx_a,
+                                "section_b": idx_b,
+                                "similarity": round(jaccard, 3),
+                                "passage_a": text_a[:180],
+                                "passage_b": text_b[:180],
+                                "intersection_count": inter,
+                            },
                         )
                     )
 

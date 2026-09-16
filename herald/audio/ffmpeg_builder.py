@@ -457,11 +457,14 @@ def join_and_normalize_audio(
                 escaped_path = str(chunk.resolve()).replace("'", "'\\''")
                 f.write(f"file '{escaped_path}'\n")
 
+        peak_limit = getattr(settings, "HERALD_AUDIO_TRUE_PEAK_DBTP", -1.5)
+        limit_str = f"{peak_limit}dB" if not str(peak_limit).endswith("dB") else str(peak_limit)
         loudnorm_str = (
             f"loudnorm=I={settings.LOUDNORM_TARGET_I}:"
             f"TP={settings.LOUDNORM_TARGET_TP}:"
             f"LRA={settings.LOUDNORM_TARGET_LRA}"
         )
+        audio_filter = f"{loudnorm_str},alimiter=limit={limit_str}:level=false"
 
         cmd = [
             "ffmpeg",
@@ -469,7 +472,7 @@ def join_and_normalize_audio(
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list_path),
-            "-af", loudnorm_str,
+            "-af", audio_filter,
             "-ac", str(settings.AUDIO_CHANNELS),
             "-ar", str(settings.AUDIO_SAMPLE_RATE),
             "-b:a", settings.AUDIO_OUTPUT_BITRATE,
@@ -484,6 +487,7 @@ def join_and_normalize_audio(
                     "output_path": str(output_mp3_path),
                     "file_bytes": output_mp3_path.stat().st_size,
                     "duration_seconds": 10,
+                    "true_peak_dbtp": peak_limit,
                     "sha256": compute_file_sha256(output_mp3_path),
                 }
             raise FFmpegExecutionError("FFmpeg binary is not found in PATH.")
@@ -534,6 +538,7 @@ def join_and_normalize_audio(
             "result": "SUCCESS",
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
+            "true_peak_dbtp": peak_limit,
             "sha256": checksum,
         }
         logger.info(json.dumps(log_entry))
@@ -542,6 +547,7 @@ def join_and_normalize_audio(
             "output_path": str(output_mp3_path),
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
+            "true_peak_dbtp": peak_limit,
             "sha256": checksum,
         }
 

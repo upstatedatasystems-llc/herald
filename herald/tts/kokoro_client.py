@@ -213,6 +213,52 @@ class KokoroClient(BaseTTSEngine):
             with KokoroClient._active_syntheses_lock:
                 KokoroClient._active_syntheses -= 1
 
+    def get_available_voices(self, timeout: float = 2.0) -> list[str]:
+        """
+        Probe Kokoro endpoint for available voice IDs.
+        Tries /v1/audio/voices first, then /v1/voices with a short timeout.
+        Returns sorted list of unique lowercase voice IDs.
+        Raises KokoroTTSError if probe fails or endpoint is unreachable.
+        """
+        if os.environ.get("HERALD_MOCK_TTS") == "1":
+            return list(settings.get_allowed_voices_list())
+
+        endpoints = [f"{self.base_url}/audio/voices", f"{self.base_url}/voices"]
+        errors = []
+        for ep in endpoints:
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    resp = client.get(ep)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        voices: list[str] = []
+                        if isinstance(data, list):
+                            for it in data:
+                                if isinstance(it, str):
+                                    voices.append(it.strip().lower())
+                                elif isinstance(it, dict) and "id" in it:
+                                    voices.append(str(it["id"]).strip().lower())
+                                elif isinstance(it, dict) and "name" in it:
+                                    voices.append(str(it["name"]).strip().lower())
+                        elif isinstance(data, dict):
+                            raw_list = data.get("voices") or data.get("data") or []
+                            if isinstance(raw_list, list):
+                                for it in raw_list:
+                                    if isinstance(it, str):
+                                        voices.append(it.strip().lower())
+                                    elif isinstance(it, dict) and "id" in it:
+                                        voices.append(str(it["id"]).strip().lower())
+                                    elif isinstance(it, dict) and "name" in it:
+                                        voices.append(str(it["name"]).strip().lower())
+                        if voices:
+                            return sorted(list(set(voices)))
+                    else:
+                        errors.append(f"{ep} returned HTTP {resp.status_code}")
+            except Exception as e:
+                errors.append(f"{ep}: {e}")
+
+        raise KokoroTTSError(f"Voice discovery failed on {endpoints}: {'; '.join(errors)}")
+
 
 def is_tts_actively_synthesizing(db: Any | None = None) -> bool:
     """

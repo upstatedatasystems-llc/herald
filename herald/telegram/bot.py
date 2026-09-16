@@ -43,7 +43,10 @@ from herald.services.log_export import (
 from herald.services.redaction import redact_text
 from herald.services.voice_manager import (
     VOICE_METADATA,
+    VoicePreviewBusyError,
+    ensure_voice_sample,
     get_cached_voice_sample,
+    get_selectable_voices,
 )
 from herald.telegram.auth import (
     get_effective_user_preferences,
@@ -86,12 +89,13 @@ from herald.telegram.formatters import (
     format_research_depth_menu,
     format_settings,
     format_speed_menu,
+    format_voice_accent_groups,
     format_voices_browser,
     get_job_display_title,
 )
 from herald.telegram.resolver import resolve_user_job
 from herald.telegram.typing import TelegramTypingNotifier
-from herald.tts.kokoro_client import KokoroClient
+from herald.tts.kokoro_client import KokoroClient, is_tts_actively_synthesizing
 
 logger = logging.getLogger("herald.telegram.bot")
 
@@ -575,6 +579,23 @@ def handle_telegram_command(
             db.query(PodcastJob).filter(PodcastJob.status == JobState.COMPLETE.value).count()
         )
 
+        queued_tts_jobs = (
+            db.query(PodcastJob)
+            .filter(PodcastJob.status == JobState.QUEUED_TTS.value)
+            .order_by(PodcastJob.created_at.asc())
+            .all()
+        )
+        tts_queue_line = ""
+        if queued_tts_jobs:
+            oldest = queued_tts_jobs[0]
+            t_oldest = oldest.updated_at or oldest.created_at or datetime.now(UTC)
+            if t_oldest.tzinfo is None:
+                t_oldest = t_oldest.replace(tzinfo=UTC)
+            oldest_wait = max(0, int((datetime.now(UTC) - t_oldest).total_seconds()))
+            m, s = divmod(oldest_wait, 60)
+            wait_str = f"{m}m {s}s" if m > 0 else f"{s}s"
+            tts_queue_line = f"• <b>TTS Queue:</b> {len(queued_tts_jobs)} waiting (oldest waiting {wait_str})\n"
+
         status_msg = (
             f"📊 <b>Herald System Status</b>\n\n"
             f"• <b>Uptime:</b> {html.escape(uptime_str)}\n"
@@ -583,6 +604,7 @@ def handle_telegram_command(
             f"• <b>Disk Space:</b> {free_mb:.1f} MB free\n"
             f"• <b>Active Jobs:</b> {active_count}\n"
             f"• <b>Completed Jobs:</b> {completed_count}\n"
+            f"{tts_queue_line}"
         )
         client.send_message(
             chat_id=chat_id, text=status_msg, reply_to_message_id=msg_id, parse_mode="HTML"
@@ -1329,7 +1351,7 @@ def handle_telegram_callback_query(
         client.answer_callback_query(cb_id)
         prefs = get_effective_user_preferences(db, user_id)
         current_default = prefs.get("default_voice", "af_heart")
-        voices_text, reply_markup = format_voices_browser(current_default=current_default)
+        voices_text, reply_markup = format_voice_accent_groups(current_default=current_default)
         try:
             client.edit_message_text(
                 chat_id=chat_id,
@@ -1342,7 +1364,33 @@ def handle_telegram_callback_query(
             if "message is not modified" in str(e).lower():
                 logger.debug(f"editMessageText idempotent notice: {e}")
             else:
-                logger.warning(f"Failed to show voices browser: {e}")
+                logger.warning(f"Failed to show voice accent groups: {e}")
+        return
+
+    elif raw_data.startswith("h2:voice:group:"):
+        client.answer_callback_query(cb_id)
+        group = raw_data[len("h2:voice:group:") :]
+        prefs = get_effective_user_preferences(db, user_id)
+        current_default = prefs.get("default_voice", "af_heart")
+        selectable, _ = get_selectable_voices(user_voice=current_default)
+        voices_text, reply_markup = format_voices_browser(
+            current_default=current_default,
+            accent_group=group,
+            selectable_voices=selectable,
+        )
+        try:
+            client.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=voices_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"editMessageText idempotent notice: {e}")
+            else:
+                logger.warning(f"Failed to show filtered voices browser: {e}")
         return
 
     elif raw_data in ("h2:settings:main", "h3:settings:main", "h2:voice:back_to_settings"):
@@ -2373,9 +2421,15 @@ def handle_telegram_callback_query(
         disp_name = meta.get("display_name", v_name)
         client.answer_callback_query(cb_id, text=f"Default voice set to {disp_name} ({v_name}).")
 
-        # Only edit message if callback originated from an editable text message (e.g. voice browser)
+        # Refresh browser
         if isinstance(message, dict) and "text" in message:
-            voices_text, reply_markup = format_voices_browser(current_default=v_name)
+            group = meta.get("accent_group")
+            selectable, _ = get_selectable_voices(user_voice=v_name)
+            voices_text, reply_markup = format_voices_browser(
+                current_default=v_name,
+                accent_group=group,
+                selectable_voices=selectable,
+            )
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
@@ -2398,12 +2452,21 @@ def handle_telegram_callback_query(
 
         meta = VOICE_METADATA.get(v_name, {})
         disp_name = meta.get("display_name", v_name)
-        cached_sample = get_cached_voice_sample(v_name)
+
+        prefs = get_effective_user_preferences(db, user_id) if user_id else {}
+        user_speed = float(prefs.get("default_speed") or 1.0)
+
+        if abs(user_speed - 1.0) < 0.01:
+            cached_sample = get_cached_voice_sample(v_name)
+        else:
+            cached_sample = get_cached_voice_sample(v_name, speed=user_speed)
+            if not cached_sample:
+                cached_sample = get_cached_voice_sample(v_name)
 
         # Cache hit: fast immediate delivery (zero interactive TTS wait)
         if cached_sample:
             client.answer_callback_query(cb_id, text=f"Playing sample for {disp_name}...")
-            caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: 1.0x"
+            caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: {user_speed:.2f}x"
             client.send_audio(
                 chat_id=chat_id,
                 audio_path=cached_sample,
@@ -2414,7 +2477,46 @@ def handle_telegram_callback_query(
             )
             return
 
-        # Cache miss: do NOT call Kokoro or synthesize at runtime!
+        # Cache miss: check concurrency before on-demand generation
+        if is_tts_actively_synthesizing(db=db):
+            client.answer_callback_query(
+                cb_id,
+                text="Voice preview is temporarily busy with podcast synthesis. Please try again in a moment.",
+                show_alert=True,
+            )
+            return
+
+        # On-demand preview synthesis under concurrency lock if enabled
+        if getattr(settings, "HERALD_VOICE_PREVIEW_ON_DEMAND", False):
+            try:
+                client.answer_callback_query(cb_id, text=f"Synthesizing preview for {disp_name}...")
+                synth_sample = ensure_voice_sample(
+                    voice=v_name,
+                    speed=user_speed,
+                    db=db,
+                    non_blocking=True,
+                )
+                caption = f"🎙️ <b>Voice Sample:</b> <code>{html.escape(v_name)}</code> ({html.escape(disp_name)})\nSpeed: {user_speed:.2f}x"
+                client.send_audio(
+                    chat_id=chat_id,
+                    audio_path=synth_sample,
+                    title=f"Sample: {disp_name}",
+                    performer="Herald",
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+                return
+            except VoicePreviewBusyError:
+                client.answer_callback_query(
+                    cb_id,
+                    text="Voice preview is temporarily busy with podcast synthesis. Please try again in a moment.",
+                    show_alert=True,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"On-demand voice sample generation failed for '{v_name}': {e}")
+
+        # Default fallback alert
         logger.warning(
             f"Voice preview cache miss for voice_id='{v_name}' (display='{disp_name}') in chat {chat_id}"
         )
