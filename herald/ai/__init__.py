@@ -19,7 +19,13 @@ from herald.ai.mistral_provider import MistralProvider
 from herald.ai.ollama_provider import OllamaProvider
 from herald.ai.openai_provider import OpenAIProvider
 from herald.ai.openrouter_provider import OpenRouterProvider
-from herald.ai.schema import PodcastScriptResponse, PodcastSegment
+from herald.ai.schema import (
+    PodcastScriptResponse,
+    PodcastSegment,
+    is_isolated_section_instruction,
+    parse_isolated_section_response,
+    rebase_isolated_section_orders,
+)
 from herald.services.ai_recorder import record_ai_interaction
 
 __all__ = [
@@ -27,6 +33,9 @@ __all__ = [
     "ProviderCapabilities",
     "PodcastSegment",
     "PodcastScriptResponse",
+    "rebase_isolated_section_orders",
+    "parse_isolated_section_response",
+    "is_isolated_section_instruction",
     "GeminiProvider",
     "GroqProvider",
     "OpenRouterProvider",

@@ -49,6 +49,8 @@ class AIProvider(ABC):
         source_title: str | None = None,
         job_id: str | None = None,
         generation_instructions: str | None = None,
+        is_isolated_section: bool = False,
+        **kwargs: Any,
     ) -> PodcastScriptResponse:
         """Generate structured podcast script from source text and trusted generation instructions."""
 

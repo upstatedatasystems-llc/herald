@@ -25,7 +25,11 @@ from herald.ai.errors import (
     AIRequestTooLargeError,
     AISchemaInvalidError,
 )
-from herald.ai.schema import PodcastScriptResponse
+from herald.ai.schema import (
+    PodcastScriptResponse,
+    is_isolated_section_instruction,
+    parse_isolated_section_response,
+)
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
 from herald.services.redaction import sanitize_error
@@ -316,6 +320,7 @@ class OpenAIProvider(AIProvider):
         job_id: str | None = None,
         attempt: int = 1,
         generation_instructions: str | None = None,
+        is_isolated_section: bool = False,
         **kwargs: Any,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
@@ -459,7 +464,10 @@ Generate the podcast script JSON response now.
         # Parse and validate with 1 bounded schema repair attempt if needed
         try:
             script_dict = _extract_json_block(raw_content)
-            parsed_script = PodcastScriptResponse(**script_dict)
+            if is_isolated_section or is_isolated_section_instruction(generation_instructions):
+                parsed_script = parse_isolated_section_response(script_dict)
+            else:
+                parsed_script = PodcastScriptResponse(**script_dict)
             resp_evidence["schema_validation"] = "valid"
 
             # Invariant: Record terminal success only after schema validation succeeds

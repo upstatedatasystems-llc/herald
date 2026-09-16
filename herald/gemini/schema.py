@@ -7,11 +7,20 @@ and defines Gemini-specific grounded research and audit models.
 from pydantic import BaseModel, ConfigDict, Field
 
 # Re-export provider-neutral script models for backward compatibility
-from herald.ai.schema import PodcastScriptResponse, PodcastSegment
+from herald.ai.schema import (
+    PodcastScriptResponse,
+    PodcastSegment,
+    is_isolated_section_instruction,
+    parse_isolated_section_response,
+    rebase_isolated_section_orders,
+)
 
 __all__ = [
     "PodcastSegment",
     "PodcastScriptResponse",
+    "rebase_isolated_section_orders",
+    "parse_isolated_section_response",
+    "is_isolated_section_instruction",
     "ResearchSource",
     "VerificationItem",
     "UsefulContextItem",

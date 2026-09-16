@@ -107,6 +107,8 @@ class GeminiProvider(AIProvider):
         source_title: str | None = None,
         job_id: str | None = None,
         generation_instructions: str | None = None,
+        is_isolated_section: bool = False,
+        **kwargs: Any,
     ) -> PodcastScriptResponse:
         return generate_podcast_script(
             source_text=source_text,
@@ -117,6 +119,7 @@ class GeminiProvider(AIProvider):
             model_name=self.configured_model,
             generation_instructions=generation_instructions,
             max_attempts=1,
+            is_isolated_section=is_isolated_section,
         )
 
     def generate_grounded_research(

@@ -15,6 +15,8 @@ from herald.gemini.schema import (
     PodcastScriptResponse,
     ResearchAuditResponse,
     ResearchDossierResponse,
+    is_isolated_section_instruction,
+    parse_isolated_section_response,
 )
 from herald.services.ai_recorder import record_ai_interaction
 
@@ -1395,6 +1397,7 @@ def generate_podcast_script(
     job_id: str | None = None,
     generation_instructions: str | None = None,
     max_attempts: int | None = None,
+    is_isolated_section: bool = False,
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
@@ -1623,7 +1626,10 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
 
             raw_text = parts[0]["text"]
             script_data = json.loads(raw_text)
-            response_obj = PodcastScriptResponse(**script_data)
+            if is_isolated_section or is_isolated_section_instruction(generation_instructions):
+                response_obj = parse_isolated_section_response(script_data)
+            else:
+                response_obj = PodcastScriptResponse(**script_data)
 
             _record_gemini_interaction(
                 job_id=job_id,

@@ -19,7 +19,11 @@ from herald.ai.errors import (
     AIProviderUnavailableError,
     AISchemaInvalidError,
 )
-from herald.ai.schema import PodcastScriptResponse
+from herald.ai.schema import (
+    PodcastScriptResponse,
+    is_isolated_section_instruction,
+    parse_isolated_section_response,
+)
 from herald.config import settings
 from herald.services.ai_recorder import record_ai_interaction
 from herald.services.redaction import sanitize_error
@@ -120,6 +124,8 @@ class OllamaProvider(AIProvider):
         source_title: str | None = None,
         job_id: str | None = None,
         generation_instructions: str | None = None,
+        is_isolated_section: bool = False,
+        **kwargs: Any,
     ) -> PodcastScriptResponse:
         if not self.is_configured():
             raise RuntimeError("Ollama base URL is not configured.")
@@ -253,7 +259,10 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
 
         try:
             script_dict = _extract_json_block(raw_content)
-            parsed_script = PodcastScriptResponse(**script_dict)
+            if is_isolated_section or is_isolated_section_instruction(generation_instructions):
+                parsed_script = parse_isolated_section_response(script_dict)
+            else:
+                parsed_script = PodcastScriptResponse(**script_dict)
 
             record_ai_interaction(
                 job_id=job_id,

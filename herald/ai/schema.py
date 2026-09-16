@@ -4,6 +4,8 @@ Defines the core Pydantic models for podcast segments and structured script resp
 All AI providers, script generators, and pipeline consumers adhere to this neutral contract.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -61,3 +63,101 @@ class PodcastScriptResponse(BaseModel):
                 raise ValueError(f"Segment order error: expected sequential order starting at 1, but got {seg.order} at position {expected}")
             expected += 1
         return v
+
+
+def rebase_isolated_section_orders(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Deterministically rebase response-local segment orders for isolated section generation.
+
+    If an isolated section response is otherwise valid but its segment orders are a
+    contiguous sequence starting at an offset base (e.g. global section number 3 -> [3], [3, 4]),
+    safely rebase them to start at 1 ([1], [1, 2]).
+
+    Strict safety rules:
+    - [1, 2, ...] is returned unchanged.
+    - Contiguous [B, B+1, ...] with B > 1 is rebased to [1, 2, ...].
+    - Does NOT rebase:
+      * Duplicate orders (e.g. [3, 3])
+      * Gaps (e.g. [3, 5])
+      * Non-monotonic orders (e.g. [4, 3])
+      * Zero or negative values (e.g. [0], [-1, 0])
+      * Non-integer or boolean orders
+      * Malformed segments (not a dict or missing order)
+      * Empty segments
+    Any unrebasing-eligible structure is returned unmodified so that canonical
+    PodcastScriptResponse validation enforces the strict schema contract.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    segments = data.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return data
+
+    orders: list[int] = []
+    for s in segments:
+        if not isinstance(s, dict):
+            return data
+        o = s.get("order")
+        if isinstance(o, bool) or not isinstance(o, int) or o <= 0:
+            return data
+        orders.append(o)
+
+    # If already sequential starting at 1, nothing to rebase
+    if orders == list(range(1, len(orders) + 1)):
+        return data
+
+    base = orders[0]
+    # If base > 1 and orders is strictly contiguous [base, base+1, ... base+len-1]
+    if base > 1 and orders == list(range(base, base + len(orders))):
+        import logging
+        logger = logging.getLogger("herald.ai.schema")
+        logger.info(
+            "Rebasing isolated section segment orders from %s to %s (base %s -> 1)",
+            orders,
+            list(range(1, len(orders) + 1)),
+            base,
+        )
+        new_segments = []
+        for idx, s in enumerate(segments, 1):
+            new_seg = dict(s)
+            new_seg["order"] = idx
+            new_segments.append(new_seg)
+        result = dict(data)
+        result["segments"] = new_segments
+        return result
+
+    return data
+
+
+def parse_isolated_section_response(data: dict[str, Any] | str | PodcastScriptResponse) -> PodcastScriptResponse:
+    """
+    Parse and validate a provider response for an isolated section.
+    Applies deterministic segment order rebasing before canonical PodcastScriptResponse validation.
+    """
+    if isinstance(data, PodcastScriptResponse):
+        return data
+
+    if isinstance(data, str):
+        import json
+        parsed = json.loads(data)
+    elif isinstance(data, dict):
+        parsed = data
+    else:
+        raise ValueError(f"Expected dict, JSON string, or PodcastScriptResponse, got {type(data).__name__}")
+
+    normalized = rebase_isolated_section_orders(parsed)
+    return PodcastScriptResponse(**normalized)
+
+
+def is_isolated_section_instruction(instructions: str | None) -> bool:
+    """Check if generation instructions declare an isolated/standalone section generation task."""
+    if not instructions:
+        return False
+    text = instructions.upper()
+    return (
+        "STANDALONE RESPONSE" in text
+        or "RESPONSE-LOCAL" in text
+        or "ISOLATED SECTION" in text
+    )
+

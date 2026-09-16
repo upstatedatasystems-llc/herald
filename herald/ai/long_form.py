@@ -19,7 +19,11 @@ from datetime import UTC, datetime
 from typing import Any, Callable
 
 from herald.ai.failover import execute_with_failover
-from herald.ai.schema import PodcastScriptResponse, PodcastSegment
+from herald.ai.schema import (
+    PodcastScriptResponse,
+    PodcastSegment,
+    parse_isolated_section_response,
+)
 from herald.config import settings
 from herald.db.models import PodcastJob
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
@@ -1121,6 +1125,8 @@ Section Heading: {heading}
 Purpose: {purpose}
 {budget_instruction}
 
+IMPORTANT: The JSON response is a standalone response for this single section only. Its segments array uses response-local numbering and MUST begin with order=1 (e.g. order=1, 2, ...), regardless of the logical podcast section number ({sec_idx}).
+
 {prev_context}
 
 {key_points_block}{anti_rep_block}Spoken-Writing Contract:
@@ -1131,18 +1137,35 @@ Purpose: {purpose}
 5. NEVER mechanically announce section headings (e.g., do not say 'Section two: Technical Architecture').
 6. NEVER include a miniature conclusion, moral, or recap at the end of this section.
 7. Do not invent outside facts absent from the provided evidence.
+8. Output schema constraint: Regardless of this section's global index ({sec_idx}), this output is an isolated section response. Its segments array uses response-local numbering and MUST begin with order=1.
 """
 
     t_sec0 = datetime.now(UTC)
 
     def _execute_section(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
-        return p_inst.generate_script(
-            source_text=src,
-            request_mode="standard",
-            source_title=topic,
-            job_id=job.id,
-            generation_instructions=control_instructions,
-        )
+        try:
+            resp = p_inst.generate_script(
+                source_text=src,
+                request_mode="standard",
+                source_title=topic,
+                job_id=job.id,
+                generation_instructions=control_instructions,
+                is_isolated_section=True,
+            )
+        except TypeError as te:
+            if "is_isolated_section" in str(te):
+                resp = p_inst.generate_script(
+                    source_text=src,
+                    request_mode="standard",
+                    source_title=topic,
+                    job_id=job.id,
+                    generation_instructions=control_instructions,
+                )
+            else:
+                raise
+        if isinstance(resp, dict):
+            return parse_isolated_section_response(resp)
+        return resp
 
     res: PodcastScriptResponse = execute_with_failover(
         job=job,

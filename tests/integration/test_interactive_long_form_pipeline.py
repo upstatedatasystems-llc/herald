@@ -135,7 +135,7 @@ def test_vertical_slice_topic_mode_20m_research(db_session, monkeypatch):
         actual_body_duration_seconds=1200.0,
         content_mode=job.content_mode,
     )
-    assert "20-minute" in intro_text
+    assert "20 minutes" in intro_text or "20-minute" in intro_text
     assert "Nuclear Fusion Commercialization" in intro_text
 
     # Step 4: Worker processes TTS & Branding
