@@ -60,8 +60,10 @@ def analyze_directory(dir_path: Path) -> int:
                 continue
             if "job_id" in data or "segments" in data:
                 analyzed_jobs += 1
-                # Check true-peak violations
-                tp = data.get("true_peak_dbtp")
+                # Check true-peak violations (prefer measured; fallback to target)
+                tp = data.get("measured_true_peak_dbtp")
+                if tp is None:
+                    tp = data.get("true_peak_target_dbtp", data.get("true_peak_dbtp"))
                 if tp is not None and float(tp) > -1.0:
                     print(f"[QUALITY ALERT] Job {data.get('job_id', jf.stem)} has true peak {tp} dBTP (> -1.0 dBTP ceiling)")
                     issues_found += 1

@@ -392,11 +392,68 @@ def compute_file_sha256(file_path: Path) -> str:
     return sha256.hexdigest()
 
 
-def measure_audio_loudness_and_peak(file_path: Path) -> dict[str, float | None]:
+def parse_ebur128_output(stderr_text: str) -> dict[str, float | None]:
+    """Parse FFmpeg ebur128 filter output to extract measured true-peak (dBTP/dBFS)
+    and integrated loudness (LUFS).
+
+    Handles standard libavfilter f_ebur128.c summary blocks:
+      Integrated loudness:
+        I:         -17.5 LUFS
+        Threshold: -27.6 LUFS
+
+      True peak:
+        Peak:        -1.5 dBFS
+        (or multiple 'Peak: ... dBFS' lines for multi-channel audio, taking the max peak)
     """
-    Measure integrated LUFS and true peak dBTP of a final audio file using FFmpeg ebur128.
-    Returns None for measured values if FFmpeg is unavailable or measurement cannot be completed.
-    Never fabricates measured metrics from filter targets.
+    measured_tp: float | None = None
+    measured_lufs: float | None = None
+
+    if not stderr_text:
+        return {
+            "measured_true_peak_dbtp": None,
+            "measured_integrated_lufs": None,
+        }
+
+    # Integrated loudness: matches 'I: -17.5 LUFS'
+    m_lufs = re.search(r"\bI:\s+([-\d.]+)\s+LUFS", stderr_text)
+    if m_lufs:
+        try:
+            measured_lufs = float(m_lufs.group(1))
+        except ValueError:
+            pass
+
+    # True peak under 'True peak:' summary section:
+    tp_section = re.search(r"True peak:(.*?)(?:\n\s*\n|\Z)", stderr_text, re.DOTALL)
+    if tp_section:
+        peaks = re.findall(r"Peak:\s+([-\d.]+)\s+dBFS", tp_section.group(1))
+        if peaks:
+            try:
+                measured_tp = max(float(p) for p in peaks)
+            except ValueError:
+                pass
+
+    # Fallback to direct 'True peak: <num> dBFS' or general 'Peak: <num> dBFS'
+    if measured_tp is None:
+        m_tp = re.search(r"True peak:\s+([-\d.]+)\s+dBFS", stderr_text) or re.search(r"Peak:\s+([-\d.]+)\s+dBFS", stderr_text)
+        if m_tp:
+            try:
+                measured_tp = float(m_tp.group(1))
+            except ValueError:
+                pass
+
+    return {
+        "measured_true_peak_dbtp": measured_tp,
+        "measured_integrated_lufs": measured_lufs,
+    }
+
+
+def measure_audio_loudness_and_peak(file_path: Path) -> dict[str, float | None]:
+    """Measure post-encode integrated loudness (LUFS) and true-peak (dBTP)
+    using FFmpeg's ebur128 audio filter.
+
+    Returns:
+        dict with 'measured_true_peak_dbtp' and 'measured_integrated_lufs'.
+        Values are float if measured, or None if FFmpeg is unavailable or analysis fails.
     """
     if not shutil.which("ffmpeg") or not file_path.exists():
         return {
@@ -413,28 +470,7 @@ def measure_audio_loudness_and_peak(file_path: Path) -> dict[str, float | None]:
             "-",
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
-        out = res.stderr or ""
-        measured_tp: float | None = None
-        measured_lufs: float | None = None
-
-        m_tp = re.search(r"True peak:\s+([-\d.]+)\s+dBFS", out)
-        if m_tp:
-            try:
-                measured_tp = float(m_tp.group(1))
-            except ValueError:
-                pass
-
-        m_lufs = re.search(r"I:\s+([-\d.]+)\s+LUFS", out)
-        if m_lufs:
-            try:
-                measured_lufs = float(m_lufs.group(1))
-            except ValueError:
-                pass
-
-        return {
-            "measured_true_peak_dbtp": measured_tp,
-            "measured_integrated_lufs": measured_lufs,
-        }
+        return parse_ebur128_output(res.stderr or "")
     except Exception as e:
         logger.debug(f"Audio loudness measurement failed for '{file_path}': {e}")
         return {
@@ -601,7 +637,7 @@ def join_and_normalize_audio(
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
             "true_peak_target_dbtp": peak_limit,
-            "true_peak_dbtp": peak_limit,
+            "true_peak_dbtp": peak_limit,  # DEPRECATED: backwards-compatible alias for target ceiling; do not treat as measured data
             "measured_true_peak_dbtp": measured["measured_true_peak_dbtp"],
             "measured_integrated_lufs": measured["measured_integrated_lufs"],
             "sha256": checksum,
@@ -613,7 +649,7 @@ def join_and_normalize_audio(
             "file_bytes": val_info["size_bytes"],
             "duration_seconds": val_info["duration_seconds"],
             "true_peak_target_dbtp": peak_limit,
-            "true_peak_dbtp": peak_limit,
+            "true_peak_dbtp": peak_limit,  # DEPRECATED: backwards-compatible alias for target ceiling; do not treat as measured data
             "measured_true_peak_dbtp": measured["measured_true_peak_dbtp"],
             "measured_integrated_lufs": measured["measured_integrated_lufs"],
             "sha256": checksum,

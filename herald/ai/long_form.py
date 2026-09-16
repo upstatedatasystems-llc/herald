@@ -1411,6 +1411,7 @@ def repair_script_duplicates(
     duplicate_warnings: list[Any],
     evidence_packet: dict[str, Any],
     topic: str,
+    scope: EvidenceScope = EvidenceScope.SOURCE_ONLY,
     db: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
@@ -1443,9 +1444,16 @@ def repair_script_duplicates(
         if not redundant_snippets:
             continue
 
+        source_grounding_block = ""
+        if scope == EvidenceScope.SOURCE_ONLY:
+            source_grounding_block = """
+SOURCE-ONLY GROUNDING REQUIREMENT:
+You are operating in SOURCE-ONLY mode. Replacement material may ONLY use the supplied source/evidence. You MUST NOT introduce external facts, general knowledge not present in the source, or hallucinated details. If no further details can be extracted from the source evidence, cleanly condense or prune the repetitive sentences without padding.
+"""
+
         prompt = f"""You are repairing a duplicate passage in Section {sec_idx} of a podcast about: {topic}
 Section Heading: {sec_data.get('heading', '')}
-
+{source_grounding_block}
 REDUNDANT PASSAGES IDENTIFIED (Already covered in an earlier section):
 {chr(10).join(f'- "{snip}"' for snip in redundant_snippets)}
 
@@ -1515,6 +1523,7 @@ def cleanup_script_metadata(
     job: PodcastJob,
     script_dict: dict[str, Any],
     topic: str,
+    scope: EvidenceScope = EvidenceScope.SOURCE_ONLY,
     db: Any = None,
 ) -> dict[str, Any]:
     """
@@ -1535,6 +1544,10 @@ def cleanup_script_metadata(
         for idx, s in enumerate(segments, 1)
     )
 
+    source_grounding_block = ""
+    if scope == EvidenceScope.SOURCE_ONLY:
+        source_grounding_block = "\n5. Grounding: Refinements must strictly reflect the topic and source headings. Do NOT introduce factual claims, outside entities, or assertions not supported by the source."
+
     instructions = f"""You are refining the title and section headings for a podcast about: {topic}
 Reference Date: {date_str}
 
@@ -1546,7 +1559,8 @@ METADATA CONTRACT:
 1. Episode Title: Provide a clean, compelling title. If the topic is a rapidly evolving comparison or current state (e.g. comparing frontier AI models), you may append 'as of {date_str}' if helpful. Do NOT add dates to historical, evergreen, or general scientific topics.
 2. Section Headings: Replace generic continuation labels (such as 'Part 2' or 'Reading Part 2') with distinct, topic-focused headings that describe the specific narrative content of each section.
 3. Remove trailing dangling punctuation (dashes, colons, commas).
-4. Return a script response with the updated episode_title and updated section headings.
+4. Narration: Do NOT modify script narration; this pass only refines titles and headings.{source_grounding_block}
+5. Return a script response with the updated episode_title and updated section headings.
 """
 
     def _exec_meta(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
@@ -2012,6 +2026,12 @@ def execute_unified_long_form_pipeline(
     source_ledger = None
     if source_text and source_text.strip():
         source_ledger = build_source_coverage_ledger(source_text, source_title)
+
+    is_literal = (
+        getattr(job, "content_mode", None) == ContentMode.LITERAL.value
+        or str(getattr(job, "content_mode", "")).lower() == "literal"
+        or str(getattr(job, "request_mode", "")).lower() == "literal"
+    )
 
     effective_scope = scope
     if getattr(job, "research_degraded", False):
@@ -2482,7 +2502,7 @@ def execute_unified_long_form_pipeline(
     duplicate_repair_enabled = getattr(settings, "HERALD_DUPLICATE_REPAIR_ENABLED", True)
     if (
         duplicate_repair_enabled
-        and effective_scope != EvidenceScope.SOURCE_ONLY
+        and not is_literal
         and q_report.duplicate_repair_recommended
     ):
         dup_warns = q_report.near_duplicate_warnings
@@ -2492,6 +2512,7 @@ def execute_unified_long_form_pipeline(
             duplicate_warnings=dup_warns,
             evidence_packet=evidence_packet,
             topic=topic,
+            scope=effective_scope,
             db=db,
         )
         if dup_meta.get("repaired_count", 0) > 0:
@@ -2526,11 +2547,12 @@ def execute_unified_long_form_pipeline(
             )
 
     # Title & Heading Metadata Cleanup (AI modes only, non-Literal)
-    if effective_scope != EvidenceScope.SOURCE_ONLY and q_report.metadata_cleanup_recommended:
+    if not is_literal and q_report.metadata_cleanup_recommended:
         pol_script = cleanup_script_metadata(
             job=job,
             script_dict=dict(job.script_json),
             topic=topic,
+            scope=effective_scope,
             db=db,
         )
         job.script_json = pol_script

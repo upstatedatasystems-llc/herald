@@ -376,3 +376,393 @@ def test_stored_voice_snapshot_passed_to_kokoro(tmp_path, monkeypatch):
         kwargs = mock_parallel.call_args[1]
         assert kwargs["voice"] == "bm_fable"
         assert kwargs["speed"] == 1.1
+
+
+def test_source_only_ai_job_duplicate_warning_triggers_repair():
+    """
+    Test A: SOURCE_ONLY AI job with duplicate warnings triggers duplicate repair pass.
+    SOURCE_ONLY is NOT a proxy for Literal; AI duplicate repair must execute.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "S1", "purpose": "P1", "word_budget": 300, "relevant_evidence_ids": ["E1"], "narration": "Narration 1"},
+        {"section_index": 2, "heading": "S2", "purpose": "P2", "word_budget": 300, "relevant_evidence_ids": ["E2"], "narration": "Narration 2"},
+    ]
+    job = PodcastJob(
+        id="job-source-dup-01",
+        content_mode=ContentMode.SOURCE.value,
+        outline_json={"episode_title": "T", "target_total_words": 600, "sections": sections_def},
+        evidence_packet_json={"items": []},
+    )
+
+    dup_warning = QualityWarning(
+        code="NEAR_DUPLICATE_PASSAGE",
+        message="Section 2 repeats Section 1",
+        section_index=2,
+        severity=QualitySeverity.WARNING,
+        metadata={"section_a": 1, "section_b": 2, "passage_b": "Repeated passage", "similarity": 0.85},
+    )
+    report_with_dup = QualityReport(status=QualityStatus.WARN, warnings=[dup_warning])
+    report_clean = QualityReport(status=QualityStatus.PASS, warnings=[])
+
+    call_count = 0
+    def mock_gate(script, job=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return (script, report_with_dup) if call_count == 1 else (script, report_clean)
+
+    with patch("herald.ai.long_form.generate_single_section", return_value={"section_index": 1, "heading": "H", "narration": "Narration " * 30, "word_count": 30, "relevant_evidence_ids": [], "completed": True}), \
+         patch("herald.services.quality_gate.run_quality_gate", side_effect=mock_gate), \
+         patch("herald.ai.long_form.repair_script_duplicates", return_value=(sections_def, {"repair_attempted": True, "repaired_count": 1})) as mock_rep, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Test Topic",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="4",
+        )
+
+        assert mock_rep.called
+        assert mock_rep.call_args[1]["scope"] == EvidenceScope.SOURCE_ONLY
+        assert call_count >= 2
+        assert len(res.segments) >= 1
+
+
+def test_source_only_ai_job_metadata_problem_triggers_cleanup():
+    """
+    Test B: SOURCE_ONLY AI job with semantic metadata problems triggers metadata cleanup pass.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "Reading Part 1", "purpose": "P1", "word_budget": 300, "relevant_evidence_ids": [], "narration": "Narration 1"},
+        {"section_index": 2, "heading": "Reading Part 2", "purpose": "P2", "word_budget": 300, "relevant_evidence_ids": [], "narration": "Narration 2"},
+    ]
+    job = PodcastJob(
+        id="job-source-meta-01",
+        content_mode=ContentMode.SOURCE.value,
+        outline_json={"episode_title": "T", "target_total_words": 600, "sections": sections_def},
+        evidence_packet_json={"items": []},
+    )
+
+    meta_warning = QualityWarning(
+        code="GENERIC_PART_HEADING",
+        message="Heading 'Reading Part 2' is generic",
+        section_index=2,
+        severity=QualitySeverity.WARNING,
+    )
+    report_with_meta = QualityReport(status=QualityStatus.WARN, warnings=[meta_warning])
+    report_clean = QualityReport(status=QualityStatus.PASS, warnings=[])
+
+    call_count = 0
+    def mock_gate(script, job=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return (script, report_with_meta) if call_count == 1 else (script, report_clean)
+
+    with patch("herald.ai.long_form.generate_single_section", return_value={"section_index": 1, "heading": "H", "narration": "Narration " * 30, "word_count": 30, "relevant_evidence_ids": [], "completed": True}), \
+         patch("herald.services.quality_gate.run_quality_gate", side_effect=mock_gate), \
+         patch("herald.ai.long_form.cleanup_script_metadata", return_value={"episode_title": "Polished Title", "segments": [{"order": 1, "heading": "Specific Heading", "narration": "N"}]}) as mock_clean, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Test Topic",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="4",
+        )
+
+        assert mock_clean.called
+        assert mock_clean.call_args[1]["scope"] == EvidenceScope.SOURCE_ONLY
+        assert call_count >= 2
+        assert len(res.segments) >= 1
+
+
+def test_source_only_repair_remains_source_grounded():
+    """
+    Test C: In SOURCE_ONLY mode, duplicate repair prompt explicitly restricts
+    the model to the supplied source evidence and forbids external facts.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, repair_script_duplicates
+    from herald.services.quality_gate import QualitySeverity, QualityWarning
+
+    job = PodcastJob(id="job-grounded-01", content_mode=ContentMode.SOURCE.value)
+    sections = [
+        {"section_index": 1, "heading": "Heading 1", "narration": "First passage narration."},
+        {"section_index": 2, "heading": "Heading 2", "narration": "Repeated passage narration."},
+    ]
+    warnings = [
+        QualityWarning(
+            code="NEAR_DUPLICATE_PASSAGE",
+            message="Section 2 repeats Section 1",
+            section_index=2,
+            severity=QualitySeverity.WARNING,
+            metadata={"section_a": 1, "section_b": 2, "passage_b": "Repeated passage narration."},
+        )
+    ]
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "E1", "snippet": "Source evidence snippet regarding quantum flux."}
+        ]
+    }
+
+    captured_prompt = None
+    with patch("herald.ai.long_form.execute_with_failover") as mock_exec:
+        def capture_call(**kwargs):
+            nonlocal captured_prompt
+            fn = kwargs["execute_fn"]
+            mock_p = MagicMock()
+            fn(mock_p, 1, "src")
+            captured_prompt = mock_p.generate_script.call_args[1]["generation_instructions"]
+            return MagicMock(segments=[MagicMock(narration="Grounded revised passage.")])
+
+        mock_exec.side_effect = capture_call
+        repaired, meta = repair_script_duplicates(
+            job=job,
+            sections=sections,
+            duplicate_warnings=warnings,
+            evidence_packet=evidence_packet,
+            topic="Quantum Computing",
+            scope=EvidenceScope.SOURCE_ONLY,
+        )
+
+        assert captured_prompt is not None
+        assert "SOURCE-ONLY GROUNDING REQUIREMENT" in captured_prompt
+        assert "Replacement material may ONLY use the supplied source/evidence" in captured_prompt
+        assert "MUST NOT introduce external facts" in captured_prompt
+
+
+def test_literal_job_duplicate_warning_prohibits_ai_repair():
+    """
+    Test D: Literal job with duplicate warning must strictly PROHIBIT AI duplicate repair.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "Reading", "purpose": "P1", "word_budget": 300, "relevant_evidence_ids": [], "narration": "Verbatim 1"},
+        {"section_index": 2, "heading": "Continued", "purpose": "P2", "word_budget": 300, "relevant_evidence_ids": [], "narration": "Verbatim 2"},
+    ]
+    job = PodcastJob(
+        id="job-literal-dup-01",
+        content_mode=ContentMode.LITERAL.value,
+        outline_json={"episode_title": "Literal", "target_total_words": 600, "sections": sections_def},
+        evidence_packet_json={"items": []},
+    )
+
+    dup_warning = QualityWarning(
+        code="NEAR_DUPLICATE_PASSAGE",
+        message="Section 2 repeats Section 1",
+        section_index=2,
+        severity=QualitySeverity.WARNING,
+        metadata={"section_a": 1, "section_b": 2, "passage_b": "Verbatim 2", "similarity": 0.85},
+    )
+    report = QualityReport(status=QualityStatus.WARN, warnings=[dup_warning])
+
+    with patch("herald.ai.long_form.generate_single_section", return_value={"section_index": 1, "heading": "H", "narration": "Verbatim", "word_count": 10, "relevant_evidence_ids": [], "completed": True}), \
+         patch("herald.services.quality_gate.run_quality_gate", return_value=(job.outline_json, report)), \
+         patch("herald.ai.long_form.repair_script_duplicates") as mock_rep, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+
+        execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Literal Reading",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="4",
+        )
+
+        assert mock_rep.called is False
+
+
+def test_literal_job_metadata_problem_prohibits_ai_cleanup():
+    """
+    Test E: Literal job with metadata problem must strictly PROHIBIT AI metadata cleanup.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "Reading", "purpose": "P1", "word_budget": 300, "relevant_evidence_ids": [], "narration": "Verbatim 1"},
+    ]
+    job = PodcastJob(
+        id="job-literal-meta-01",
+        content_mode=ContentMode.LITERAL.value,
+        outline_json={"episode_title": "Literal", "target_total_words": 300, "sections": sections_def},
+        evidence_packet_json={"items": []},
+    )
+
+    meta_warning = QualityWarning(
+        code="GENERIC_PART_HEADING",
+        message="Heading is generic",
+        section_index=1,
+        severity=QualitySeverity.WARNING,
+    )
+    report = QualityReport(status=QualityStatus.WARN, warnings=[meta_warning])
+
+    with patch("herald.ai.long_form.generate_single_section", return_value={"section_index": 1, "heading": "H", "narration": "Verbatim", "word_count": 10, "relevant_evidence_ids": [], "completed": True}), \
+         patch("herald.services.quality_gate.run_quality_gate", return_value=(job.outline_json, report)), \
+         patch("herald.ai.long_form.cleanup_script_metadata") as mock_clean, \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})):
+
+        execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Literal Reading",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="4",
+        )
+
+        assert mock_clean.called is False
+
+
+def test_literal_mode_zero_ai_interactions_across_quality_paths():
+    """
+    Test F: Literal mode records zero AI interactions across expansion,
+    duplicate repair, and metadata cleanup paths.
+    """
+    from unittest.mock import MagicMock
+
+    from herald.ai.long_form import EvidenceScope, execute_unified_long_form_pipeline
+    from herald.services.quality_gate import (
+        QualityReport,
+        QualitySeverity,
+        QualityStatus,
+        QualityWarning,
+    )
+
+    mock_db = MagicMock()
+    sections_def = [
+        {"section_index": 1, "heading": "Reading", "purpose": "P1", "word_budget": 500, "relevant_evidence_ids": ["E1"], "narration": "Short text."},
+    ]
+    job = PodcastJob(
+        id="job-literal-zero-ai-01",
+        content_mode=ContentMode.LITERAL.value,
+        outline_json={"episode_title": "Literal", "target_total_words": 500, "sections": sections_def},
+        evidence_packet_json={"items": [{"evidence_id": "E1", "snippet": "Evidence"}]},
+    )
+
+    warnings = [
+        QualityWarning(code="NEAR_DUPLICATE_PASSAGE", message="Dup", section_index=1, severity=QualitySeverity.WARNING, metadata={"section_a": 1, "section_b": 1, "passage_b": "Short text.", "similarity": 0.9}),
+        QualityWarning(code="GENERIC_PART_HEADING", message="Heading", section_index=1, severity=QualitySeverity.WARNING),
+    ]
+    report = QualityReport(status=QualityStatus.WARN, warnings=warnings)
+
+    with patch("herald.ai.long_form.generate_single_section", return_value={"section_index": 1, "heading": "Reading", "narration": "Short text.", "word_count": 2, "relevant_evidence_ids": ["E1"], "completed": True}), \
+         patch("herald.services.quality_gate.run_quality_gate", return_value=(job.outline_json, report)), \
+         patch("herald.ai.long_form.audit_and_repair_fidelity", side_effect=lambda **kw: (kw["sections"], {"status": "clean", "has_material_issues": False})), \
+         patch("herald.ai.long_form.expand_single_section") as mock_expand, \
+         patch("herald.ai.long_form.repair_script_duplicates") as mock_repair, \
+         patch("herald.ai.long_form.cleanup_script_metadata") as mock_meta:
+
+        res = execute_unified_long_form_pipeline(
+            db=mock_db,
+            job=job,
+            topic="Literal Topic",
+            scope=EvidenceScope.SOURCE_ONLY,
+            target_minutes="4",
+        )
+
+        assert mock_expand.called is False
+        assert mock_repair.called is False
+        assert mock_meta.called is False
+        assert len(res.segments) >= 1
+
+
+def test_ebur128_parser_representative_ffmpeg_stderr():
+    """
+    Test post-encode ebur128 parser with standard FFmpeg stderr summary block (mono).
+    """
+    from herald.audio.ffmpeg_builder import parse_ebur128_output
+
+    sample_stderr = """
+[Parsed_ebur128_0 @ 0x55d78e3c8dc0] Summary:
+
+  Integrated loudness:
+    I:         -17.5 LUFS
+    Threshold: -27.6 LUFS
+
+  Loudness range:
+    LRA:         4.2 LU
+    Threshold: -37.6 LUFS
+    LRA low:   -20.1 LUFS
+    LRA high:  -15.9 LUFS
+
+  True peak:
+    Peak:        -1.5 dBFS
+"""
+    res = parse_ebur128_output(sample_stderr)
+    assert res["measured_integrated_lufs"] == -17.5
+    assert res["measured_true_peak_dbtp"] == -1.5
+
+
+def test_ebur128_parser_stereo_multichannel_stderr():
+    """
+    Test ebur128 parser with multi-channel / stereo stderr: takes the maximum true-peak.
+    """
+    from herald.audio.ffmpeg_builder import parse_ebur128_output
+
+    stereo_stderr = """
+[Parsed_ebur128_0 @ 0x7ffd19b21a] Summary:
+
+  Integrated loudness:
+    I:         -16.2 LUFS
+    Threshold: -26.3 LUFS
+
+  True peak:
+    Peak:        -2.1 dBFS
+    Peak:        -1.4 dBFS
+"""
+    res = parse_ebur128_output(stereo_stderr)
+    assert res["measured_integrated_lufs"] == -16.2
+    assert res["measured_true_peak_dbtp"] == -1.4
+
+
+def test_ebur128_parser_empty_or_corrupt_stderr():
+    """
+    Test ebur128 parser gracefully returns None when stderr is empty, missing, or corrupt.
+    """
+    from herald.audio.ffmpeg_builder import parse_ebur128_output
+
+    assert parse_ebur128_output("") == {"measured_true_peak_dbtp": None, "measured_integrated_lufs": None}
+    assert parse_ebur128_output("Random error message with no ebur128") == {"measured_true_peak_dbtp": None, "measured_integrated_lufs": None}
