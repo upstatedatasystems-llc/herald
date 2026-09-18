@@ -706,12 +706,15 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                 included_files.append("research/audit.json")
 
         # 13. Long-form and fidelity artifacts
+        cfg_st = getattr(job, "configuration_state_json", None) or {}
+        has_cfg_st = isinstance(cfg_st, dict)
         if (
             getattr(job, "evidence_packet_json", None)
             or getattr(job, "outline_json", None)
             or getattr(job, "research_plan_json", None)
             or getattr(job, "fidelity_audit_json", None)
             or getattr(job, "section_progress_json", None)
+            or (has_cfg_st and (cfg_st.get("repetition_diagnostics") or cfg_st.get("gap_diagnostics")))
         ):
             longform_dir = staging_dir / "longform"
             longform_dir.mkdir(exist_ok=True)
@@ -740,6 +743,18 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                     json.dumps(sanitize_content_dict(job.fidelity_audit_json), indent=2), encoding="utf-8"
                 )
                 included_files.append("longform/fidelity-audit.json")
+
+            if has_cfg_st:
+                if cfg_st.get("repetition_diagnostics"):
+                    (longform_dir / "repetition-repair-summary.json").write_text(
+                        json.dumps(sanitize_content_dict(cfg_st["repetition_diagnostics"]), indent=2), encoding="utf-8"
+                    )
+                    included_files.append("longform/repetition-repair-summary.json")
+                if cfg_st.get("gap_diagnostics"):
+                    (longform_dir / "gap-research-summary.json").write_text(
+                        json.dumps(sanitize_content_dict(cfg_st["gap_diagnostics"]), indent=2), encoding="utf-8"
+                    )
+                    included_files.append("longform/gap-research-summary.json")
 
         # 14. Quality gate report
         cfg_state_export = getattr(job, "configuration_state_json", None) or {}

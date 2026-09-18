@@ -447,7 +447,7 @@ def test_review_script_repetition_filters_terminology():
     )
 
     with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
-        res, to_repair = review_script_repetition(
+        res, to_repair, rep_meta = review_script_repetition(
             job=job,
             completed_sections=sections,
             near_duplicate_warnings=[],
@@ -458,6 +458,7 @@ def test_review_script_repetition_filters_terminology():
         )
         assert res.has_substantive_repetition is False
         assert len(to_repair) == 0  # No repair needed for legitimate terminology!
+        assert isinstance(rep_meta, dict)
 
 
 def test_targeted_gap_research_triggered_when_no_uncovered_evidence():
@@ -562,3 +563,353 @@ def test_cleanup_script_metadata_preserves_custom_title():
     with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
         res2 = cleanup_script_metadata(job_no_custom, script, topic="Research topic query")
         assert res2["episode_title"] == "AI Generated Suggestion"
+
+
+# ---------------------------------------------------------------------------
+# 7. Final Podcast Quality Pass Corrections Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_distinctive_concepts_two_section_trigger():
+    """Verify distinctive short concepts (capitalized terms, hyphenated/numeric, substantive content pairs)
+    trigger advisory warning at >= 2 distinct sections, while generic phrases require >= 3."""
+    script_2_secs = {
+        "episode_title": "Deep Ocean Systems",
+        "segments": [
+            {"order": 1, "heading": "Sub Maneuvers", "narration": "The captain initiated a Crazy Ivan maneuver to clear the baffles."},
+            {"order": 2, "heading": "Tactical Sonar", "narration": "During a Crazy Ivan maneuver, the sonar team listens intently."},
+        ]
+    }
+    _, report = run_quality_gate(script_2_secs)
+    distinctive = [w for w in report.warnings if w.code == "REPEATED_DISTINCTIVE_PHRASE"]
+    assert any("crazy ivan" in w.metadata.get("phrase", "") for w in distinctive)
+    assert all(w.severity == QualitySeverity.INFO for w in distinctive)
+
+
+def test_review_script_repetition_provides_bounded_excerpts_both_sections():
+    """review_script_repetition includes bounded excerpts from BOTH section A and section B in prompt."""
+    from herald.ai.long_form import review_script_repetition
+    from herald.ai.schema import RepetitionReviewResponse, RepetitionReviewItem
+
+    job = PodcastJob(id="rep-bounded-test")
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Early Submarine History",
+            "narration": "The submarine relied on a distinctive teardrop hull designed specifically to optimize hydrodynamics and minimize turbulence in deep water dives.",
+        },
+        {
+            "section_index": 3,
+            "heading": "Modern Naval Engineering",
+            "narration": "Engineers continue using the teardrop hull designed specifically to optimize hydrodynamics and minimize turbulence for quiet patrol operations.",
+        },
+    ]
+
+    mock_resp = RepetitionReviewResponse(
+        has_substantive_repetition=True,
+        reviews=[
+            RepetitionReviewItem(
+                section_b=3,
+                section_a=1,
+                concept_or_passage="teardrop hull",
+                is_substantive_repetition=True,
+                explanation="Repeats identical hull hydrodynamics explanation.",
+                passage_to_repair="teardrop hull designed specifically to optimize hydrodynamics and minimize turbulence",
+                passage_a="teardrop hull designed specifically to optimize hydrodynamics and minimize turbulence in deep water dives",
+            )
+        ]
+    )
+
+    captured_prompt = None
+
+    def mock_review_exec(p_inst, attempt, src):
+        nonlocal captured_prompt
+        # p_inst will be called by execute_with_failover
+        return mock_resp
+
+    with patch("herald.ai.long_form.execute_with_failover") as mock_failover:
+        def capture_call(*args, **kwargs):
+            nonlocal captured_prompt
+            # Call the inner execute_fn with a dummy provider
+            mock_p = MagicMock()
+            mock_p.generate_structured_output.return_value = mock_resp
+            exec_fn = kwargs.get("execute_fn")
+            res = exec_fn(mock_p, 1, "source")
+            # Extract prompt passed to generate_structured_output
+            captured_prompt = mock_p.generate_structured_output.call_args[1].get("prompt")
+            return res
+
+        mock_failover.side_effect = capture_call
+
+        res, to_repair, rep_meta = review_script_repetition(
+            job=job,
+            completed_sections=sections,
+            near_duplicate_warnings=[],
+            distinctive_phrase_warnings=[
+                MagicMock(metadata={"phrase": "teardrop hull", "sections": [1, 3]})
+            ],
+            topic="Submarine Engineering",
+        )
+
+        assert captured_prompt is not None
+        assert "Section 1 Excerpt:" in captured_prompt
+        assert "Section 3 Excerpt:" in captured_prompt
+        assert "teardrop hull" in captured_prompt
+        assert len(to_repair) == 1
+        assert to_repair[0]["metadata"]["section_a"] == 1
+        assert to_repair[0]["metadata"]["section_b"] == 3
+        assert to_repair[0]["metadata"]["passage_a"] != ""
+
+
+def test_review_script_repetition_prioritizes_and_caps_candidates():
+    """review_script_repetition prioritizes near-duplicates, caps candidates without silent drop, and logs omitted."""
+    from herald.ai.long_form import review_script_repetition
+    from herald.ai.schema import RepetitionReviewResponse
+
+    job = PodcastJob(id="rep-cap-test")
+    sections = [
+        {"section_index": i, "heading": f"Section {i}", "narration": f"Narration content for section {i}."}
+        for i in range(1, 10)
+    ]
+
+    # Create 20 candidate distinctive phrases
+    distinctive_warnings = [
+        MagicMock(metadata={"phrase": f"distinctive concept {i}", "sections": [1, 2]})
+        for i in range(1, 21)
+    ]
+    # And 2 near duplicates
+    near_dup_warnings = [
+        MagicMock(metadata={"section_a": 1, "section_b": 2, "passage_a": "Near duplicate text 1", "passage_b": "Near duplicate text 1", "similarity": 0.95}),
+        MagicMock(metadata={"section_a": 1, "section_b": 3, "passage_a": "Near duplicate text 2", "passage_b": "Near duplicate text 2", "similarity": 0.85}),
+    ]
+
+    mock_resp = RepetitionReviewResponse(has_substantive_repetition=False, reviews=[])
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res, to_repair, rep_meta = review_script_repetition(
+            job=job,
+            completed_sections=sections,
+            near_duplicate_warnings=near_dup_warnings,
+            distinctive_phrase_warnings=distinctive_warnings,
+            topic="Naval Architecture",
+        )
+
+        assert rep_meta["evaluated_count"] == 14
+        assert rep_meta["total_candidate_count"] > 14
+        assert len(rep_meta["omitted_candidates"]) == rep_meta["total_candidate_count"] - 14
+        assert all(c["reason"] == "exceeded_candidate_cap_14" for c in rep_meta["omitted_candidates"])
+
+
+def test_repair_script_duplicates_preserves_section_a_and_presents_earlier_material():
+    """repair_script_duplicates explicitly presents passage_a as EARLIER COVERED MATERIAL and repairs only section_b."""
+    from herald.ai.long_form import repair_script_duplicates
+
+    job = PodcastJob(id="rep-repair-prompt-test")
+    sections = [
+        {"section_index": 1, "heading": "Invention", "narration": "Section A original text. It detailed the 300,000-gallon tank.", "word_count": 50},
+        {"section_index": 2, "heading": "Deployment", "narration": "Section B original text. It also explained the 300,000-gallon tank in full detail.", "word_count": 50},
+    ]
+
+    duplicate_warnings = [
+        {
+            "metadata": {
+                "section_a": 1,
+                "section_b": 2,
+                "passage_a": "Section A original text. It detailed the 300,000-gallon tank.",
+                "passage_b": "It also explained the 300,000-gallon tank in full detail.",
+                "concept": "300,000-gallon tank",
+                "explanation": "Redundantly explains the tank volume.",
+            }
+        }
+    ]
+
+    captured_prompt = None
+
+    mock_repaired = PodcastScriptResponse(
+        episode_title="Test",
+        episode_description="Desc",
+        segments=[
+            PodcastSegment(
+                order=1,
+                heading="Deployment",
+                narration="Section B repaired text without repeating the tank details. This replaces the redundant passages with concise, natural spoken narration.",
+            )
+        ],
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover") as mock_failover:
+        def capture_failover(*args, **kwargs):
+            nonlocal captured_prompt
+            mock_p = MagicMock()
+            mock_p.generate_script.return_value = mock_repaired
+            exec_fn = kwargs.get("execute_fn")
+            res = exec_fn(mock_p, 1, "source")
+            captured_prompt = mock_p.generate_script.call_args[1].get("generation_instructions")
+            return res
+
+        mock_failover.side_effect = capture_failover
+
+        repaired_sections, meta = repair_script_duplicates(
+            job=job,
+            sections=sections,
+            duplicate_warnings=duplicate_warnings,
+            evidence_packet={"items": []},
+            topic="Engineering",
+            scope=EvidenceScope.SOURCE_ONLY,
+        )
+
+        assert captured_prompt is not None
+        assert "EARLIER COVERED MATERIAL" in captured_prompt
+        assert "Section A original text. It detailed the 300,000-gallon tank." in captured_prompt
+        assert "REDUNDANT PASSAGES IDENTIFIED IN SECTION 2" in captured_prompt
+        assert meta["repaired_count"] == 1
+        # Section A must be completely untouched
+        assert repaired_sections[0]["narration"] == "Section A original text. It detailed the 300,000-gallon tank."
+        assert "repaired text" in repaired_sections[1]["narration"]
+
+
+def test_supplemental_research_depth_and_normalization():
+    """expand_script_content_gap uses configured valid research_depth and normalizes raw grounded provider output."""
+    from herald.ai.long_form import expand_script_content_gap
+
+    job = PodcastJob(id="supp-norm-test")
+    sections = [
+        {"section_index": 1, "heading": "Reactor Physics", "purpose": "Explain core reactor design", "narration": "Short text.", "word_count": 20, "relevant_evidence_ids": ["ev_1"]}
+    ]
+    evidence_packet = {"items": [{"evidence_id": "ev_1", "snippet": "Old evidence", "is_seed_source": False}]}
+    gap_info = {
+        "total_words": 20,
+        "planned_target": 500,
+        "fill_ratio": 0.04,
+        "deficit": 480,
+        "underfilled_sections": [{"section_index": 1, "heading": "Reactor Physics", "purpose": "core reactor design", "actual_words": 20, "target_budget": 500, "deficit": 480}],
+    }
+
+    # Provider returns standard grounded research output dictionary (NOT {"items": ...})
+    provider_grounded_response = {
+        "raw_text": "Recent 2026 findings reveal high-efficiency thorium molten-salt reactor designs.",
+        "grounding_metadata": {
+            "web_search_queries": ["thorium molten salt reactor 2026"],
+            "grounding_chunks": [{"web": {"uri": "https://energy.gov/thorium", "title": "DOE Thorium Report"}}],
+            "grounding_supports": [{"grounding_chunk_indices": [0], "segment": {"text": "high-efficiency thorium molten-salt reactor designs."}}],
+        },
+        "research_sources": [{"title": "DOE Thorium Report", "url": "https://energy.gov/thorium", "source_id": "S1"}],
+        "search_count": 1,
+        "source_count": 1,
+    }
+
+    mock_expanded_script = PodcastScriptResponse(
+        episode_title="Nuclear Engineering",
+        episode_description="Desc",
+        segments=[PodcastSegment(order=1, heading="Reactor Physics", narration="Short text deepened with thorium molten-salt reactor designs and specifications.")],
+        warnings=[],
+    )
+
+    captured_depth = None
+
+    def mock_failover(*args, **kwargs):
+        nonlocal captured_depth
+        op = kwargs.get("operation")
+        if op == "supplemental_research":
+            mock_provider = MagicMock()
+            mock_provider.generate_grounded_research.return_value = provider_grounded_response
+            exec_fn = kwargs.get("execute_fn")
+            res = exec_fn(mock_provider, 1, "source")
+            captured_depth = mock_provider.generate_grounded_research.call_args[1].get("research_depth")
+            return res
+        elif op == "section_expansion":
+            return mock_expanded_script
+        return mock_expanded_script
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover):
+        with patch.object(settings, "HERALD_SUPPLEMENTAL_RESEARCH_DEPTH", "low"):
+            expanded = expand_script_content_gap(
+                job=job,
+                completed_sections=sections,
+                gap_info=gap_info,
+                topic="Nuclear Reactor Design",
+                evidence_packet=evidence_packet,
+                scope=EvidenceScope.RESEARCH,
+            )
+
+            assert captured_depth == "low"
+            # Verify new evidence IDs are prefixed with ev_supp_ and source metadata is preserved
+            supp_items = [it for it in evidence_packet["items"] if "ev_supp" in it.get("evidence_id", "")]
+            assert len(supp_items) >= 1
+            assert any("thorium" in (it.get("snippet", "") + it.get("title", "")).lower() for it in supp_items)
+
+
+def test_diagnostics_archive_includes_longform_repetition_and_gap_summaries(tmp_path):
+    """Diagnostics archive exports longform/repetition-repair-summary.json and longform/gap-research-summary.json."""
+    import zipfile
+    from herald.services.diagnostics_export import generate_job_diagnostics_zip
+
+    job = PodcastJob(
+        id="diag-export-job",
+        status=JobState.COMPLETE.value,
+        configuration_state_json={
+            "repetition_diagnostics": {
+                "candidate_warnings_count": 3,
+                "review_performed": True,
+                "substantive_duplicates_found": 1,
+                "repaired_count": 1,
+                "omitted_candidates": [],
+            },
+            "gap_diagnostics": {
+                "gap_detected": True,
+                "deficit": 350,
+                "fill_ratio": 0.72,
+                "expansion_performed": True,
+                "new_evidence_used": True,
+            },
+        },
+        script_json={"episode_title": "Test Ep", "segments": []},
+    )
+
+    zip_path = tmp_path / "test_diag.zip"
+    db_mock = MagicMock()
+    db_mock.query.return_value.filter.return_value.all.return_value = []
+    db_mock.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    db_mock.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+    db_mock.query.return_value.filter.return_value.count.return_value = 0
+
+    with patch("herald.services.diagnostics_export.get_diagnostics_base_dir", return_value=tmp_path):
+        out_zip = generate_job_diagnostics_zip(db=db_mock, job=job, target_zip_path=zip_path)
+
+        assert out_zip.exists()
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = zf.namelist()
+            assert "longform/repetition-repair-summary.json" in names
+            assert "longform/gap-research-summary.json" in names
+
+
+def test_pricing_overrides_exact_match():
+    """Configurable model pricing overrides exact provider/model match and supports JSON config."""
+    import json
+    from herald.db.models import AIInteraction
+    from herald.services.token_cost import calculate_interaction_cost, get_effective_pricing_table
+
+    overrides = {
+        "custom_ai/custom-model-x": {
+            "prompt_per_m": 1.50,
+            "completion_per_m": 4.50,
+            "effective_date": "2026-09-18",
+        }
+    }
+
+    with patch.object(settings, "HERALD_MODEL_PRICING_OVERRIDES_JSON", json.dumps(overrides)):
+        table = get_effective_pricing_table()
+        assert ("custom_ai", "custom-model-x") in table
+
+        inter = AIInteraction(
+            id="test-override-interaction",
+            job_id="job-override",
+            provider="custom_ai",
+            model="custom-model-x",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+            total_tokens=2_000_000,
+        )
+        cost, known = calculate_interaction_cost(inter)
+        assert known is True
+        assert cost == 6.00

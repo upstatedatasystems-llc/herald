@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     HERALD_DUPLICATE_REPAIR_COUNT_THRESHOLD: int = 3
     HERALD_DUPLICATE_REPAIR_MAX_ATTEMPTS: int = 1
     HERALD_VOICE_DISCOVERY_ENABLED: bool = True
+    HERALD_SUPPLEMENTAL_RESEARCH_DEPTH: str = "low"  # Validated in {"low", "medium", "high"}
+    HERALD_MAX_REPETITION_REVIEW_CANDIDATES: int = 14
+    HERALD_MODEL_PRICING_OVERRIDES_JSON: str = ""
 
     # Audio & FFmpeg
     AUDIO_OUTPUT_BITRATE: str = "64k"

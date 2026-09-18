@@ -471,7 +471,12 @@ def run_quality_gate(
             phrase_to_sections.setdefault(ph, set()).add(s_idx)
 
     for ph, sec_set in phrase_to_sections.items():
-        if len(sec_set) >= 3:
+        words = ph.split()
+        # High-confidence distinctive concepts (2-3 words, capitalized, numeric, or substantive pairs)
+        # trigger advisory review when occurring in >= 2 distinct sections. Longer/generic phrases require >= 3 sections.
+        is_distinctive_short = len(words) in (2, 3)
+        min_secs = 2 if is_distinctive_short else 3
+        if len(sec_set) >= min_secs:
             sorted_secs = sorted(sec_set)
             warnings.append(
                 QualityWarning(

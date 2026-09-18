@@ -180,6 +180,10 @@ class RepetitionReviewItem(BaseModel):
         default=None,
         description="The specific repetitive passage in section_b that should be rewritten/condensed, if substantive",
     )
+    passage_a: str | None = Field(
+        default=None,
+        description="The corresponding excerpt or passage in section_a that already covered this material",
+    )
 
 
 class RepetitionReviewResponse(BaseModel):

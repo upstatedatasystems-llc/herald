@@ -638,10 +638,15 @@ def handle_telegram_command(
                     sec_tot = sec_prog.get("total_sections")
 
                 detail_parts = []
-                if sec_curr is not None and sec_tot is not None:
-                    detail_parts.append(f"section {sec_curr}/{sec_tot}")
+                active_sec = cfg.get("script_current_section")
+                if active_sec is not None and sec_tot is not None:
+                    detail_parts.append(f"writing section {active_sec}/{sec_tot}")
+                elif active_sec is not None:
+                    detail_parts.append(f"writing section {active_sec}")
+                elif sec_curr is not None and sec_tot is not None:
+                    detail_parts.append(f"{sec_curr}/{sec_tot} sections completed")
                 elif sec_curr is not None:
-                    detail_parts.append(f"section {sec_curr}")
+                    detail_parts.append(f"{sec_curr} sections completed")
                 if substage:
                     detail_parts.append(f"substage: {html.escape(str(substage))}")
 

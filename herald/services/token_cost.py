@@ -100,15 +100,53 @@ class JobTokenAndCostSummary:
         return f"{self.total_tokens:,} tokens"
 
 
+def get_effective_pricing_table() -> dict[tuple[str, str], ModelPricing]:
+    """
+    Return effective pricing table, merging base PRICING_TABLE with any configured overrides.
+    Overrides can be supplied via HERALD_MODEL_PRICING_OVERRIDES_JSON, e.g.:
+    '{"gemini/gemini-2.5-flash": {"prompt_per_m": 0.10, "completion_per_m": 0.40}}'
+    or '{"(gemini, gemini-2.5-flash)": ...}'
+    """
+    table = dict(PRICING_TABLE)
+    try:
+        from herald.config import settings
+        raw_overrides = getattr(settings, "HERALD_MODEL_PRICING_OVERRIDES_JSON", "") or ""
+        if raw_overrides.strip():
+            import json
+            parsed = json.loads(raw_overrides)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    # k can be "provider/model" or "provider:model"
+                    if "/" in k:
+                        prov, m = k.split("/", 1)
+                    elif ":" in k:
+                        prov, m = k.split(":", 1)
+                    elif "," in k:
+                        parts = k.strip("() ").split(",")
+                        prov, m = parts[0].strip(), parts[1].strip()
+                    else:
+                        continue
+                    prov_clean = prov.strip().lower()
+                    model_clean = m.strip().lower()
+                    if isinstance(v, dict):
+                        p_rate = float(v.get("prompt_per_m", 0.0))
+                        c_rate = float(v.get("completion_per_m", 0.0))
+                        eff_date = str(v.get("effective_date", "override"))
+                        table[(prov_clean, model_clean)] = ModelPricing(p_rate, c_rate, effective_date=eff_date)
+    except Exception:
+        pass
+    return table
+
+
 def calculate_interaction_cost(interaction: AIInteraction) -> tuple[float | None, bool]:
     """
     Calculate USD cost for a single AIInteraction.
     Returns (cost_usd, is_known).
-    If provider/model is not in PRICING_TABLE, returns (None, False).
+    If provider/model is not in effective pricing table, returns (None, False).
     """
     provider = (interaction.provider or "").strip().lower()
     model = (interaction.model or "").strip().lower()
-    pricing = PRICING_TABLE.get((provider, model))
+    pricing = get_effective_pricing_table().get((provider, model))
     if not pricing:
         return None, False
 
