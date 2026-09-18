@@ -186,7 +186,10 @@ def _extract_distinctive_phrases(text: str, min_words: int = 2, max_words: int =
                 all_substantive = len(non_stop) == n and all(len(w) >= 4 for w in lower_window)
 
                 if is_capitalized or has_digit_or_hyphen or all_substantive:
-                    phrases.add(" ".join(lower_window))
+                    if is_capitalized or has_digit_or_hyphen:
+                        phrases.add(" ".join(window))
+                    else:
+                        phrases.add(" ".join(lower_window))
             else:
                 # For 4-6 word n-grams, require at least 2 non-stopwords and >= 40% density
                 if len(non_stop) >= 2 and len(non_stop) / len(lower_window) >= 0.4:
@@ -478,12 +481,21 @@ def run_quality_gate(
         min_secs = 2 if is_distinctive_short else 3
         if len(sec_set) >= min_secs:
             sorted_secs = sorted(sec_set)
+            is_named = any(w[0].isupper() for w in words if w)
+            is_numeric = any(ch.isdigit() for ch in ph)
             warnings.append(
                 QualityWarning(
                     code="REPEATED_DISTINCTIVE_PHRASE",
                     message=f"Distinctive phrase repeated across sections {sorted_secs}: '{ph}'",
                     severity=QualitySeverity.INFO,
-                    metadata={"phrase": ph, "sections": sorted_secs, "repetition_count": len(sorted_secs)},
+                    metadata={
+                        "phrase": ph,
+                        "sections": sorted_secs,
+                        "repetition_count": len(sorted_secs),
+                        "is_named": is_named,
+                        "is_numeric": is_numeric,
+                        "phrase_length": len(words),
+                    },
                 )
             )
 

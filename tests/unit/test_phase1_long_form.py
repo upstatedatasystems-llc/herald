@@ -634,11 +634,11 @@ def test_g_underfill_recovery_uncovered_vs_no_uncovered():
         target_minutes="8",
         outline_json=outline,
         evidence_packet_json={
-            "topic": "T",
+            "topic": "Breakthrough Discoveries",
             "items": [
                 {"evidence_id": "ev1", "snippet": "snip1"},
                 {"evidence_id": "ev2", "snippet": "snip2"},
-                {"evidence_id": "ev3_uncovered", "title": "Uncovered Breakthrough", "snippet": "snip3"},
+                {"evidence_id": "ev3_uncovered", "title": "Uncovered Breakthrough", "snippet": "Breakthrough discoveries and revolutionary new architectures"},
             ],
         },
     )
@@ -661,7 +661,7 @@ def test_g_underfill_recovery_uncovered_vs_no_uncovered():
         res = execute_unified_long_form_pipeline(
             db=mock_db,
             job=job,
-            topic="T",
+            topic="Breakthrough Discoveries",
             scope=EvidenceScope.RESEARCH,
             target_minutes="8",
             source_text="Source",

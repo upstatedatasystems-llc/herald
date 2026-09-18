@@ -11,52 +11,54 @@ from herald.db.models import AIInteraction
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Pricing rates per 1,000,000 tokens in USD with effective rate date."""
+    """Pricing rates per 1,000,000 tokens in USD with effective rate date, provenance, and verification."""
     prompt_per_m: float
     completion_per_m: float
     effective_date: str = "2024-10-01"
+    provenance: str = "vendor_docs"
+    is_verified: bool = True
 
 
 # Canonical pricing table keyed strictly by exact lowercase (provider_id, model_id) tuples.
-# Rates in USD per 1M tokens.
+# Rates in USD per 1M tokens with explicit provenance.
 PRICING_TABLE: dict[tuple[str, str], ModelPricing] = {
     # Gemini
-    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-10-01"),
-    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01"),
-    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01"),
-    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-05-14"),
-    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00, effective_date="2024-05-14"),
+    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-10-01", provenance="https://ai.google.dev/pricing", is_verified=True),
+    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", is_verified=True),
+    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", is_verified=True),
+    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", is_verified=True),
+    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00, effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", is_verified=True),
 
     # Groq (rates per 1M tokens)
-    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79, effective_date="2024-12-06"),
-    ("groq", "groq/compound"): ModelPricing(0.59, 0.79, effective_date="2025-01-01"),
-    ("groq", "groq/compound-mini"): ModelPricing(0.20, 0.20, effective_date="2025-01-01"),
-    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80, effective_date="2025-01-01"),
-    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15, effective_date="2025-01-01"),
+    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79, effective_date="2024-12-06", provenance="https://groq.com/pricing", is_verified=True),
+    ("groq", "groq/compound"): ModelPricing(0.59, 0.79, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
+    ("groq", "groq/compound-mini"): ModelPricing(0.20, 0.20, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
+    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
+    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
 
     # OpenAI
-    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00, effective_date="2024-05-13"),
-    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60, effective_date="2024-07-18"),
+    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00, effective_date="2024-05-13", provenance="https://openai.com/api/pricing", is_verified=True),
+    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60, effective_date="2024-07-18", provenance="https://openai.com/api/pricing", is_verified=True),
 
     # Anthropic
-    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00, effective_date="2025-02-19"),
-    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00, effective_date="2024-10-22"),
-    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00, effective_date="2024-10-22"),
+    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00, effective_date="2025-02-19", provenance="https://anthropic.com/pricing", is_verified=True),
+    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00, effective_date="2024-10-22", provenance="https://anthropic.com/pricing", is_verified=True),
+    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00, effective_date="2024-10-22", provenance="https://anthropic.com/pricing", is_verified=True),
 
     # Mistral
-    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00, effective_date="2024-11-18"),
+    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00, effective_date="2024-11-18", provenance="https://mistral.ai/technology/#pricing", is_verified=True),
 
     # Cloudflare Workers AI
-    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40, effective_date="2024-12-01"),
-    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30, effective_date="2024-12-01"),
-    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30, effective_date="2024-12-01"),
-    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20, effective_date="2024-12-01"),
+    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
+    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
+    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
+    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
 
     # OpenRouter
-    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40, effective_date="2024-12-06"),
+    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40, effective_date="2024-12-06", provenance="https://openrouter.ai/models", is_verified=True),
 
     # Ollama / Local AI models are free ($0.00)
-    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0, effective_date="2024-09-25"),
+    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0, effective_date="2024-09-25", provenance="local_execution", is_verified=True),
 }
 
 
@@ -100,23 +102,36 @@ class JobTokenAndCostSummary:
         return f"{self.total_tokens:,} tokens"
 
 
+def is_external_billable_provider(provider: str | None) -> bool:
+    """Return True if provider is an external paid API provider rather than local/internal."""
+    p = (provider or "").strip().lower()
+    return p in ("gemini", "groq", "openai", "anthropic", "mistral", "cloudflare", "cloudflare_workers_ai", "openrouter")
+
+
 def get_effective_pricing_table() -> dict[tuple[str, str], ModelPricing]:
     """
     Return effective pricing table, merging base PRICING_TABLE with any configured overrides.
-    Overrides can be supplied via HERALD_MODEL_PRICING_OVERRIDES_JSON, e.g.:
-    '{"gemini/gemini-2.5-flash": {"prompt_per_m": 0.10, "completion_per_m": 0.40}}'
-    or '{"(gemini, gemini-2.5-flash)": ...}'
+    Honors HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING (default True). When disabled, only local
+    zero-cost models and explicit overrides are priced.
+    Only entries with is_verified=True are loaded from the built-in table.
     """
-    table = dict(PRICING_TABLE)
+    from herald.config import settings
+    enable_builtin_external = getattr(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True)
+
+    table: dict[tuple[str, str], ModelPricing] = {}
+    for k, v in PRICING_TABLE.items():
+        prov, mod = k
+        is_local = (prov in ("ollama", "local")) or (v.prompt_per_m == 0.0 and v.completion_per_m == 0.0)
+        if (is_local or enable_builtin_external) and getattr(v, "is_verified", True):
+            table[k] = v
+
     try:
-        from herald.config import settings
         raw_overrides = getattr(settings, "HERALD_MODEL_PRICING_OVERRIDES_JSON", "") or ""
         if raw_overrides.strip():
             import json
             parsed = json.loads(raw_overrides)
             if isinstance(parsed, dict):
                 for k, v in parsed.items():
-                    # k can be "provider/model" or "provider:model"
                     if "/" in k:
                         prov, m = k.split("/", 1)
                     elif ":" in k:
@@ -132,7 +147,13 @@ def get_effective_pricing_table() -> dict[tuple[str, str], ModelPricing]:
                         p_rate = float(v.get("prompt_per_m", 0.0))
                         c_rate = float(v.get("completion_per_m", 0.0))
                         eff_date = str(v.get("effective_date", "override"))
-                        table[(prov_clean, model_clean)] = ModelPricing(p_rate, c_rate, effective_date=eff_date)
+                        table[(prov_clean, model_clean)] = ModelPricing(
+                            prompt_per_m=p_rate,
+                            completion_per_m=c_rate,
+                            effective_date=eff_date,
+                            provenance=v.get("provenance", "user_override"),
+                            is_verified=True,
+                        )
     except Exception:
         pass
     return table
@@ -167,7 +188,7 @@ def calculate_interaction_cost(interaction: AIInteraction) -> tuple[float | None
 def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobTokenAndCostSummary:
     """
     Aggregate token counts and compute cost for a collection of AIInteractions.
-    Never returns $0.00 if non-local API interactions occurred without known rates.
+    Never returns $0.00 if non-local API interactions occurred without known rates or missing telemetry.
     """
     prompt_tokens = 0
     completion_tokens = 0
@@ -175,6 +196,7 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
     total_cost = 0.0
     known_cost_token_bearing_interactions = 0
     total_token_bearing_interactions = 0
+    external_missing_telemetry_interactions = 0
     total_interactions = 0
     by_model: dict[str, dict[str, Any]] = {}
 
@@ -191,6 +213,11 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
         is_token_bearing = (t_tok > 0)
         if is_token_bearing:
             total_token_bearing_interactions += 1
+        else:
+            # 0 tokens observed: check if this is an external billable provider with missing telemetry
+            prov = (inter.provider or "").strip().lower()
+            if is_external_billable_provider(prov):
+                external_missing_telemetry_interactions += 1
 
         cost, is_known = calculate_interaction_cost(inter)
         if is_known and cost is not None:
@@ -228,12 +255,23 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
             by_model={},
         )
 
-    # If no calls had tokens, consider complete if all had known pricing models
+    # Truthful cost availability and completeness logic
     if total_token_bearing_interactions == 0:
-        is_cost_complete = True
-        is_cost_available = True
+        if external_missing_telemetry_interactions > 0:
+            # External billable calls were made, but token telemetry is missing: cost is unavailable
+            is_cost_complete = False
+            is_cost_available = False
+        else:
+            # Only genuinely zero-cost local or internal non-billable interactions took place
+            is_cost_complete = True
+            is_cost_available = True
     else:
-        is_cost_complete = (known_cost_token_bearing_interactions == total_token_bearing_interactions)
+        # Some token-bearing interactions exist.
+        # If external calls with missing telemetry occurred, overall cost is incomplete/partial
+        if external_missing_telemetry_interactions > 0:
+            is_cost_complete = False
+        else:
+            is_cost_complete = (known_cost_token_bearing_interactions == total_token_bearing_interactions)
         is_cost_available = (known_cost_token_bearing_interactions > 0)
 
     return JobTokenAndCostSummary(

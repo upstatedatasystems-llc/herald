@@ -251,12 +251,13 @@ def test_expand_script_content_gap_preserves_existing_content():
         "total_words": len(s1_narr.split()),
         "planned_target": 1000,
         "deficit": 500,
+        "is_overall_underfilled": True,
     }
 
     evidence_packet = {
         "items": [
             {"evidence_id": "E1", "title": "Primary Doc", "snippet": "Core architecture info"},
-            {"evidence_id": "E2", "title": "Secondary Doc", "snippet": "Uncovered performance data", "is_seed_source": False},
+            {"evidence_id": "E2", "title": "Concurrency Benchmarks", "snippet": "Modern computing performance metrics and high concurrency benchmarks", "is_seed_source": False},
         ]
     }
 
@@ -913,3 +914,506 @@ def test_pricing_overrides_exact_match():
         cost, known = calculate_interaction_cost(inter)
         assert known is True
         assert cost == 6.00
+
+
+def test_unused_irrelevant_evidence_does_not_suppress_supplemental_research_and_zero_relevance_never_used():
+    """Unused irrelevant evidence does not suppress supplemental research; zero-relevance evidence is never used to expand sections."""
+    job = PodcastJob(id="supp-trigger-job")
+    s1_narr = "Primary section on submarine acoustic dampening."
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Reactor Coolant Circulation",
+            "purpose": "Explain natural circulation in submarine reactor coolant systems",
+            "key_points": ["coolant loops", "natural circulation"],
+            "narration": s1_narr,
+            "word_count": len(s1_narr.split()),
+            "relevant_evidence_ids": ["E1"],
+        }
+    ]
+    gap_info = {
+        "is_overall_underfilled": False,
+        "total_words": 10,
+        "planned_target": 500,
+        "deficit": 400,
+        "underfilled_sections": [
+            {"section_index": 1, "deficit": 400, "word_budget": 500}
+        ],
+    }
+    # Unused evidence E2 has ZERO relevance to reactor coolant (medieval agriculture)
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Submarine Basics", "snippet": "Acoustic dampening tiles"},
+            {"evidence_id": "E2", "title": "Medieval Farming", "snippet": "Crop rotation techniques in fourteenth century Europe", "is_seed_source": False},
+        ]
+    }
+
+    mock_supp_result = {
+        "grounding_metadata": {"webSearchQueries": ["submarine reactor coolant natural circulation"]},
+        "research_sources": [{"title": "Submarine Reactor Plants", "url": "https://navy.mil/reactor", "publisher": "Navy"}],
+        "items": [
+            {
+                "title": "Natural Circulation Mechanics",
+                "snippet": "Primary coolant loops utilize natural circulation at low speeds to eliminate coolant pump acoustic signatures.",
+            }
+        ]
+    }
+
+    with patch("herald.ai.long_form.execute_with_failover") as mock_failover:
+        expanded_section_resp = MagicMock()
+        expanded_section_resp.segments = [MagicMock(narration=s1_narr + " Expanded with natural circulation details at low speeds. " * 10)]
+        mock_failover.side_effect = [mock_supp_result, expanded_section_resp]
+
+        expanded_sections, gap_meta = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Naval Nuclear Propulsion",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.RESEARCH,
+            return_metadata=True,
+        )
+
+        assert gap_meta["supplemental_research_triggered"] is True
+        assert gap_meta["supplemental_research"]["search_count"] == 1
+        # E2 (Medieval farming) was NEVER used!
+        assert "E2" not in gap_meta["section_evidence_used"].get("1", [])
+        # The new evidence item ev_supp_1 was used
+        assert any("ev_supp" in eid for eid in gap_meta["section_evidence_used"].get("1", []))
+
+
+def test_single_supplemental_research_operation_addresses_multiple_section_gaps():
+    """Single supplemental research pass targets all starved sections simultaneously."""
+    job = PodcastJob(id="multi-gap-job")
+    sections = [
+        {"section_index": 1, "heading": "Hull Design", "narration": "Hull words " * 40, "word_count": 80, "relevant_evidence_ids": ["E1"]},
+        {"section_index": 2, "heading": "Reactor Coolant", "purpose": "Coolant details", "narration": "Coolant words " * 20, "word_count": 40, "relevant_evidence_ids": ["E2"]},
+        {"section_index": 3, "heading": "Sonar Arrays", "purpose": "Sonar details", "narration": "Sonar words " * 20, "word_count": 40, "relevant_evidence_ids": ["E3"]},
+    ]
+    gap_info = {
+        "is_overall_underfilled": True,
+        "total_words": 160,
+        "planned_target": 1000,
+        "deficit": 500,
+        "underfilled_sections": [
+            {"section_index": 2, "deficit": 250, "word_budget": 300},
+            {"section_index": 3, "deficit": 250, "word_budget": 300},
+        ],
+    }
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Hull", "snippet": "Hull info"},
+            {"evidence_id": "E2", "title": "Reactor", "snippet": "Reactor info"},
+            {"evidence_id": "E3", "title": "Sonar", "snippet": "Sonar info"},
+        ]
+    }
+
+    mock_supp_result = {
+        "grounding_metadata": {"webSearchQueries": ["reactor coolant and sonar arrays"]},
+        "research_sources": [{"title": "Submarine Engineering", "url": "https://navy.mil/sub", "publisher": "Navy"}],
+        "items": [
+            {"title": "Advanced Reactor Coolant", "snippet": "Reactor coolant pump isolation mounts reduce acoustic energy."},
+            {"title": "Spherical Sonar Arrays", "snippet": "Bow mounted sonar arrays provide passive acoustic monitoring."},
+        ]
+    }
+
+    captured_operations = []
+
+    def mock_failover_fn(*args, **kwargs):
+        op = kwargs.get("operation")
+        captured_operations.append(op)
+        if op == "supplemental_research":
+            return mock_supp_result
+        elif op == "section_expansion":
+            mock_res = MagicMock()
+            mock_res.segments = [MagicMock(narration="Expanded section narration with fresh technical facts. " * 15)]
+            return mock_res
+        return MagicMock()
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover_fn):
+        expanded_sections, gap_meta = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Submarine Systems",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.RESEARCH,
+            return_metadata=True,
+        )
+
+        assert captured_operations.count("supplemental_research") == 1
+        assert gap_meta["supplemental_research_triggered"] is True
+        assert "Reactor Coolant" in gap_meta["supplemental_research"]["gap_focus"]
+        assert "Sonar Arrays" in gap_meta["supplemental_research"]["gap_focus"]
+
+
+def test_section_only_underfill_does_not_create_extra_section_when_overall_fill_acceptable():
+    """Section-only deficit does not trigger extra section fallback if overall script meets length tolerance."""
+    job = PodcastJob(id="sec-only-underfill-job")
+    sections = [
+        {"section_index": 1, "heading": "Overview", "narration": "Word " * 500, "word_count": 500, "relevant_evidence_ids": ["E1"]},
+        {"section_index": 2, "heading": "Deep Dive", "narration": "Word " * 150, "word_count": 150, "relevant_evidence_ids": ["E2"]},
+        {"section_index": 3, "heading": "Summary", "narration": "Word " * 300, "word_count": 300, "relevant_evidence_ids": ["E3"]},
+    ]
+    gap_info = {
+        "is_overall_underfilled": False,
+        "total_words": 950,
+        "planned_target": 1000,
+        "deficit": 150,
+        "underfilled_sections": [
+            {"section_index": 2, "deficit": 150, "word_budget": 300}
+        ],
+    }
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Overview", "snippet": "Overview snippet"},
+            {"evidence_id": "E2", "title": "Deep Dive", "snippet": "Deep dive snippet"},
+            {"evidence_id": "E3", "title": "Summary", "snippet": "Summary snippet"},
+            {"evidence_id": "E4", "title": "Extra Topic", "snippet": "Topic details", "is_seed_source": False},
+        ]
+    }
+
+    with patch("herald.ai.long_form.execute_with_failover") as mock_failover:
+        mock_failover.return_value = {"items": [], "grounding_metadata": {}}
+        expanded_sections, gap_meta = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Complex Systems",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.RESEARCH,
+            return_metadata=True,
+        )
+
+        assert len(expanded_sections) == 3
+        assert gap_meta["extra_section_added"] is False
+
+
+def test_extra_section_requires_overall_underfill_and_distinct_relevant_material():
+    """Extra section fallback requires overall underfill and distinct relevant evidence; rejects unrelated evidence."""
+    job = PodcastJob(id="extra-sec-filter-job")
+    s1_narr = "Primary submarine overview."
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Submarine Propulsion",
+            "purpose": "Propulsion mechanics",
+            "key_points": ["nuclear reactor", "steam turbine"],
+            "narration": s1_narr,
+            "word_count": len(s1_narr.split()),
+            "relevant_evidence_ids": ["E1"],
+        }
+    ]
+    gap_info = {
+        "is_overall_underfilled": True,
+        "total_words": 10,
+        "planned_target": 1000,
+        "deficit": 700,
+        "underfilled_sections": [],
+    }
+
+    # Packet with only UNRELATED evidence (Medieval cooking)
+    unrelated_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Propulsion", "snippet": "Nuclear reactor and steam turbine"},
+            {"evidence_id": "E2", "title": "Culinary History", "snippet": "Renaissance pastry recipes and baking methods", "is_seed_source": False},
+        ]
+    }
+
+    expanded_unrelated, meta_unrelated = expand_script_content_gap(
+        job=job,
+        completed_sections=sections,
+        gap_info=gap_info,
+        topic="Submarine Engineering",
+        evidence_packet=unrelated_packet,
+        scope=EvidenceScope.RESEARCH,
+        return_metadata=True,
+    )
+    assert len(expanded_unrelated) == 1
+    assert meta_unrelated["extra_section_added"] is False
+    assert meta_unrelated["extra_section_skipped_reason"] == "no_distinct_uncovered_evidence"
+
+    # Packet with RELEVANT and DISTINCT evidence
+    relevant_packet = {
+        "items": [
+            {"evidence_id": "E1", "title": "Propulsion", "snippet": "Nuclear reactor and steam turbine"},
+            {"evidence_id": "E3", "title": "Submarine Acoustic Quieting", "snippet": "Submarine engineering acoustic isolation mounts and hull damping tiles", "is_seed_source": False},
+        ]
+    }
+
+    with patch("herald.ai.long_form.generate_single_section") as mock_gen_sec:
+        mock_gen_sec.return_value = {
+            "section_index": 2,
+            "heading": "Submarine Acoustic Quieting",
+            "narration": "Detailed analysis of acoustic dampening tiles. " * 30,
+            "word_count": 300,
+            "relevant_evidence_ids": ["E3"],
+        }
+        expanded_relevant, meta_relevant = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Submarine Engineering",
+            evidence_packet=relevant_packet,
+            scope=EvidenceScope.RESEARCH,
+            return_metadata=True,
+        )
+        assert len(expanded_relevant) == 2
+        assert meta_relevant["extra_section_added"] is True
+        assert meta_relevant["extra_section_reason"] == "overall_underfill_with_distinct_topic_material"
+
+
+def test_overlapping_phrase_variants_collapsed_before_repetition_cap():
+    """Overlapping phrase variants (Crazy Ivan, Ivan maneuver, Crazy Ivan maneuver) collapse into one candidate before cap."""
+    from herald.ai.long_form import review_script_repetition
+    from herald.ai.schema import RepetitionReviewResponse
+
+    job = PodcastJob(id="rep-collapse-test")
+    sections = [
+        {"section_index": 1, "heading": "Maneuvers", "narration": "The Crazy Ivan maneuver was a famous tactic."},
+        {"section_index": 2, "heading": "Tactics", "narration": "The Ivan maneuver or Crazy Ivan was repeated here."},
+    ]
+
+    distinctive_warnings = [
+        MagicMock(metadata={"phrase": "Crazy Ivan maneuver", "sections": [1, 2], "is_named": True}),
+        MagicMock(metadata={"phrase": "Crazy Ivan", "sections": [1, 2], "is_named": True}),
+        MagicMock(metadata={"phrase": "Ivan maneuver", "sections": [1, 2], "is_named": True}),
+    ]
+
+    mock_resp = RepetitionReviewResponse(has_substantive_repetition=False, reviews=[])
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res, to_repair, rep_meta = review_script_repetition(
+            job=job,
+            completed_sections=sections,
+            near_duplicate_warnings=[],
+            distinctive_phrase_warnings=distinctive_warnings,
+            topic="Submarine Tactics",
+        )
+
+        assert rep_meta["evaluated_count"] == 1
+        eval_cand = rep_meta["candidate_ranking_selection"][0]
+        assert "crazy ivan maneuver" in eval_cand["candidate_text"].lower()
+        assert eval_cand["is_named"] is True
+
+
+def test_repetition_candidate_ordering_deterministic_and_distinctive_concepts_survive_noisy_pool():
+    """Deterministic ranking prioritizes distinctive concepts (Crazy Ivan, teardrop hull, 300,000-gallon tank) over noisy generic pairs."""
+    from herald.ai.long_form import review_script_repetition
+    from herald.ai.schema import RepetitionReviewResponse
+
+    job = PodcastJob(id="rep-rank-test")
+    sections = [
+        {"section_index": i, "heading": f"Section {i}", "narration": f"Narration for section {i}"}
+        for i in range(1, 10)
+    ]
+
+    noisy_warnings = [
+        MagicMock(metadata={"phrase": f"general system operation {i}", "sections": [1, 2], "is_named": False, "is_numeric": False})
+        for i in range(1, 21)
+    ]
+
+    distinctive_concepts = [
+        MagicMock(metadata={"phrase": "Crazy Ivan", "sections": [1, 3], "is_named": True, "is_numeric": False}),
+        MagicMock(metadata={"phrase": "teardrop hull", "sections": [2, 4], "is_named": False, "is_numeric": False}),
+        MagicMock(metadata={"phrase": "300,000-gallon tank", "sections": [3, 5], "is_named": False, "is_numeric": True}),
+    ]
+
+    all_warnings = noisy_warnings + distinctive_concepts
+
+    mock_resp = RepetitionReviewResponse(has_substantive_repetition=False, reviews=[])
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res, to_repair, rep_meta = review_script_repetition(
+            job=job,
+            completed_sections=sections,
+            near_duplicate_warnings=[],
+            distinctive_phrase_warnings=all_warnings,
+            topic="Naval Architecture",
+        )
+
+        assert rep_meta["evaluated_count"] == 14
+        eval_texts = [c["candidate_text"].lower() for c in rep_meta["candidate_ranking_selection"]]
+
+        assert any("crazy ivan" in t for t in eval_texts)
+        assert any("teardrop hull" in t for t in eval_texts)
+        assert any("300,000-gallon tank" in t for t in eval_texts)
+
+
+def test_grounded_source_title_preserved_through_normalization_and_supp_remapping():
+    """Grounded source titles and metadata are preserved through normalization and supplemental evidence mapping."""
+    from herald.ai.long_form import normalize_evidence_packet
+
+    grounded_data = {
+        "grounding_metadata": {
+            "webSearchQueries": ["nuclear submarine propulsion safety records"],
+            "groundingChunks": [
+                {"web": {"title": "Official Nuclear Safety Report 2024", "uri": "https://gov.safety/report2024"}},
+            ],
+            "groundingSupports": [
+                {
+                    "groundingChunkIndices": [0],
+                    "segment": {"text": "Submarine reactors feature secondary containment vessels and passive coolant loops."},
+                }
+            ],
+        },
+        "research_sources": [
+            {"title": "Official Nuclear Safety Report 2024", "url": "https://gov.safety/report2024", "publisher": "Safety Board"}
+        ],
+    }
+
+    norm_packet = normalize_evidence_packet(
+        topic="Naval Propulsion",
+        scope=EvidenceScope.RESEARCH,
+        grounded_research_data=grounded_data,
+    )
+
+    items = norm_packet.get("items", [])
+    assert len(items) >= 1
+    first_item = items[0]
+    assert first_item["actual_source_title"] == "Official Nuclear Safety Report 2024"
+    assert first_item["title"] == "Official Nuclear Safety Report 2024"
+    assert first_item["source_url"] == "https://gov.safety/report2024"
+
+
+def test_diagnostics_contents_for_repetition_repair_and_gap_research_summaries(tmp_path):
+    """Diagnostics archive exports complete machine-readable repetition and gap summaries."""
+    import json
+    import zipfile
+    from herald.services.diagnostics_export import generate_job_diagnostics_zip
+
+    job = PodcastJob(
+        id="diag-full-summary-job",
+        status=JobState.COMPLETE.value,
+        configuration_state_json={
+            "repetition_diagnostics": {
+                "initial_near_duplicate_warnings_count": 1,
+                "distinctive_concept_candidates_count": 15,
+                "total_candidate_count": 16,
+                "evaluated_count": 14,
+                "candidate_ranking_selection": [
+                    {"section_a": 1, "section_b": 2, "candidate_text": "Crazy Ivan", "tier": 1}
+                ],
+                "omitted_candidates": [
+                    {"candidate_text": "generic term", "reason": "exceeded_candidate_cap_14"}
+                ],
+                "substantive_duplicates_found": 1,
+                "repaired_sections": [2],
+                "repaired_section_word_counts": [{"section_index": 2, "before_words": 150, "after_words": 140}],
+                "repair_success": True,
+            },
+            "gap_diagnostics": {
+                "gap_detected": True,
+                "deficit": 400,
+                "fill_ratio": 0.70,
+                "supplemental_research_triggered": True,
+                "supplemental_research": {
+                    "provider": "google",
+                    "model": "gemini-2.5-flash",
+                    "search_count": 3,
+                    "source_count": 4,
+                    "new_evidence_count": 3,
+                    "gap_focus": "Coolant Systems",
+                },
+                "sections_expanded": [2],
+                "section_evidence_used": {"2": ["ev_supp_1"]},
+                "section_word_counts": [{"section_index": 2, "before_words": 100, "after_words": 250}],
+                "extra_section_added": False,
+                "extra_section_skipped_reason": "deficit_resolved_in_place",
+            },
+        },
+        script_json={"episode_title": "Reactor Test", "segments": []},
+    )
+
+    zip_path = tmp_path / "test_diag_full.zip"
+    db_mock = MagicMock()
+    db_mock.query.return_value.filter.return_value.all.return_value = []
+    db_mock.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    db_mock.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+    db_mock.query.return_value.filter.return_value.count.return_value = 0
+
+    with patch("herald.services.diagnostics_export.get_diagnostics_base_dir", return_value=tmp_path):
+        out_zip = generate_job_diagnostics_zip(db=db_mock, job=job, target_zip_path=zip_path)
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            rep_data = json.loads(zf.read("longform/repetition-repair-summary.json"))
+            gap_data = json.loads(zf.read("longform/gap-research-summary.json"))
+
+            assert rep_data["evaluated_count"] == 14
+            assert rep_data["repaired_sections"] == [2]
+            assert rep_data["repair_success"] is True
+            assert len(rep_data["omitted_candidates"]) == 1
+
+            assert gap_data["gap_detected"] is True
+            assert gap_data["supplemental_research"]["search_count"] == 3
+            assert gap_data["sections_expanded"] == [2]
+            assert gap_data["extra_section_skipped_reason"] == "deficit_resolved_in_place"
+
+
+def test_final_script_substage_is_complete_and_current_section_cleared():
+    """Unified long-form pipeline marks script_substage as complete and clears script_current_section."""
+    job = PodcastJob(
+        id="substage-complete-job",
+        configuration_state_json={
+            "script_substage": "fidelity_audit",
+            "script_current_section": 3,
+        },
+    )
+    _set_script_substage(job, "complete", db=None)
+    assert job.configuration_state_json["script_substage"] == "complete"
+    assert job.configuration_state_json["script_current_section"] is None
+
+
+def test_external_ai_interaction_with_missing_token_telemetry_reports_cost_unavailable():
+    """External billable AI interaction with missing token telemetry reports cost unavailable, never $0.00."""
+    from herald.db.models import AIInteraction
+    from herald.services.token_cost import aggregate_job_tokens_and_cost
+
+    inter_missing = AIInteraction(
+        id="inter-missing-1",
+        job_id="job-cost-missing",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+    )
+
+    summary = aggregate_job_tokens_and_cost([inter_missing])
+    assert summary.is_cost_complete is False
+    assert summary.is_cost_available is False
+    assert summary.cost_display == "unavailable"
+
+    # Partial cost test: valid interaction + missing telemetry interaction
+    inter_valid = AIInteraction(
+        id="inter-valid-1",
+        job_id="job-cost-partial",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        prompt_tokens=100_000,
+        completion_tokens=50_000,
+        total_tokens=150_000,
+    )
+
+    summary_partial = aggregate_job_tokens_and_cost([inter_valid, inter_missing])
+    assert summary_partial.is_cost_complete is False
+    assert summary_partial.is_cost_available is True
+    assert "(partial)" in summary_partial.cost_display
+    assert summary_partial.total_cost_usd > 0.0
+
+
+def test_pricing_configuration_defaults_and_opt_in_behavior():
+    """Pricing defaults to verified builtin table; disabling external pricing drops billable external rates while keeping local."""
+    from herald.services.token_cost import get_effective_pricing_table
+
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        table_enabled = get_effective_pricing_table()
+        assert ("gemini", "gemini-2.5-flash") in table_enabled
+        assert ("openai", "gpt-4o") in table_enabled
+        assert ("ollama", "llama3.2") in table_enabled
+
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", False):
+        table_disabled = get_effective_pricing_table()
+        assert ("gemini", "gemini-2.5-flash") not in table_disabled
+        assert ("openai", "gpt-4o") not in table_disabled
+        assert ("ollama", "llama3.2") in table_disabled
+

@@ -497,28 +497,44 @@ def normalize_evidence_packet(
         # If grounding supports map text segments to chunks, use them
         has_supports = bool(grounding_supports and grounding_chunks)
         if has_supports:
+            web_queries = grounding_meta.get("webSearchQueries") or grounding_meta.get("web_search_queries") or []
             for s_idx, supp in enumerate(grounding_supports, 1):
                 seg = supp.get("segment", {})
                 claim_text = seg.get("text", "").strip()
                 chunk_indices = supp.get("groundingChunkIndices", [])
                 supp_sources = []
+                supp_titles = []
+                supp_publishers = []
                 for c_idx in chunk_indices:
                     if 0 <= c_idx < len(grounding_chunks):
                         g_chunk = grounding_chunks[c_idx]
-                        web = g_chunk.get("web", {})
-                        supp_sources.append(web.get("uri") or web.get("url"))
+                        web = g_chunk.get("web", {}) if isinstance(g_chunk, dict) else {}
+                        u = web.get("uri") or web.get("url")
+                        t = web.get("title")
+                        pub = web.get("publisher") or web.get("domain")
+                        if u:
+                            supp_sources.append(u)
+                        if t:
+                            supp_titles.append(t)
+                        if pub:
+                            supp_publishers.append(pub)
 
                 if claim_text:
                     first_src_url = supp_sources[0] if supp_sources else None
+                    first_src_title = supp_titles[0] if supp_titles else None
+                    first_pub = supp_publishers[0] if supp_publishers else None
                     items.append({
                         "evidence_id": f"ev_ground_{s_idx}",
-                        "title": f"Grounded Finding {s_idx}",
-                        "publisher": "Google Search Grounding",
+                        "title": first_src_title or f"Grounded Finding {s_idx}",
+                        "actual_source_title": first_src_title,
+                        "finding_number": s_idx,
+                        "publisher": first_pub or "Google Search Grounding",
                         "source_url": first_src_url,
                         "source_ids": [f"S{c+1}" for c in chunk_indices],
                         "snippet": claim_text,
                         "is_seed_source": False,
                         "focus_area": "External Grounded Research",
+                        "search_query": web_queries[0] if web_queries else None,
                     })
 
         # Register canonical sources
@@ -1479,7 +1495,11 @@ def review_script_repetition(
                 "candidate_text": p_b,
                 "passage_a_seed": p_a,
                 "is_near_dup": True,
-                "similarity": sim,
+                "similarity": float(sim),
+                "repetition_count": 2,
+                "phrase_length": len(p_b.split()),
+                "is_named": False,
+                "is_numeric": False,
             })
 
     # Collect candidate items from distinctive phrase warnings (if repeated across sections)
@@ -1488,6 +1508,10 @@ def review_script_repetition(
         phrase = pmeta.get("phrase")
         secs = pmeta.get("sections") or []
         if phrase and len(secs) >= 2:
+            words = phrase.split()
+            rep_count = pmeta.get("repetition_count", len(secs))
+            is_named = pmeta.get("is_named") if pmeta.get("is_named") is not None else any(w[0].isupper() for w in words if w)
+            is_numeric = pmeta.get("is_numeric") if pmeta.get("is_numeric") is not None else any(ch.isdigit() for ch in phrase)
             sec_a = secs[0]
             for sec_b in secs[1:]:
                 candidates.append({
@@ -1497,30 +1521,101 @@ def review_script_repetition(
                     "passage_a_seed": phrase,
                     "is_near_dup": False,
                     "similarity": 0.0,
+                    "repetition_count": rep_count,
+                    "phrase_length": len(words),
+                    "is_named": is_named,
+                    "is_numeric": is_numeric,
                 })
 
     if not candidates:
-        return None, [], {"omitted_candidates": []}
+        return None, [], {
+            "initial_near_duplicate_warnings_count": len(near_duplicate_warnings),
+            "distinctive_concept_candidates_count": len(distinctive_phrase_warnings),
+            "distinctive_concept_candidates": [],
+            "candidate_ranking_selection": [],
+            "evaluated_count": 0,
+            "total_candidate_count": 0,
+            "omitted_candidates": [],
+        }
 
-    # Deduplicate candidate pairs by (section_a, section_b, normalized candidate_text)
-    seen_cand_keys = set()
-    deduped_candidates = []
+    # Group candidates by section pair to collapse overlapping phrase variants
+    candidates_by_pair: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for c in candidates:
-        ckey = (c["section_a"], c["section_b"], c["candidate_text"].strip().lower()[:80])
-        if ckey not in seen_cand_keys:
-            seen_cand_keys.add(ckey)
-            deduped_candidates.append(c)
+        candidates_by_pair.setdefault((c["section_a"], c["section_b"]), []).append(c)
 
-    # Prioritize: near-duplicates first (by similarity desc), then distinctive phrases
-    deduped_candidates.sort(key=lambda x: (not x["is_near_dup"], -float(x.get("similarity", 0.0))))
+    collapsed_candidates: list[dict[str, Any]] = []
+    for pair, pair_cands in candidates_by_pair.items():
+        near_dups = [c for c in pair_cands if c["is_near_dup"]]
+        phrase_cands = [c for c in pair_cands if not c["is_near_dup"]]
+
+        collapsed_candidates.extend(near_dups)
+
+        # Collapse overlapping phrase variants within the pair
+        phrase_cands.sort(key=lambda c: len(c["candidate_text"].split()), reverse=True)
+        accepted_phrases: list[dict[str, Any]] = []
+        for pc in phrase_cands:
+            txt_lower = pc["candidate_text"].strip().lower()
+            pc_words = set(re.sub(r"[^\w\-]", "", w) for w in txt_lower.split() if w)
+            merged = False
+            for acc in accepted_phrases:
+                acc_lower = acc["candidate_text"].strip().lower()
+                acc_words = set(re.sub(r"[^\w\-]", "", w) for w in acc_lower.split() if w)
+
+                is_subset = bool(pc_words and acc_words and (pc_words.issubset(acc_words) or acc_words.issubset(pc_words)))
+
+                if is_subset:
+                    acc["repetition_count"] = max(acc.get("repetition_count", 2), pc.get("repetition_count", 2))
+                    acc["is_named"] = acc.get("is_named", False) or pc.get("is_named", False)
+                    acc["is_numeric"] = acc.get("is_numeric", False) or pc.get("is_numeric", False)
+                    if len(pc["candidate_text"].split()) > len(acc["candidate_text"].split()) or (pc.get("is_named") and not acc.get("is_named")):
+                        acc["candidate_text"] = pc["candidate_text"]
+                        acc["passage_a_seed"] = pc["passage_a_seed"]
+                    merged = True
+                    break
+            if not merged:
+                accepted_phrases.append(pc)
+
+        collapsed_candidates.extend(accepted_phrases)
+
+    # Prioritize candidates deterministically
+    def _candidate_sort_key(c: dict[str, Any]) -> tuple:
+        is_nd = c["is_near_dup"]
+        sim = float(c.get("similarity", 0.0))
+        is_named = bool(c.get("is_named"))
+        is_numeric = bool(c.get("is_numeric"))
+        words = [re.sub(r"[^\w\-]", "", w.lower()) for w in c["candidate_text"].split()]
+        all_substantive = len(words) >= 2 and all(len(w) >= 4 and w not in COMMON_PHRASE_STOPWORDS for w in words)
+        tier = 0
+        if is_named and is_numeric:
+            tier = 3
+        elif is_named or is_numeric:
+            tier = 2
+        elif all_substantive:
+            tier = 1
+
+        rep_count = int(c.get("repetition_count", 2))
+        phrase_len = int(c.get("phrase_length", len(words)))
+
+        return (
+            not is_nd,
+            -sim if is_nd else 0.0,
+            -tier,
+            -rep_count,
+            -phrase_len,
+            c["section_a"],
+            c["section_b"],
+            c["candidate_text"].lower(),
+        )
+
+    collapsed_candidates.sort(key=_candidate_sort_key)
 
     # Configurable review candidate cap (default 14, bounds 12-16)
     configured_cap = getattr(settings, "HERALD_MAX_REPETITION_REVIEW_CANDIDATES", 14)
     max_review_candidates = max(12, min(16, configured_cap))
 
-    evaluated_candidates = deduped_candidates[:max_review_candidates]
+    evaluated_candidates = collapsed_candidates[:max_review_candidates]
     omitted_candidates = []
-    for c in deduped_candidates[max_review_candidates:]:
+    for c in collapsed_candidates[max_review_candidates:]:
         omitted_candidates.append({
             "section_a": c["section_a"],
             "section_b": c["section_b"],
@@ -1640,9 +1735,28 @@ EVALUATION RULES:
             to_repair.append({"metadata": dict(meta)})
 
     rep_meta = {
-        "omitted_candidates": omitted_candidates,
+        "initial_near_duplicate_warnings_count": len(near_duplicate_warnings),
+        "distinctive_concept_candidates_count": len(distinctive_phrase_warnings),
+        "distinctive_concept_candidates": [
+            (pw.metadata.get("phrase") if hasattr(pw, "metadata") else pw.get("metadata", {}).get("phrase"))
+            for pw in distinctive_phrase_warnings
+            if (hasattr(pw, "metadata") and pw.metadata.get("phrase")) or (isinstance(pw, dict) and pw.get("metadata", {}).get("phrase"))
+        ],
+        "candidate_ranking_selection": [
+            {
+                "section_a": c["section_a"],
+                "section_b": c["section_b"],
+                "candidate_text": c["candidate_text"],
+                "is_near_dup": c["is_near_dup"],
+                "is_named": c.get("is_named", False),
+                "is_numeric": c.get("is_numeric", False),
+                "repetition_count": c.get("repetition_count", 2),
+            }
+            for c in evaluated_candidates
+        ],
         "evaluated_count": len(evaluated_candidates),
         "total_candidate_count": len(candidates),
+        "omitted_candidates": omitted_candidates,
     }
     return review_res, to_repair, rep_meta
 
@@ -1663,11 +1777,19 @@ def repair_script_duplicates(
     Bounded to max 1 repair pass.
     """
     if not duplicate_warnings:
-        return sections, {"repair_attempted": False, "repaired_count": 0}
+        return sections, {
+            "repair_attempted": False,
+            "repaired_count": 0,
+            "repaired_section_indices": [],
+            "repaired_section_word_counts": [],
+            "repair_success": False,
+        }
 
     logger.info(f"Triggering pre-TTS duplicate repair for job {job.id} on {len(duplicate_warnings)} duplicate warnings.")
     repaired_sections = [dict(s) for s in sections]
     repaired_count = 0
+    repaired_section_indices = []
+    repaired_section_word_counts = []
 
     sec_to_dups: dict[int, list[dict[str, Any]]] = {}
     for w in duplicate_warnings:
@@ -1792,9 +1914,17 @@ REPAIR CONTRACT:
             )
             repaired_narr = "\n\n".join(seg.narration for seg in res.segments).strip()
             if repaired_narr and len(repaired_narr.split()) >= 10:
+                before_w = sec_data.get("word_count") or len(orig_narr.split())
+                after_w = len(repaired_narr.split())
                 sec_data["narration"] = repaired_narr
-                sec_data["word_count"] = len(repaired_narr.split())
+                sec_data["word_count"] = after_w
                 repaired_count += 1
+                repaired_section_indices.append(sec_idx)
+                repaired_section_word_counts.append({
+                    "section_index": sec_idx,
+                    "before_words": before_w,
+                    "after_words": after_w,
+                })
         except Exception as e:
             logger.warning(f"Duplicate repair for section {sec_idx} failed non-fatally: {e}")
 
@@ -1802,6 +1932,9 @@ REPAIR CONTRACT:
         "repair_attempted": True,
         "repaired_count": repaired_count,
         "original_warnings_count": len(duplicate_warnings),
+        "repaired_section_indices": repaired_section_indices,
+        "repaired_section_word_counts": repaired_section_word_counts,
+        "repair_success": repaired_count > 0,
     }
 
 
@@ -2317,6 +2450,8 @@ def assemble_and_smooth_script(
 def _set_script_substage(job: PodcastJob, substage: str, db: Any = None):
     cfg = dict(job.configuration_state_json or {})
     cfg["script_substage"] = substage
+    if substage == "complete":
+        cfg["script_current_section"] = None
     job.configuration_state_json = cfg
     if db:
         try:
@@ -2357,6 +2492,7 @@ def detect_content_gap(
                         "section_index": s_idx,
                         "heading": sec.get("heading") or s_def.get("heading", f"Section {s_idx}"),
                         "purpose": sec.get("purpose") or s_def.get("purpose", ""),
+                        "key_points": sec.get("key_points") or s_def.get("key_points", []),
                         "actual_words": sec_words,
                         "target_budget": target_budget,
                         "deficit": target_budget - sec_words,
@@ -2377,6 +2513,48 @@ def detect_content_gap(
     }
 
 
+def _compute_evidence_relevance(
+    sec_heading: str,
+    sec_purpose: str,
+    sec_key_points: list[str] | str | None,
+    item: dict[str, Any],
+    exclude_words: set[str] | None = None,
+) -> float:
+    """
+    Score unused evidence against section heading, purpose, key points vs item title, focus area, and snippet.
+    Returns deterministic token-overlap relevance score. Zero indicates no meaningful relationship.
+    """
+    kp_text = " ".join(sec_key_points) if isinstance(sec_key_points, list) else (sec_key_points or "")
+    sec_text = f"{sec_heading} {sec_purpose} {kp_text}".lower()
+    sec_words = {re.sub(r"[^\w\-]", "", w) for w in sec_text.split() if len(w) >= 3 and w not in COMMON_PHRASE_STOPWORDS}
+    if exclude_words:
+        sec_words = sec_words - exclude_words
+    if not sec_words:
+        return 0.0
+
+    title_text = str(item.get("title", "")).lower()
+    focus_text = str(item.get("focus_area", "")).lower()
+    snippet_text = str(item.get("snippet", "")).lower()
+
+    title_words = {re.sub(r"[^\w\-]", "", w) for w in title_text.split() if len(w) >= 3 and w not in COMMON_PHRASE_STOPWORDS}
+    focus_words = {re.sub(r"[^\w\-]", "", w) for w in focus_text.split() if len(w) >= 3 and w not in COMMON_PHRASE_STOPWORDS}
+    snippet_words = {re.sub(r"[^\w\-]", "", w) for w in snippet_text.split() if len(w) >= 3 and w not in COMMON_PHRASE_STOPWORDS}
+
+    all_item_words = title_words | focus_words | snippet_words
+    if exclude_words:
+        all_item_words = all_item_words - exclude_words
+    if not all_item_words:
+        return 0.0
+
+    shared = sec_words & all_item_words
+    if not shared:
+        return 0.0
+
+    # Boost matches in title or focus_area
+    title_focus_shared = sec_words & (title_words | focus_words)
+    return float(len(shared) + 1.5 * len(title_focus_shared))
+
+
 def expand_script_content_gap(
     job: PodcastJob,
     completed_sections: list[dict[str, Any]],
@@ -2386,7 +2564,8 @@ def expand_script_content_gap(
     scope: EvidenceScope,
     db: Any = None,
     status_notifier: Any = None,
-) -> list[dict[str, Any]]:
+    return_metadata: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Fill genuine content gaps with targeted research or uncovered evidence rather than padding,
     strictly preserving existing section content.
@@ -2404,17 +2583,70 @@ def expand_script_content_gap(
         if it.get("evidence_id") and it["evidence_id"] not in covered_evidence_ids and not it.get("is_seed_source")
     ]
 
-    # Step 1: If insufficient unused evidence and research is permitted, perform ONE targeted supplemental research pass
-    new_findings_obtained = False
-    raw_supp_research_data = None
-    if len(uncovered_items) < 2 and scope != EvidenceScope.SOURCE_ONLY:
+    underfilled_secs = gap_info.get("underfilled_sections", [])
+
+    # Find relevant unused evidence for each underfilled section before research
+    relevant_unused_before_by_sec: dict[int, list[dict[str, Any]]] = {}
+    for s_info in underfilled_secs:
+        s_idx = s_info["section_index"]
+        target_s = next((s for s in sections if s.get("section_index") == s_idx), s_info)
+        sh = target_s.get("heading", "")
+        sp = target_s.get("purpose", "")
+        skp = target_s.get("key_points", [])
+        rel = [it for it in uncovered_items if _compute_evidence_relevance(sh, sp, skp, it) >= 1.0]
+        relevant_unused_before_by_sec[s_idx] = rel
+
+    # Sections lacking any relevant unused evidence
+    sections_lacking_relevant_evidence = [
+        s_info for s_info in underfilled_secs
+        if not relevant_unused_before_by_sec.get(s_info["section_index"])
+    ]
+
+    relevant_unused_eids_before = sorted({
+        it["evidence_id"]
+        for rel_list in relevant_unused_before_by_sec.values()
+        for it in rel_list
+        if it.get("evidence_id")
+    })
+
+    # Step 1: Supplemental Research Decision
+    # Supplemental research is triggered when:
+    # - non-SOURCE_ONLY mode
+    # - AND either:
+    #   a) At least one underfilled section lacks relevant unused evidence (even if unrelated items exist globally!)
+    #   b) The episode is overall underfilled and fewer than 2 uncovered items exist globally.
+    supplemental_research_triggered = False
+    new_supp_items: list[dict[str, Any]] = []
+    supp_provider = None
+    supp_model = None
+    search_count = 0
+    source_count = 0
+    gap_focus = None
+    valid_depth = None
+
+    should_trigger_supp = (
+        scope != EvidenceScope.SOURCE_ONLY
+        and (
+            bool(sections_lacking_relevant_evidence)
+            or (gap_info.get("is_overall_underfilled") and len(uncovered_items) < 2)
+        )
+    )
+
+    if should_trigger_supp:
+        supplemental_research_triggered = True
         if status_notifier:
             status_notifier("Performing targeted research to address content gap...")
-        logger.info(f"Targeted gap research triggered for job {job.id} (deficit={deficit} words).")
 
-        # Describe specific gap and covered material
-        underfilled_secs = gap_info.get("underfilled_sections", [])
-        gap_focus = ", ".join(s["heading"] for s in underfilled_secs) if underfilled_secs else topic
+        target_gap_secs = sections_lacking_relevant_evidence if sections_lacking_relevant_evidence else underfilled_secs
+        gap_headings = []
+        for s in target_gap_secs:
+            sec_dict = next((sec for sec in sections if sec.get("section_index") == s.get("section_index")), None)
+            h = (sec_dict.get("heading") if sec_dict else None) or s.get("heading") or f"Section {s.get('section_index', '')}"
+            if h and h not in gap_headings:
+                gap_headings.append(h)
+        gap_focus = ", ".join(gap_headings) if gap_headings else topic
+        logger.info(f"Targeted gap research triggered for job {job.id} on '{gap_focus}' (deficit={deficit} words).")
+
         covered_topics_summary = "\n".join(
             f"- Section {s.get('section_index', idx)}: {s.get('heading', '')} (Key focus: {s.get('purpose', 'N/A')})"
             for idx, s in enumerate(sections, 1)
@@ -2431,11 +2663,13 @@ def expand_script_content_gap(
             f"3. Return specific grounded evidence items with source attribution."
         )
 
-        # Resolve valid research depth from config (default 'low', validated in {'low', 'medium', 'high'})
         configured_depth = getattr(settings, "HERALD_SUPPLEMENTAL_RESEARCH_DEPTH", "low")
         valid_depth = configured_depth.lower() if configured_depth and configured_depth.lower() in ("low", "medium", "high") else "low"
 
         def _do_supplemental_research(p_inst: Any, att: int, src: str) -> dict[str, Any]:
+            nonlocal supp_provider, supp_model
+            supp_provider = getattr(p_inst, "provider_name", None) or getattr(p_inst, "provider_id", "ai")
+            supp_model = getattr(p_inst, "model_name", None) or getattr(p_inst, "model", None)
             return p_inst.generate_grounded_research(
                 source_text=supp_prompt,
                 research_depth=valid_depth,
@@ -2451,10 +2685,13 @@ def expand_script_content_gap(
                 source_text=gap_focus,
                 required_capability="research_grounding",
             )
-            raw_supp_research_data = supp_data
             if supp_data and isinstance(supp_data, dict):
-                # Providers return {"raw_text": ..., "grounding_metadata": ..., "research_sources": ..., ...}
-                # Normalize provider output via normalize_evidence_packet
+                g_meta = supp_data.get("grounding_metadata") or {}
+                queries = g_meta.get("webSearchQueries") or g_meta.get("web_search_queries") or supp_data.get("queries") or []
+                search_count = len(queries)
+                supp_sources = supp_data.get("research_sources") or supp_data.get("sources") or []
+                source_count = len(supp_sources)
+
                 norm_supp = normalize_evidence_packet(
                     topic=gap_focus,
                     scope=scope,
@@ -2462,10 +2699,8 @@ def expand_script_content_gap(
                 )
                 supp_items = norm_supp.get("items") or supp_data.get("items") or []
                 raw_supp_text = supp_data.get("raw_text") or ""
-                supp_sources = supp_data.get("research_sources") or supp_data.get("sources") or []
 
                 existing_eids = {it.get("evidence_id") for it in all_packet_items}
-                new_items = []
                 for idx, item in enumerate(supp_items, 1):
                     item_dict = dict(item)
                     new_eid = f"ev_supp_{idx}"
@@ -2476,35 +2711,39 @@ def expand_script_content_gap(
                     if not item_dict.get("focus_area") or item_dict["focus_area"] in ("Source Registry", "External Grounded Research"):
                         item_dict["focus_area"] = gap_focus
                     item_dict["is_seed_source"] = False
-                    new_items.append(item_dict)
+                    new_supp_items.append(item_dict)
                     existing_eids.add(new_eid)
 
-                if not new_items and raw_supp_text:
+                if not new_supp_items and raw_supp_text:
                     new_eid = f"ev_supp_{len(all_packet_items) + 1}"
-                    new_items.append({
+                    first_supp_src = supp_sources[0] if supp_sources else {}
+                    first_title = first_supp_src.get("title") if isinstance(first_supp_src, dict) else None
+                    first_url = first_supp_src.get("url") if isinstance(first_supp_src, dict) else None
+                    first_pub = first_supp_src.get("publisher") or first_supp_src.get("domain") if isinstance(first_supp_src, dict) else None
+                    new_supp_items.append({
                         "evidence_id": new_eid,
-                        "title": f"Targeted Findings on {gap_focus}",
-                        "publisher": "Supplemental Grounded Research",
-                        "source_url": supp_sources[0].get("url") if supp_sources else None,
+                        "title": first_title or f"Targeted Findings on {gap_focus}",
+                        "actual_source_title": first_title,
+                        "publisher": first_pub or "Supplemental Grounded Research",
+                        "source_url": first_url,
                         "snippet": raw_supp_text.strip(),
                         "is_seed_source": False,
                         "focus_area": gap_focus,
                     })
 
-                if new_items:
-                    all_packet_items.extend(new_items)
+                if new_supp_items:
+                    all_packet_items.extend(new_supp_items)
                     evidence_packet["items"] = all_packet_items
                     job.evidence_packet_json = evidence_packet
-                    uncovered_items.extend(new_items)
-                    new_findings_obtained = True
+                    uncovered_items.extend(new_supp_items)
                     record_job_diagnostic_event(
                         job.id,
                         "INFO",
                         "research",
                         "SUPPLEMENTAL_RESEARCH_COMPLETED",
-                        f"Targeted research pass acquired {len(new_items)} new evidence items for '{gap_focus}'.",
+                        f"Targeted research pass acquired {len(new_supp_items)} new evidence items for '{gap_focus}'.",
                         metadata={
-                            "new_evidence_count": len(new_items),
+                            "new_evidence_count": len(new_supp_items),
                             "gap_focus": gap_focus,
                             "deficit": deficit,
                             "research_depth": valid_depth,
@@ -2516,19 +2755,12 @@ def expand_script_content_gap(
         except Exception as supp_err:
             logger.warning(f"Targeted gap research failed non-fatally; proceeding with available evidence: {supp_err}")
 
-    # Helper function for matching evidence to section relevance
-    def _compute_relevance(sec_heading: str, sec_purpose: str, item: dict[str, Any]) -> int:
-        sec_text = f"{sec_heading} {sec_purpose}".lower()
-        sec_words = {re.sub(r"[^\w\-]", "", w) for w in sec_text.split() if len(w) >= 4 and w not in COMMON_PHRASE_STOPWORDS}
-        item_text = f"{item.get('title', '')} {item.get('snippet', '')} {item.get('focus_area', '')}".lower()
-        item_words = {re.sub(r"[^\w\-]", "", w) for w in item_text.split() if len(w) >= 4 and w not in COMMON_PHRASE_STOPWORDS}
-        return len(sec_words.intersection(item_words))
+    # Step 2: In-place section expansion with strictly relevant evidence (score >= 1.0)
+    sections_expanded = []
+    section_evidence_used = {}
+    section_word_counts = []
 
-    # Step 2: Use uncovered/supplemental items to expand underfilled sections
-    underfilled_secs = gap_info.get("underfilled_sections", [])
-    any_section_expanded = False
     if underfilled_secs and uncovered_items:
-        # Loop through underfilled sections to allow multi-section expansion from the single supplemental research pass
         for sec_to_expand in underfilled_secs:
             s_idx = sec_to_expand["section_index"]
             target_sec_dict = next((s for s in sections if s.get("section_index") == s_idx), None)
@@ -2537,17 +2769,23 @@ def expand_script_content_gap(
 
             sec_h = target_sec_dict.get("heading", "")
             sec_p = target_sec_dict.get("purpose", "")
+            sec_kp = target_sec_dict.get("key_points", [])
 
-            # Match evidence to section relevance
-            ranked_items = sorted(
-                uncovered_items,
-                key=lambda it: _compute_relevance(sec_h, sec_p, it),
+            # Filter uncovered items to ONLY relevant items (score >= 1.0)
+            relevant_items = [
+                it for it in uncovered_items
+                if _compute_evidence_relevance(sec_h, sec_p, sec_kp, it) >= 1.0
+            ]
+            if not relevant_items:
+                # NEVER use zero-relevance evidence merely because it is available! Leave section shorter.
+                continue
+
+            # Rank by relevance score descending
+            relevant_items.sort(
+                key=lambda it: _compute_evidence_relevance(sec_h, sec_p, sec_kp, it),
                 reverse=True,
             )
-            # Pick best match; if no word overlap, allow first remaining uncovered item
-            best_item = ranked_items[0] if ranked_items else None
-            if not best_item:
-                continue
+            best_item = relevant_items[0]
 
             curr_narr = target_sec_dict.get("narration", "")
             curr_words = len(curr_narr.split())
@@ -2612,10 +2850,15 @@ EXPANSION CONTRACT:
                     target_sec_dict["word_count"] = exp_words
                     if ev_id_used:
                         target_sec_dict.setdefault("relevant_evidence_ids", []).append(ev_id_used)
-                        # Remove used evidence item from uncovered_items so next section uses different evidence
                         uncovered_items = [it for it in uncovered_items if it.get("evidence_id") != ev_id_used]
                     job.section_progress_json = sections
-                    any_section_expanded = True
+                    sections_expanded.append(s_idx)
+                    section_evidence_used[str(s_idx)] = [ev_id_used]
+                    section_word_counts.append({
+                        "section_index": s_idx,
+                        "before_words": curr_words,
+                        "after_words": exp_words,
+                    })
                     record_job_diagnostic_event(
                         job.id,
                         "INFO",
@@ -2634,87 +2877,203 @@ EXPANSION CONTRACT:
             except Exception as exp_err:
                 logger.warning(f"In-place section expansion for section {s_idx} failed non-fatally: {exp_err}")
 
-        if any_section_expanded:
-            return sections
+    # Step 3: Restricted Extra Section Fallback
+    # A new section may be appended ONLY when:
+    # 1. gap_info["is_overall_underfilled"] is true;
+    # 2. Episode remains materially below target (< 80% tolerance) after in-place attempts;
+    # 3. Proposed evidence is relevant to overall topic (score >= 1.0);
+    # 4. Evidence represents a genuinely distinct narrative subject not belonging to existing sections (max existing sec score < 1.0).
+    extra_section_added = False
+    extra_section_reason = None
+    curr_total_words = sum(s.get("word_count", 0) for s in sections)
+    underfill_tolerance = getattr(settings, "HERALD_TOTAL_UNDERFILL_TOLERANCE_RATIO", 0.80)
+    is_still_overall_underfilled = (curr_total_words / float(planned_target)) < underfill_tolerance
 
-    # Fallback to generating a bounded extra section if uncovered items exist
-    if uncovered_items and scope != EvidenceScope.SOURCE_ONLY:
-        first_uncovered = uncovered_items[0]
-        uncovered_heading = first_uncovered.get("title") or f"Additional Findings on {topic}"
-        logger.info(
-            f"Long-form underfilled ({total_words}/{planned_target} words) with uncovered evidence. "
-            f"Generating bounded section on uncovered material: {uncovered_heading}"
-        )
-        uncovered_sec_def = {
-            "section_index": len(sections) + 1,
-            "heading": uncovered_heading,
-            "purpose": f"Analyze specific uncovered findings regarding: {first_uncovered.get('focus_area', topic)}.",
-            "word_budget": deficit,
-            "word_budget_min": int(round(deficit * 0.85)),
-            "word_budget_max": int(round(deficit * 1.15)),
-            "relevant_evidence_ids": [it["evidence_id"] for it in uncovered_items[:3]],
-            "key_points": [first_uncovered.get("snippet", "")[:120]],
-            "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
-            "transition_intent": "Explore additional uncovered evidence",
-        }
-        covered_ctx = build_already_covered_context(
-            sections,
-            current_heading=uncovered_heading,
-            current_purpose=uncovered_sec_def["purpose"],
-            current_idx=uncovered_sec_def["section_index"],
-        )
-        try:
-            extra_sec = generate_single_section(
-                job=job,
-                section_info=uncovered_sec_def,
-                topic=topic,
-                evidence_packet=evidence_packet,
-                previous_summary=covered_ctx,
-                scope=scope,
-                db=db,
+    if (
+        gap_info.get("is_overall_underfilled")
+        and is_still_overall_underfilled
+        and uncovered_items
+        and scope != EvidenceScope.SOURCE_ONLY
+    ):
+        # Look for genuinely distinct uncovered evidence relevant to topic but distinct from existing sections
+        candidate_extra_item = None
+        topic_words = {re.sub(r"[^\w\-]", "", w.lower()) for w in topic.split() if len(w) >= 3 and w.lower() not in COMMON_PHRASE_STOPWORDS}
+        for it in uncovered_items:
+            topic_rel = _compute_evidence_relevance(topic, "", None, it)
+            if topic_rel >= 1.0:
+                max_sec_rel = max(
+                    (
+                        _compute_evidence_relevance(
+                            s.get("heading", ""),
+                            s.get("purpose", ""),
+                            s.get("key_points"),
+                            it,
+                            exclude_words=topic_words,
+                        )
+                        for s in sections
+                    ),
+                    default=0.0,
+                )
+                if max_sec_rel < 1.0:
+                    candidate_extra_item = it
+                    break
+
+        if candidate_extra_item:
+            uncovered_heading = candidate_extra_item.get("title") or f"Additional Findings on {topic}"
+            logger.info(
+                f"Long-form underfilled ({curr_total_words}/{planned_target} words) with distinct uncovered evidence. "
+                f"Generating bounded extra section: {uncovered_heading}"
             )
-            if extra_sec.get("word_count", 0) > 100:
-                extra_sec["cumulative_words"] = total_words + extra_sec.get("word_count", 0)
-                extra_sec["remaining_target"] = max(0, planned_target - extra_sec["cumulative_words"])
-                sections.append(extra_sec)
-                job.section_progress_json = sections
-                record_job_diagnostic_event(
-                    job.id,
-                    "INFO",
-                    "duration",
-                    "UNCOVERED_EVIDENCE_SECTION_GENERATED",
-                    f"Generated bounded extra section on uncovered evidence: {uncovered_heading}",
-                    metadata={
-                        "extra_section_heading": uncovered_heading,
-                        "word_count": extra_sec.get("word_count", 0),
-                        "uncovered_evidence_ids": uncovered_sec_def["relevant_evidence_ids"],
-                    },
+            extra_deficit = planned_target - curr_total_words
+            uncovered_sec_def = {
+                "section_index": len(sections) + 1,
+                "heading": uncovered_heading,
+                "purpose": f"Analyze specific uncovered findings regarding: {candidate_extra_item.get('focus_area', topic)}.",
+                "word_budget": extra_deficit,
+                "word_budget_min": int(round(extra_deficit * 0.85)),
+                "word_budget_max": int(round(extra_deficit * 1.15)),
+                "relevant_evidence_ids": [candidate_extra_item.get("evidence_id")],
+                "key_points": [candidate_extra_item.get("snippet", "")[:120]],
+                "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
+                "transition_intent": "Explore additional uncovered evidence",
+            }
+            covered_ctx = build_already_covered_context(
+                sections,
+                current_heading=uncovered_heading,
+                current_purpose=uncovered_sec_def["purpose"],
+                current_idx=uncovered_sec_def["section_index"],
+            )
+            try:
+                extra_sec = generate_single_section(
+                    job=job,
+                    section_info=uncovered_sec_def,
+                    topic=topic,
+                    evidence_packet=evidence_packet,
+                    previous_summary=covered_ctx,
+                    scope=scope,
                     db=db,
                 )
-                if db:
-                    db.commit()
-        except Exception as extra_err:
-            logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
+                if extra_sec.get("word_count", 0) > 100:
+                    extra_sec["cumulative_words"] = curr_total_words + extra_sec.get("word_count", 0)
+                    extra_sec["remaining_target"] = max(0, planned_target - extra_sec["cumulative_words"])
+                    sections.append(extra_sec)
+                    job.section_progress_json = sections
+                    extra_section_added = True
+                    extra_section_reason = "overall_underfill_with_distinct_topic_material"
+                    record_job_diagnostic_event(
+                        job.id,
+                        "INFO",
+                        "duration",
+                        "UNCOVERED_EVIDENCE_SECTION_GENERATED",
+                        f"Generated bounded extra section on uncovered evidence: {uncovered_heading}",
+                        metadata={
+                            "extra_section_heading": uncovered_heading,
+                            "word_count": extra_sec.get("word_count", 0),
+                            "uncovered_evidence_ids": uncovered_sec_def["relevant_evidence_ids"],
+                        },
+                        db=db,
+                    )
+                    if db:
+                        db.commit()
+            except Exception as extra_err:
+                logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
+        else:
+            extra_section_reason = "no_distinct_uncovered_evidence"
     else:
-        underfill_msg = (
-            f"Generated {total_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
-            "No uncovered evidence remaining; accepting faithful shorter script without artificial recap filler."
-        )
-        logger.info(underfill_msg)
+        if not is_still_overall_underfilled:
+            extra_section_reason = "acceptable_overall_duration"
+        else:
+            extra_section_reason = "no_uncovered_items_or_source_only"
+
+    final_total_words = sum(s.get("word_count", 0) for s in sections)
+    final_fill_ratio = final_total_words / float(planned_target)
+
+    if not extra_section_added and (gap_info.get("is_overall_underfilled") or is_still_overall_underfilled):
         record_job_diagnostic_event(
             job.id,
-            "WARNING",
+            "INFO",
             "duration",
             "DURATION_UNDERFILL_ACCEPTED",
-            underfill_msg,
+            f"Underfill accepted without extra section: {extra_section_reason} (words: {final_total_words}/{planned_target}).",
             metadata={
-                "total_words": total_words,
-                "planned_target": planned_target,
-                "fill_ratio": round(fill_ratio, 3),
+                "reason": extra_section_reason,
+                "words": final_total_words,
+                "target_words": planned_target,
             },
             db=db,
         )
+        if db:
+            try:
+                db.commit()
+            except Exception:
+                pass
 
+    # Machine-readable diagnostics dictionary
+    gap_diag_meta = {
+        "gap_detected": bool(gap_info.get("deficit", 0) > 0 or gap_info.get("is_overall_underfilled") or underfilled_secs),
+        "initial_total_word_count": gap_info.get("total_words", total_words),
+        "target_words": planned_target,
+        "deficit": gap_info.get("deficit", deficit),
+        "initial_fill_ratio": round(gap_info.get("fill_ratio", fill_ratio), 3),
+        "fill_ratio": round(gap_info.get("fill_ratio", fill_ratio), 3),
+        "underfilled_sections": [
+            {
+                "section_index": s["section_index"],
+                "target_words": s.get("target_budget", 0),
+                "original_words": s.get("actual_words", 0),
+                "deficit": s.get("deficit", 0),
+            }
+            for s in underfilled_secs
+        ],
+        "relevant_unused_evidence_ids": relevant_unused_eids_before,
+        "supplemental_research_triggered": supplemental_research_triggered,
+        "research_depth": valid_depth,
+        "provider": supp_provider,
+        "model": supp_model,
+        "search_count": search_count,
+        "source_count": source_count,
+        "gap_focus": gap_focus,
+        "supplemental_research": {
+            "triggered": supplemental_research_triggered,
+            "provider": supp_provider,
+            "model": supp_model,
+            "search_count": search_count,
+            "source_count": source_count,
+            "new_evidence_count": len(new_supp_items),
+            "gap_focus": gap_focus,
+            "research_depth": valid_depth,
+        },
+        "normalized_supplemental_evidence_ids": [it["evidence_id"] for it in new_supp_items if it.get("evidence_id")],
+        "supplemental_sources": [
+            {
+                "evidence_id": it.get("evidence_id"),
+                "title": it.get("title") or it.get("actual_source_title"),
+                "source_url": it.get("source_url"),
+            }
+            for it in new_supp_items
+        ],
+        "sections_expanded": sections_expanded,
+        "section_evidence_used": section_evidence_used,
+        "section_word_counts": section_word_counts,
+        "extra_section_added": extra_section_added,
+        "extra_section_reason": extra_section_reason,
+        "extra_section_skipped_reason": (extra_section_reason if not extra_section_added else None),
+        "final_total_words": final_total_words,
+        "final_fill_ratio": round(final_fill_ratio, 3),
+    }
+
+    # Store gap diagnostics into configuration_state_json
+    cfg = dict(job.configuration_state_json or {}) if isinstance(getattr(job, "configuration_state_json", None), dict) else {}
+    cfg["gap_diagnostics"] = gap_diag_meta
+    job.configuration_state_json = cfg
+    if db:
+        try:
+            db.commit()
+        except Exception:
+            pass
+
+    if return_metadata:
+        return sections, gap_diag_meta
     return sections
 
 
@@ -3125,11 +3484,27 @@ def execute_unified_long_form_pipeline(
                 topic=topic,
                 db=db,
             )
-            rep_diag["review_performed"] = (review_res is not None)
-            rep_diag["substantive_duplicates_found"] = len(confirmed_candidates)
-            rep_diag["omitted_candidates"] = rep_meta.get("omitted_candidates", [])
-            rep_diag["evaluated_candidate_count"] = rep_meta.get("evaluated_count", 0)
-            rep_diag["total_candidate_count"] = rep_meta.get("total_candidate_count", 0)
+            rep_diag.update({
+                "initial_near_duplicate_warnings_count": rep_meta.get("initial_near_duplicate_warnings_count", len(dup_warns)),
+                "distinctive_concept_candidates_count": rep_meta.get("distinctive_concept_candidates_count", len(distinctive_warns)),
+                "distinctive_concept_candidates": rep_meta.get("distinctive_concept_candidates", []),
+                "candidate_ranking_selection": rep_meta.get("candidate_ranking_selection", []),
+                "candidate_count_evaluated": rep_meta.get("evaluated_count", 0),
+                "omitted_candidates": rep_meta.get("omitted_candidates", []),
+                "review_results": [r.model_dump() for r in review_res.reviews] if review_res else [],
+                "confirmed_substantive_repetitions": [
+                    {
+                        "section_a": c["metadata"]["section_a"],
+                        "section_b": c["metadata"]["section_b"],
+                        "concept": c["metadata"].get("concept") or c["metadata"].get("passage_b"),
+                        "explanation": c["metadata"].get("explanation"),
+                    }
+                    for c in confirmed_candidates
+                ],
+                "review_performed": (review_res is not None),
+                "substantive_duplicates_found": len(confirmed_candidates),
+                "total_candidate_count": rep_meta.get("total_candidate_count", 0),
+            })
 
         if confirmed_candidates:
             repaired_secs, dup_meta = repair_script_duplicates(
@@ -3141,7 +3516,12 @@ def execute_unified_long_form_pipeline(
                 scope=effective_scope,
                 db=db,
             )
-            rep_diag["repaired_count"] = dup_meta.get("repaired_count", 0)
+            rep_diag.update({
+                "repaired_count": dup_meta.get("repaired_count", 0),
+                "repaired_section_indexes": dup_meta.get("repaired_section_indices", []),
+                "repaired_section_word_counts": dup_meta.get("repaired_section_word_counts", []),
+                "repair_success": dup_meta.get("repair_success", False),
+            })
             if dup_meta.get("repaired_count", 0) > 0:
                 repaired_sections = repaired_secs
                 assembled_script = assemble_and_smooth_script(
@@ -3158,6 +3538,10 @@ def execute_unified_long_form_pipeline(
                     outline=outline,
                 )
                 job.script_json = cleaned_script
+                rep_diag["final_repetition_findings"] = {
+                    "remaining_near_duplicate_warnings": len(q_report.near_duplicate_warnings),
+                    "remaining_distinctive_phrase_warnings": len(q_report.distinctive_phrase_warnings),
+                }
                 record_job_diagnostic_event(
                     job.id,
                     "INFO",
@@ -3188,7 +3572,7 @@ def execute_unified_long_form_pipeline(
     if gap_info and not is_literal:
         before_words = sum(s.get("word_count", 0) for s in repaired_sections)
         before_eids = {ev for s in repaired_sections for ev in s.get("relevant_evidence_ids", [])}
-        expanded_sections = expand_script_content_gap(
+        expanded_sections, gap_diag_meta = expand_script_content_gap(
             job=job,
             completed_sections=repaired_sections,
             gap_info=gap_info,
@@ -3197,7 +3581,9 @@ def execute_unified_long_form_pipeline(
             scope=effective_scope,
             db=db,
             status_notifier=status_notifier,
+            return_metadata=True,
         )
+        gap_diag.update(gap_diag_meta)
         after_words = sum(s.get("word_count", 0) for s in expanded_sections)
         after_eids = {ev for s in expanded_sections for ev in s.get("relevant_evidence_ids", [])}
         if after_words > before_words or len(expanded_sections) > len(repaired_sections):
@@ -3344,7 +3730,8 @@ def execute_unified_long_form_pipeline(
         "duration_estimation": dur_info,
         "quality_gate": q_report.to_dict(),
         "content_warning": bool(audit_res.get("content_warning")),
-        "script_substage": "fidelity_audit",
+        "script_substage": "complete",
+        "script_current_section": None,
         "repetition_diagnostics": rep_diag,
         "gap_diagnostics": gap_diag,
     })
