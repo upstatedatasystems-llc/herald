@@ -152,20 +152,46 @@ COMMON_PHRASE_STOPWORDS = {
 }
 
 
-def _extract_distinctive_phrases(text: str, min_words: int = 4, max_words: int = 6) -> set[str]:
-    """Extract distinctive 4-6 word candidate phrases, filtering out common stop-word boilerplate."""
+def _extract_distinctive_phrases(text: str, min_words: int = 2, max_words: int = 6) -> set[str]:
+    """
+    Extract distinctive candidate phrases and concepts (2-6 words), filtering out common stop-word boilerplate.
+    Conservatively identifies distinctive concepts (e.g. capitalized terms, numbers, or content-rich technical phrases).
+    """
     raw_tokens = text.split()
-    words = [re.sub(r"[^\w\-]", "", w.lower()) for w in raw_tokens]
-    words = [w for w in words if w]
-    if len(words) < min_words:
+    # Keep original token strings for capitalization/digit inspection
+    clean_tokens = [re.sub(r"[^\w\-]", "", w) for w in raw_tokens]
+    clean_tokens = [w for w in clean_tokens if w]
+    if len(clean_tokens) < min_words:
         return set()
+
     phrases = set()
+    n_tokens = len(clean_tokens)
     for n in range(min_words, max_words + 1):
-        for i in range(len(words) - n + 1):
-            ngram = words[i : i + n]
-            non_stop = [w for w in ngram if w not in COMMON_PHRASE_STOPWORDS]
-            if len(non_stop) >= 2 and len(non_stop) / len(ngram) >= 0.4:
-                phrases.add(" ".join(ngram))
+        for i in range(n_tokens - n + 1):
+            window = clean_tokens[i : i + n]
+            lower_window = [w.lower() for w in window]
+            non_stop = [w for w in lower_window if w not in COMMON_PHRASE_STOPWORDS]
+
+            # All tokens shouldn't be stopwords
+            if not non_stop:
+                continue
+
+            if n in (2, 3):
+                # Conservative criteria for short 2-3 word candidate phrases:
+                # 1. Capitalized / Title-cased terms (e.g. "Crazy Ivan", "Mark II")
+                # 2. Contains digits or hyphens (e.g. "300,000-gallon tank", "fp8-fast")
+                # 3. All words are substantive content words (>= 4 chars) not in stopwords (e.g. "sonar baffles", "teardrop hull")
+                is_capitalized = all(w[0].isupper() for w in window if w)
+                has_digit_or_hyphen = any(any(ch.isdigit() for ch in w) or "-" in w for w in window)
+                all_substantive = len(non_stop) == n and all(len(w) >= 4 for w in lower_window)
+
+                if is_capitalized or has_digit_or_hyphen or all_substantive:
+                    phrases.add(" ".join(lower_window))
+            else:
+                # For 4-6 word n-grams, require at least 2 non-stopwords and >= 40% density
+                if len(non_stop) >= 2 and len(non_stop) / len(lower_window) >= 0.4:
+                    phrases.add(" ".join(lower_window))
+
     return phrases
 
 

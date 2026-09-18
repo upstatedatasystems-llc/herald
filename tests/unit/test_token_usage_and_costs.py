@@ -186,3 +186,60 @@ def test_literal_mode_truthful_presentation():
     c_msg = format_completion(job, actual_chunks_count=2, file_size_bytes=1_000_000)
     assert "AI Model:" not in c_msg
     assert "AI Cost:" not in c_msg
+
+
+def test_missing_breakdown_symmetric_vs_asymmetric():
+    """Verify that calculate_interaction_cost falls back only for symmetric rates and refuses to guess for asymmetric."""
+    # Groq compound-mini: prompt $0.20 / 1M, completion $0.20 / 1M (symmetric)
+    inter_sym = AIInteraction(
+        id="call-sym",
+        job_id="job-1",
+        provider="groq",
+        model="groq/compound-mini",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=1_000_000,
+    )
+    cost, known = calculate_interaction_cost(inter_sym)
+    assert known is True
+    assert cost == 0.20
+
+    # Gemini 3.5 Flash: prompt $0.075 / 1M, completion $0.30 / 1M (asymmetric)
+    inter_asym = AIInteraction(
+        id="call-asym",
+        job_id="job-1",
+        provider="gemini",
+        model="gemini-3.5-flash",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=1_000_000,
+    )
+    cost, known = calculate_interaction_cost(inter_asym)
+    assert known is False
+    assert cost is None
+
+
+def test_token_bearing_completeness():
+    """Verify that zero-token interactions do not break is_cost_complete."""
+    inter_zero = AIInteraction(
+        id="call-zero",
+        job_id="job-1",
+        provider="unregistered_provider",
+        model="unregistered_model",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+    )
+    inter_paid = AIInteraction(
+        id="call-paid",
+        job_id="job-1",
+        provider="gemini",
+        model="gemini-3.5-flash",
+        prompt_tokens=1000,
+        completion_tokens=1000,
+        total_tokens=2000,
+    )
+
+    summary = aggregate_job_tokens_and_cost([inter_zero, inter_paid])
+    assert summary.is_cost_complete is True
+    assert summary.is_cost_available is True

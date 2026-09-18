@@ -11,51 +11,52 @@ from herald.db.models import AIInteraction
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Pricing rates per 1,000,000 tokens in USD."""
+    """Pricing rates per 1,000,000 tokens in USD with effective rate date."""
     prompt_per_m: float
     completion_per_m: float
+    effective_date: str = "2024-10-01"
 
 
 # Canonical pricing table keyed strictly by exact lowercase (provider_id, model_id) tuples.
 # Rates in USD per 1M tokens.
 PRICING_TABLE: dict[tuple[str, str], ModelPricing] = {
     # Gemini
-    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30),
-    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30),
-    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30),
-    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30),
-    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00),
+    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-10-01"),
+    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01"),
+    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01"),
+    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-05-14"),
+    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00, effective_date="2024-05-14"),
 
     # Groq (rates per 1M tokens)
-    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79),
-    ("groq", "groq/compound"): ModelPricing(0.59, 0.79),
-    ("groq", "groq/compound-mini"): ModelPricing(0.20, 0.20),
-    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80),
-    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15),
+    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79, effective_date="2024-12-06"),
+    ("groq", "groq/compound"): ModelPricing(0.59, 0.79, effective_date="2025-01-01"),
+    ("groq", "groq/compound-mini"): ModelPricing(0.20, 0.20, effective_date="2025-01-01"),
+    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80, effective_date="2025-01-01"),
+    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15, effective_date="2025-01-01"),
 
     # OpenAI
-    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00),
-    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60),
+    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00, effective_date="2024-05-13"),
+    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60, effective_date="2024-07-18"),
 
     # Anthropic
-    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00),
-    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00),
-    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00),
+    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00, effective_date="2025-02-19"),
+    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00, effective_date="2024-10-22"),
+    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00, effective_date="2024-10-22"),
 
     # Mistral
-    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00),
+    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00, effective_date="2024-11-18"),
 
     # Cloudflare Workers AI
-    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40),
-    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30),
-    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30),
-    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20),
+    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40, effective_date="2024-12-01"),
+    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30, effective_date="2024-12-01"),
+    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30, effective_date="2024-12-01"),
+    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20, effective_date="2024-12-01"),
 
     # OpenRouter
-    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40),
+    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40, effective_date="2024-12-06"),
 
     # Ollama / Local AI models are free ($0.00)
-    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0),
+    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0, effective_date="2024-09-25"),
 }
 
 
@@ -114,10 +115,12 @@ def calculate_interaction_cost(interaction: AIInteraction) -> tuple[float | None
     prompt_tok = interaction.prompt_tokens or 0
     comp_tok = interaction.completion_tokens or 0
 
-    # Fallback to total_tokens split if individual breakdown missing
+    # Only fall back to total_tokens if rates are symmetric; do not guess asymmetric rates
     if prompt_tok == 0 and comp_tok == 0 and interaction.total_tokens:
-        cost = (interaction.total_tokens / 1_000_000.0) * max(pricing.prompt_per_m, pricing.completion_per_m)
-        return cost, True
+        if pricing.prompt_per_m == pricing.completion_per_m:
+            cost = (interaction.total_tokens / 1_000_000.0) * pricing.prompt_per_m
+            return cost, True
+        return None, False
 
     cost = (prompt_tok / 1_000_000.0) * pricing.prompt_per_m + (comp_tok / 1_000_000.0) * pricing.completion_per_m
     return cost, True
@@ -132,7 +135,8 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
     completion_tokens = 0
     total_tokens = 0
     total_cost = 0.0
-    known_cost_interactions = 0
+    known_cost_token_bearing_interactions = 0
+    total_token_bearing_interactions = 0
     total_interactions = 0
     by_model: dict[str, dict[str, Any]] = {}
 
@@ -146,10 +150,15 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
         completion_tokens += c_tok
         total_tokens += t_tok
 
+        is_token_bearing = (t_tok > 0)
+        if is_token_bearing:
+            total_token_bearing_interactions += 1
+
         cost, is_known = calculate_interaction_cost(inter)
         if is_known and cost is not None:
             total_cost += cost
-            known_cost_interactions += 1
+            if is_token_bearing:
+                known_cost_token_bearing_interactions += 1
 
         key = f"{inter.provider}:{inter.model}"
         if key not in by_model:
@@ -181,8 +190,13 @@ def aggregate_job_tokens_and_cost(interactions: Iterable[AIInteraction]) -> JobT
             by_model={},
         )
 
-    is_cost_complete = (known_cost_interactions == total_interactions)
-    is_cost_available = (known_cost_interactions > 0)
+    # If no calls had tokens, consider complete if all had known pricing models
+    if total_token_bearing_interactions == 0:
+        is_cost_complete = True
+        is_cost_available = True
+    else:
+        is_cost_complete = (known_cost_token_bearing_interactions == total_token_bearing_interactions)
+        is_cost_available = (known_cost_token_bearing_interactions > 0)
 
     return JobTokenAndCostSummary(
         prompt_tokens=prompt_tokens,

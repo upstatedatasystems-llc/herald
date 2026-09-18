@@ -161,3 +161,34 @@ def is_isolated_section_instruction(instructions: str | None) -> bool:
         or "ISOLATED SECTION" in text
     )
 
+
+class RepetitionReviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_b: int = Field(..., description="The later section index being evaluated")
+    section_a: int = Field(..., description="The earlier section index where concept first appeared")
+    concept_or_passage: str = Field(..., description="The distinctive phrase or passage candidate evaluated")
+    is_substantive_repetition: bool = Field(
+        ...,
+        description=(
+            "True if section_b repeats explanations, facts, or substantive narrative from section_a. "
+            "False if it is merely legitimate recurring terminology, thematic callback, or technical term."
+        ),
+    )
+    explanation: str = Field(..., description="Reasoning for why this is or is not substantive repetition")
+    passage_to_repair: str | None = Field(
+        default=None,
+        description="The specific repetitive passage in section_b that should be rewritten/condensed, if substantive",
+    )
+
+
+class RepetitionReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    has_substantive_repetition: bool = Field(..., description="True if any candidates contain substantive repetition")
+    reviews: list[RepetitionReviewItem] = Field(
+        default_factory=list,
+        description="Structured repetition evaluation for each candidate",
+    )
+
+

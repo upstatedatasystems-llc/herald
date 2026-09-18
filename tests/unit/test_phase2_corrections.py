@@ -166,7 +166,7 @@ def test_test_reel_dry_run_diagnostics(tmp_path: Path):
     assert intro["boundary_type"] == "BRANDING"
     assert intro["pause_duration_ms"] == int(round(PAUSE_BRANDING * 1000))
     assert intro["status"] == "DRY_RUN"
-    assert "This is Herald" in intro["canonical_text"]
+    assert "Herald presents:" in intro["canonical_text"]
 
     # Body chunk verification
     body = chunks[1]

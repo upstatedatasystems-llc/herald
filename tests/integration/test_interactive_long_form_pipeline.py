@@ -135,8 +135,10 @@ def test_vertical_slice_topic_mode_20m_research(db_session, monkeypatch):
         actual_body_duration_seconds=1200.0,
         content_mode=job.content_mode,
     )
-    assert "20 minutes" in intro_text or "20-minute" in intro_text
-    assert "Nuclear Fusion Commercialization" in intro_text
+    assert "Herald presents: Nuclear Fusion Commercialization." in intro_text
+    assert "research topic using" in intro_text
+    # No mechanical duration claim should be made in the intro
+    assert "20 minutes" not in intro_text and "20-minute" not in intro_text
 
     # Step 4: Worker processes TTS & Branding
     kokoro = KokoroClient()

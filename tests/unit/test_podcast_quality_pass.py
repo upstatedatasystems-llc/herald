@@ -409,3 +409,156 @@ def test_worker_proceeds_when_explicitly_approved(db_session, tmp_path):
 
         db_session.refresh(job)
         assert job.failed_stage != "FIDELITY_VERIFICATION"
+
+
+def test_extract_distinctive_phrases_short_concepts():
+    """Verify _extract_distinctive_phrases captures 2-3 word distinctive concepts (capitalized, numeric, or technical)."""
+    text = "The submarine executed a Crazy Ivan while maneuvering near the 300,000-gallon tank to test sonar baffles."
+    phrases = _extract_distinctive_phrases(text, min_words=2, max_words=6)
+    assert any("crazy ivan" in p for p in phrases)
+    assert any("300000-gallon tank" in p or "300,000-gallon tank" in p or "tank" in p for p in phrases)
+    assert any("sonar baffles" in p for p in phrases)
+
+
+def test_review_script_repetition_filters_terminology():
+    """review_script_repetition calls structured output and differentiates terminology from repetition."""
+    from herald.ai.long_form import review_script_repetition
+    from herald.ai.schema import RepetitionReviewResponse, RepetitionReviewItem
+
+    job = PodcastJob(id="rep-review-job")
+    sections = [
+        {"section_index": 1, "heading": "Submarine Tactics", "narration": "They discussed the Crazy Ivan maneuver."},
+        {"section_index": 2, "heading": "Acoustic Detection", "narration": "During the Crazy Ivan maneuver they listened."},
+    ]
+
+    # Mock structured response confirming it's just recurring terminology
+    mock_resp = RepetitionReviewResponse(
+        has_substantive_repetition=False,
+        reviews=[
+            RepetitionReviewItem(
+                section_b=2,
+                section_a=1,
+                concept_or_passage="Crazy Ivan",
+                is_substantive_repetition=False,
+                explanation="Legitimate recurring tactical term.",
+                passage_to_repair=None,
+            )
+        ]
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res, to_repair = review_script_repetition(
+            job=job,
+            completed_sections=sections,
+            near_duplicate_warnings=[],
+            distinctive_phrase_warnings=[
+                MagicMock(metadata={"phrase": "crazy ivan", "sections": [1, 2]})
+            ],
+            topic="Submarine Tactics",
+        )
+        assert res.has_substantive_repetition is False
+        assert len(to_repair) == 0  # No repair needed for legitimate terminology!
+
+
+def test_targeted_gap_research_triggered_when_no_uncovered_evidence():
+    """expand_script_content_gap executes supplemental research pass when evidence is exhausted in non-SOURCE_ONLY mode."""
+    job = PodcastJob(id="gap-research-job")
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Core Analysis",
+            "purpose": "Analyze core principles",
+            "narration": "Brief analysis that fell short.",
+            "word_count": 50,
+            "relevant_evidence_ids": ["ev_1"],
+        }
+    ]
+    evidence_packet = {
+        "items": [
+            {"evidence_id": "ev_1", "snippet": "Old evidence already covered", "is_seed_source": False}
+        ]
+    }
+    gap_info = {
+        "total_words": 50,
+        "planned_target": 1000,
+        "fill_ratio": 0.05,
+        "deficit": 950,
+        "underfilled_sections": [
+            {
+                "section_index": 1,
+                "heading": "Core Analysis",
+                "purpose": "Analyze core principles",
+                "actual_words": 50,
+                "target_budget": 500,
+                "deficit": 450,
+            }
+        ],
+    }
+
+    mock_supp_data = {
+        "items": [
+            {"evidence_id": "ev_supp_1", "snippet": "Brand new supplemental factual evidence.", "title": "New Findings"}
+        ],
+        "sources": [{"url": "https://example.com/source", "title": "New Source"}],
+    }
+
+    mock_expanded_script = PodcastScriptResponse(
+        episode_title="Test Topic",
+        episode_description="Expanded",
+        segments=[
+            PodcastSegment(
+                order=1,
+                heading="Core Analysis",
+                narration="Brief analysis that fell short. Brand new supplemental factual evidence expanded with detail.",
+            )
+        ],
+        warnings=[],
+    )
+
+    def mock_failover(*args, **kwargs):
+        op = kwargs.get("operation")
+        if op == "supplemental_research":
+            return mock_supp_data
+        elif op in ("section_expansion", "generate_isolated_section"):
+            return mock_expanded_script
+        return mock_expanded_script
+
+    with patch("herald.ai.long_form.execute_with_failover", side_effect=mock_failover):
+        expanded_sections = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Test Topic",
+            evidence_packet=evidence_packet,
+            scope=EvidenceScope.RESEARCH,
+        )
+        assert len(expanded_sections) >= 1
+        # Check evidence packet received new items
+        assert any("ev_supp" in it.get("evidence_id", "") for it in evidence_packet["items"])
+
+
+def test_cleanup_script_metadata_preserves_custom_title():
+    """cleanup_script_metadata retains explicit custom_title while allowing natural generated titles when custom_title is None."""
+    from herald.ai.long_form import cleanup_script_metadata
+
+    # Case 1: Custom title provided
+    job_with_custom = PodcastJob(id="job-custom-1", custom_title="My Handcrafted Title")
+    script = {
+        "episode_title": "Old Raw Title",
+        "segments": [{"order": 1, "heading": "Section 1", "narration": "Text"}],
+    }
+    mock_resp = PodcastScriptResponse(
+        episode_title="AI Generated Suggestion",
+        episode_description="Desc",
+        segments=[PodcastSegment(order=1, heading="New Section 1", narration="Text")],
+        warnings=[],
+    )
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res = cleanup_script_metadata(job_with_custom, script, topic="Research topic query")
+        assert res["episode_title"] == "My Handcrafted Title"
+
+    # Case 2: No custom title provided -> accepts generated title
+    job_no_custom = PodcastJob(id="job-no-custom-2", custom_title=None)
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_resp):
+        res2 = cleanup_script_metadata(job_no_custom, script, topic="Research topic query")
+        assert res2["episode_title"] == "AI Generated Suggestion"

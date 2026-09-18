@@ -22,6 +22,7 @@ from herald.db.models import (
     JobState,
     JobStateTransition,
     PodcastJob,
+    PodcastTTSChunk,
     TelegramPollState,
     TelegramUpdateFailure,
     TelegramUser,
@@ -609,6 +610,9 @@ def handle_telegram_command(
             short_jid = html.escape(aj.id[:8])
             cfg = aj.configuration_state_json or {}
             st = aj.status
+            job_title = aj.custom_title or (aj.script_json or {}).get("episode_title") or aj.id[:8]
+            job_title_disp = html.escape(job_title[:30] + "…" if len(job_title) > 30 else job_title)
+
             # Script stage jobs
             if st in (
                 JobState.RECEIVED.value,
@@ -622,16 +626,27 @@ def handle_telegram_command(
                 JobState.AWAITING_RERUN_CONFIRMATION.value,
             ):
                 substage = cfg.get("script_substage")
-                sec_prog = aj.section_progress_json or {}
-                sec_curr = sec_prog.get("current_section")
-                sec_tot = sec_prog.get("total_sections")
+                sec_prog = aj.section_progress_json
+                sec_curr = None
+                sec_tot = None
+                if isinstance(sec_prog, list):
+                    sec_curr = len(sec_prog)
+                    outline = aj.outline_json or {}
+                    sec_tot = outline.get("section_count") or (len(outline.get("sections", [])) if outline.get("sections") else None)
+                elif isinstance(sec_prog, dict):
+                    sec_curr = sec_prog.get("current_section")
+                    sec_tot = sec_prog.get("total_sections")
+
                 detail_parts = []
+                if sec_curr is not None and sec_tot is not None:
+                    detail_parts.append(f"section {sec_curr}/{sec_tot}")
+                elif sec_curr is not None:
+                    detail_parts.append(f"section {sec_curr}")
                 if substage:
                     detail_parts.append(f"substage: {html.escape(str(substage))}")
-                if sec_curr is not None and sec_tot is not None:
-                    detail_parts.append(f"sections: {sec_curr}/{sec_tot}")
+
                 detail_str = f" ({', '.join(detail_parts)})" if detail_parts else ""
-                script_progress_lines.append(f"  • <code>{short_jid}</code>: {html.escape(st)}{detail_str}")
+                script_progress_lines.append(f"  • <code>{short_jid}</code> ({job_title_disp}): {html.escape(st)}{detail_str}")
             # Audio stage jobs
             elif st in (
                 JobState.QUEUED_TTS.value,
@@ -641,9 +656,17 @@ def handle_telegram_command(
                 JobState.UPLOADING.value,
                 JobState.DELIVERING.value,
             ):
-                c_idx = aj.completed_chunk_index or 0
-                detail_str = f" (chunks: {c_idx})" if c_idx else ""
-                audio_progress_lines.append(f"  • <code>{short_jid}</code>: {html.escape(st)}{detail_str}")
+                total_chunks = db.query(PodcastTTSChunk).filter(PodcastTTSChunk.job_id == aj.id).count()
+                done_chunks = db.query(PodcastTTSChunk).filter(
+                    PodcastTTSChunk.job_id == aj.id,
+                    PodcastTTSChunk.status == "COMPLETED",
+                ).count()
+                if total_chunks > 0:
+                    detail_str = f" (chunk {done_chunks}/{total_chunks})"
+                else:
+                    c_idx = aj.completed_chunk_index or 0
+                    detail_str = f" (chunk {c_idx})" if c_idx else ""
+                audio_progress_lines.append(f"  • <code>{short_jid}</code> ({job_title_disp}): {html.escape(st)}{detail_str}")
 
         active_breakdown_section = ""
         if script_progress_lines:
