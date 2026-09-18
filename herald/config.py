@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     HERALD_SUPPLEMENTAL_RESEARCH_DEPTH: str = "low"  # Validated in {"low", "medium", "high"}
     HERALD_MAX_REPETITION_REVIEW_CANDIDATES: int = 14
     HERALD_MODEL_PRICING_OVERRIDES_JSON: str = ""
-    HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING: bool = True
+    HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING: bool = False
 
     # Audio & FFmpeg
     AUDIO_OUTPUT_BITRATE: str = "64k"

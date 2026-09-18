@@ -1394,11 +1394,12 @@ def test_external_ai_interaction_with_missing_token_telemetry_reports_cost_unava
         total_tokens=150_000,
     )
 
-    summary_partial = aggregate_job_tokens_and_cost([inter_valid, inter_missing])
-    assert summary_partial.is_cost_complete is False
-    assert summary_partial.is_cost_available is True
-    assert "(partial)" in summary_partial.cost_display
-    assert summary_partial.total_cost_usd > 0.0
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        summary_partial = aggregate_job_tokens_and_cost([inter_valid, inter_missing])
+        assert summary_partial.is_cost_complete is False
+        assert summary_partial.is_cost_available is True
+        assert "(partial)" in summary_partial.cost_display
+        assert summary_partial.total_cost_usd > 0.0
 
 
 def test_pricing_configuration_defaults_and_opt_in_behavior():

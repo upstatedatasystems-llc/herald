@@ -11,54 +11,55 @@ from herald.db.models import AIInteraction
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Pricing rates per 1,000,000 tokens in USD with effective rate date, provenance, and verification."""
+    """Pricing rates per 1,000,000 tokens in USD with reference metadata."""
     prompt_per_m: float
     completion_per_m: float
+    pricing_type: str = "list_price_reference"
     effective_date: str = "2024-10-01"
     provenance: str = "vendor_docs"
-    is_verified: bool = True
+    verified_at: str | None = None
+    is_verified: bool = False
 
 
 # Canonical pricing table keyed strictly by exact lowercase (provider_id, model_id) tuples.
-# Rates in USD per 1M tokens with explicit provenance.
+# Reference list prices (USD per 1M tokens). Not enabled by default.
+# Groq Compound systems are excluded: compound tools/models cannot be represented by a static rate.
 PRICING_TABLE: dict[tuple[str, str], ModelPricing] = {
     # Gemini
-    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-10-01", provenance="https://ai.google.dev/pricing", is_verified=True),
-    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", is_verified=True),
-    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30, effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", is_verified=True),
-    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30, effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", is_verified=True),
-    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00, effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", is_verified=True),
+    ("gemini", "gemini-2.5-flash"): ModelPricing(0.075, 0.30, pricing_type="list_price_reference", effective_date="2024-10-01", provenance="https://ai.google.dev/pricing", verified_at="2026-09-18", is_verified=False),
+    ("gemini", "gemini-3.5-flash"): ModelPricing(0.075, 0.30, pricing_type="list_price_reference", effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", verified_at="2026-09-18", is_verified=False),
+    ("gemini", "gemini-3.6-flash"): ModelPricing(0.075, 0.30, pricing_type="list_price_reference", effective_date="2025-01-01", provenance="https://ai.google.dev/pricing", verified_at="2026-09-18", is_verified=False),
+    ("gemini", "gemini-1.5-flash"): ModelPricing(0.075, 0.30, pricing_type="list_price_reference", effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", verified_at="2026-09-18", is_verified=False),
+    ("gemini", "gemini-1.5-pro"): ModelPricing(1.25, 5.00, pricing_type="list_price_reference", effective_date="2024-05-14", provenance="https://ai.google.dev/pricing", verified_at="2026-09-18", is_verified=False),
 
-    # Groq (rates per 1M tokens)
-    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79, effective_date="2024-12-06", provenance="https://groq.com/pricing", is_verified=True),
-    ("groq", "groq/compound"): ModelPricing(0.59, 0.79, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
-    ("groq", "groq/compound-mini"): ModelPricing(0.20, 0.20, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
-    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
-    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15, effective_date="2025-01-01", provenance="https://groq.com/pricing", is_verified=True),
+    # Groq (rates per 1M tokens) - Groq compound models removed (cannot be estimated by static token rates)
+    ("groq", "llama-3.3-70b-versatile"): ModelPricing(0.59, 0.79, pricing_type="list_price_reference", effective_date="2024-12-06", provenance="https://groq.com/pricing", verified_at="2026-09-18", is_verified=False),
+    ("groq", "openai/gpt-oss-120b"): ModelPricing(0.60, 0.80, pricing_type="list_price_reference", effective_date="2025-01-01", provenance="https://groq.com/pricing", verified_at="2026-09-18", is_verified=False),
+    ("groq", "openai/gpt-oss-20b"): ModelPricing(0.15, 0.15, pricing_type="list_price_reference", effective_date="2025-01-01", provenance="https://groq.com/pricing", verified_at="2026-09-18", is_verified=False),
 
     # OpenAI
-    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00, effective_date="2024-05-13", provenance="https://openai.com/api/pricing", is_verified=True),
-    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60, effective_date="2024-07-18", provenance="https://openai.com/api/pricing", is_verified=True),
+    ("openai", "gpt-4o"): ModelPricing(2.50, 10.00, pricing_type="list_price_reference", effective_date="2024-05-13", provenance="https://openai.com/api/pricing", verified_at="2026-09-18", is_verified=False),
+    ("openai", "gpt-4o-mini"): ModelPricing(0.15, 0.60, pricing_type="list_price_reference", effective_date="2024-07-18", provenance="https://openai.com/api/pricing", verified_at="2026-09-18", is_verified=False),
 
     # Anthropic
-    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00, effective_date="2025-02-19", provenance="https://anthropic.com/pricing", is_verified=True),
-    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00, effective_date="2024-10-22", provenance="https://anthropic.com/pricing", is_verified=True),
-    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00, effective_date="2024-10-22", provenance="https://anthropic.com/pricing", is_verified=True),
+    ("anthropic", "claude-3-7-sonnet-20250219"): ModelPricing(3.00, 15.00, pricing_type="list_price_reference", effective_date="2025-02-19", provenance="https://anthropic.com/pricing", verified_at="2026-09-18", is_verified=False),
+    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPricing(3.00, 15.00, pricing_type="list_price_reference", effective_date="2024-10-22", provenance="https://anthropic.com/pricing", verified_at="2026-09-18", is_verified=False),
+    ("anthropic", "claude-3-5-haiku-20241022"): ModelPricing(0.80, 4.00, pricing_type="list_price_reference", effective_date="2024-10-22", provenance="https://anthropic.com/pricing", verified_at="2026-09-18", is_verified=False),
 
     # Mistral
-    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00, effective_date="2024-11-18", provenance="https://mistral.ai/technology/#pricing", is_verified=True),
+    ("mistral", "mistral-large-latest"): ModelPricing(2.00, 6.00, pricing_type="list_price_reference", effective_date="2024-11-18", provenance="https://mistral.ai/technology/#pricing", verified_at="2026-09-18", is_verified=False),
 
     # Cloudflare Workers AI
-    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
-    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
-    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
-    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20, effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", is_verified=True),
+    ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"): ModelPricing(0.35, 0.40, pricing_type="list_price_reference", effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", verified_at="2026-09-18", is_verified=False),
+    ("cloudflare", "@cf/qwen/qwen3.8-27b"): ModelPricing(0.25, 0.30, pricing_type="list_price_reference", effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", verified_at="2026-09-18", is_verified=False),
+    ("cloudflare", "@cf/google/gemma-4-26b-a4b-it"): ModelPricing(0.25, 0.30, pricing_type="list_price_reference", effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", verified_at="2026-09-18", is_verified=False),
+    ("cloudflare", "@cf/zai-org/glm-4.7-flash"): ModelPricing(0.15, 0.20, pricing_type="list_price_reference", effective_date="2024-12-01", provenance="https://developers.cloudflare.com/workers-ai/models", verified_at="2026-09-18", is_verified=False),
 
     # OpenRouter
-    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40, effective_date="2024-12-06", provenance="https://openrouter.ai/models", is_verified=True),
+    ("openrouter", "meta-llama/llama-3.3-70b-instruct"): ModelPricing(0.40, 0.40, pricing_type="list_price_reference", effective_date="2024-12-06", provenance="https://openrouter.ai/models", verified_at="2026-09-18", is_verified=False),
 
     # Ollama / Local AI models are free ($0.00)
-    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0, effective_date="2024-09-25", provenance="local_execution", is_verified=True),
+    ("ollama", "llama3.2"): ModelPricing(0.0, 0.0, pricing_type="local_execution", effective_date="2024-09-25", provenance="local_execution", verified_at="2026-09-18", is_verified=True),
 }
 
 
@@ -78,7 +79,7 @@ class JobTokenAndCostSummary:
         """
         Return truthful cost string:
         - '$0.00' if 0 interactions or only local models
-        - '$0.0042' if complete
+        - '~$0.08 est.' if complete
         - '~$0.0042 (partial)' if incomplete but some pricing available
         - 'unavailable' if interactions occurred but no pricing exists
         """
@@ -93,8 +94,8 @@ class JobTokenAndCostSummary:
         if self.total_cost_usd == 0.0:
             return "$0.00"
         if self.total_cost_usd < 0.01:
-            return f"${self.total_cost_usd:.4f}"
-        return f"${self.total_cost_usd:.2f}"
+            return f"~${self.total_cost_usd:.4f} est."
+        return f"~${self.total_cost_usd:.2f} est."
 
     @property
     def tokens_display(self) -> str:
@@ -111,18 +112,17 @@ def is_external_billable_provider(provider: str | None) -> bool:
 def get_effective_pricing_table() -> dict[tuple[str, str], ModelPricing]:
     """
     Return effective pricing table, merging base PRICING_TABLE with any configured overrides.
-    Honors HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING (default True). When disabled, only local
+    Honors HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING (default False). When disabled, only local
     zero-cost models and explicit overrides are priced.
-    Only entries with is_verified=True are loaded from the built-in table.
     """
     from herald.config import settings
-    enable_builtin_external = getattr(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True)
+    enable_builtin_external = getattr(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", False)
 
     table: dict[tuple[str, str], ModelPricing] = {}
     for k, v in PRICING_TABLE.items():
         prov, mod = k
         is_local = (prov in ("ollama", "local")) or (v.prompt_per_m == 0.0 and v.completion_per_m == 0.0)
-        if (is_local or enable_builtin_external) and getattr(v, "is_verified", True):
+        if is_local or enable_builtin_external:
             table[k] = v
 
     try:
@@ -150,8 +150,10 @@ def get_effective_pricing_table() -> dict[tuple[str, str], ModelPricing]:
                         table[(prov_clean, model_clean)] = ModelPricing(
                             prompt_per_m=p_rate,
                             completion_per_m=c_rate,
+                            pricing_type="operator_override",
                             effective_date=eff_date,
-                            provenance=v.get("provenance", "user_override"),
+                            provenance=str(v.get("provenance", "operator_configured")),
+                            verified_at=str(v.get("verified_at", "operator_configured")),
                             is_verified=True,
                         )
     except Exception:

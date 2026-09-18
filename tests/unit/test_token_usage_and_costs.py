@@ -4,11 +4,15 @@ Tests truthful calculation, presentation across cards, and backward compatibilit
 """
 
 from datetime import UTC, datetime
+from unittest.mock import patch
+
+from herald.config import settings
 from herald.db.models import AIInteraction, PodcastJob, PodcastTTSChunk, RequestMode
 from herald.services.token_cost import (
     PRICING_TABLE,
     aggregate_job_tokens_and_cost,
     calculate_interaction_cost,
+    get_effective_pricing_table,
 )
 from herald.telegram.formatters import (
     format_completion,
@@ -19,7 +23,7 @@ from herald.telegram.formatters import (
 
 
 def test_standard_priced_model_calculation():
-    """Verify exact cost calculation for standard priced models (e.g. Gemini 3.5 Flash)."""
+    """Verify exact cost calculation for standard priced models when enabled."""
     # gemini-3.5-flash: prompt $0.075 / 1M, completion $0.30 / 1M
     inter1 = AIInteraction(
         id="call-1",
@@ -30,16 +34,18 @@ def test_standard_priced_model_calculation():
         completion_tokens=1_000_000,
         total_tokens=2_000_000,
     )
-    cost, known = calculate_interaction_cost(inter1)
-    assert known is True
-    assert round(cost, 4) == round(0.075 + 0.30, 4)
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        cost, known = calculate_interaction_cost(inter1)
+        assert known is True
+        assert round(cost, 4) == round(0.075 + 0.30, 4)
 
-    summary = aggregate_job_tokens_and_cost([inter1])
-    assert summary.call_count == 1
-    assert summary.total_tokens == 2_000_000
-    assert summary.is_cost_complete is True
-    assert summary.is_cost_available is True
-    assert summary.cost_display == "$0.38"
+        summary = aggregate_job_tokens_and_cost([inter1])
+        assert summary.call_count == 1
+        assert summary.total_tokens == 2_000_000
+        assert summary.is_cost_complete is True
+        assert summary.is_cost_available is True
+        assert "0.38" in summary.cost_display
+        assert "est." in summary.cost_display
 
 
 def test_unpriced_model_never_shows_zero():
@@ -86,12 +92,13 @@ def test_partially_priced_job_never_shows_zero():
         total_tokens=25_000,
     )
 
-    summary = aggregate_job_tokens_and_cost([inter_known, inter_unknown])
-    assert summary.total_tokens == 37_000
-    assert summary.is_cost_complete is False
-    assert summary.is_cost_available is True
-    assert "(partial)" in summary.cost_display
-    assert summary.cost_display != "$0.00"
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        summary = aggregate_job_tokens_and_cost([inter_known, inter_unknown])
+        assert summary.total_tokens == 37_000
+        assert summary.is_cost_complete is False
+        assert summary.is_cost_available is True
+        assert "(partial)" in summary.cost_display
+        assert summary.cost_display != "$0.00"
 
 
 def test_local_model_and_zero_calls_show_zero():
@@ -113,8 +120,105 @@ def test_local_model_and_zero_calls_show_zero():
     assert summary_empty.tokens_display == "0 tokens"
 
 
+def test_builtin_external_pricing_disabled_by_default():
+    """Verify built-in external pricing is disabled by default; external model shows tokens but cost unavailable."""
+    assert settings.HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING is False
+
+    inter = AIInteraction(
+        id="call-ext-default",
+        job_id="job-default",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        prompt_tokens=50_000,
+        completion_tokens=10_000,
+        total_tokens=60_000,
+    )
+    cost, known = calculate_interaction_cost(inter)
+    assert known is False
+    assert cost is None
+
+    summary = aggregate_job_tokens_and_cost([inter])
+    assert summary.total_tokens == 60_000
+    assert summary.is_cost_complete is False
+    assert summary.is_cost_available is False
+    assert summary.cost_display == "unavailable"
+
+
+def test_exact_configured_override_calculates_estimated_cost():
+    """Verify exact configured override enables estimated cost calculation even when built-in external pricing is disabled."""
+    import json
+
+    overrides = {
+        "gemini/gemini-2.5-flash": {
+            "prompt_per_m": 0.10,
+            "completion_per_m": 0.40,
+            "effective_date": "2026-09-18",
+            "provenance": "operator_configured",
+        }
+    }
+
+    inter = AIInteraction(
+        id="call-override",
+        job_id="job-override",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        prompt_tokens=1_000_000,
+        completion_tokens=1_000_000,
+        total_tokens=2_000_000,
+    )
+
+    with patch.object(settings, "HERALD_MODEL_PRICING_OVERRIDES_JSON", json.dumps(overrides)):
+        cost, known = calculate_interaction_cost(inter)
+        assert known is True
+        assert cost == 0.50
+
+        summary = aggregate_job_tokens_and_cost([inter])
+        assert summary.is_cost_complete is True
+        assert summary.is_cost_available is True
+        assert "0.50" in summary.cost_display
+        assert "est." in summary.cost_display
+
+
+def test_unconfigured_groq_compound_cost_unavailable():
+    """Verify unconfigured Groq Compound systems report tokens but cost unavailable."""
+    inter_compound = AIInteraction(
+        id="call-compound",
+        job_id="job-compound",
+        provider="groq",
+        model="groq/compound",
+        prompt_tokens=100_000,
+        completion_tokens=20_000,
+        total_tokens=120_000,
+    )
+
+    inter_compound_mini = AIInteraction(
+        id="call-compound-mini",
+        job_id="job-compound",
+        provider="groq",
+        model="groq/compound-mini",
+        prompt_tokens=100_000,
+        completion_tokens=20_000,
+        total_tokens=120_000,
+    )
+
+    # Even if built-in external pricing is True, compound systems are excluded from static table
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        cost1, known1 = calculate_interaction_cost(inter_compound)
+        assert known1 is False
+        assert cost1 is None
+
+        cost2, known2 = calculate_interaction_cost(inter_compound_mini)
+        assert known2 is False
+        assert cost2 is None
+
+        summary = aggregate_job_tokens_and_cost([inter_compound])
+        assert summary.total_tokens == 120_000
+        assert summary.is_cost_available is False
+        assert summary.cost_display == "unavailable"
+
+
 def test_formatters_truthful_presentation():
-    """Verify format_queued, format_first_chunk_progress, and format_completion with AI costs."""
+    """Verify format_queued, format_first_chunk_progress, and format_completion with AI costs and Est. AI Cost."""
     job = PodcastJob(
         id="cost-job-12345678",
         request_mode="research",
@@ -142,22 +246,30 @@ def test_formatters_truthful_presentation():
     )
     job.ai_interactions = [call1]
 
-    # 1. Queued
+    # When unconfigured: cost unavailable
     q_msg = format_queued(job, job.script_json)
     assert "AI Model:" in q_msg
     assert "AI Usage:" in q_msg
-    assert "120,000 tokens" in q_msg
+    assert "120,000 tokens (cost unavailable)" in q_msg
 
-    # 2. First Chunk Progress
     p_msg = format_first_chunk_progress(job, total_chunks=4, eta_range="2-3 minutes")
     assert "AI Usage:" in p_msg
-    assert "120,000 tokens" in p_msg
+    assert "120,000 tokens (cost unavailable)" in p_msg
 
-    # 3. Completion
     c_msg = format_completion(job, actual_chunks_count=4, file_size_bytes=2_000_000)
-    assert "AI Cost:" in c_msg
-    assert "120,000 tokens" in c_msg
+    assert "Est. AI Cost:" in c_msg
+    assert "unavailable (120,000 tokens)" in c_msg
     assert len(c_msg) <= 1024
+
+    # When configured: cost estimated
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        c_msg_conf = format_completion(job, actual_chunks_count=4, file_size_bytes=2_000_000)
+        assert "Est. AI Cost:" in c_msg_conf
+        assert "est." in c_msg_conf
+        assert "120,000 tokens" in c_msg_conf
+
+        q_msg_conf = format_queued(job, job.script_json)
+        assert "est." in q_msg_conf
 
 
 def test_literal_mode_truthful_presentation():
@@ -185,24 +297,28 @@ def test_literal_mode_truthful_presentation():
 
     c_msg = format_completion(job, actual_chunks_count=2, file_size_bytes=1_000_000)
     assert "AI Model:" not in c_msg
-    assert "AI Cost:" not in c_msg
+    assert "Est. AI Cost:" not in c_msg
+
+    d_msg = format_diagnostics_card(job)
+    assert "Est. AI Cost:</b> $0.00 (0 tokens)" in d_msg
 
 
 def test_missing_breakdown_symmetric_vs_asymmetric():
     """Verify that calculate_interaction_cost falls back only for symmetric rates and refuses to guess for asymmetric."""
-    # Groq compound-mini: prompt $0.20 / 1M, completion $0.20 / 1M (symmetric)
+    # OpenRouter meta-llama/llama-3.3-70b-instruct: prompt $0.40 / 1M, completion $0.40 / 1M (symmetric)
     inter_sym = AIInteraction(
         id="call-sym",
         job_id="job-1",
-        provider="groq",
-        model="groq/compound-mini",
+        provider="openrouter",
+        model="meta-llama/llama-3.3-70b-instruct",
         prompt_tokens=0,
         completion_tokens=0,
         total_tokens=1_000_000,
     )
-    cost, known = calculate_interaction_cost(inter_sym)
-    assert known is True
-    assert cost == 0.20
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        cost, known = calculate_interaction_cost(inter_sym)
+        assert known is True
+        assert cost == 0.40
 
     # Gemini 3.5 Flash: prompt $0.075 / 1M, completion $0.30 / 1M (asymmetric)
     inter_asym = AIInteraction(
@@ -214,9 +330,10 @@ def test_missing_breakdown_symmetric_vs_asymmetric():
         completion_tokens=0,
         total_tokens=1_000_000,
     )
-    cost, known = calculate_interaction_cost(inter_asym)
-    assert known is False
-    assert cost is None
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        cost, known = calculate_interaction_cost(inter_asym)
+        assert known is False
+        assert cost is None
 
 
 def test_token_bearing_completeness():
@@ -240,6 +357,8 @@ def test_token_bearing_completeness():
         total_tokens=2000,
     )
 
-    summary = aggregate_job_tokens_and_cost([inter_zero, inter_paid])
-    assert summary.is_cost_complete is True
-    assert summary.is_cost_available is True
+    with patch.object(settings, "HERALD_ENABLE_BUILTIN_EXTERNAL_PRICING", True):
+        summary = aggregate_job_tokens_and_cost([inter_zero, inter_paid])
+        assert summary.is_cost_complete is True
+        assert summary.is_cost_available is True
+

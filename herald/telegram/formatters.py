@@ -901,7 +901,8 @@ def format_queued(
     ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
     summary = get_job_token_cost_summary(job, db)
     if summary and summary.call_count > 0:
-        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({summary.cost_display})"
+        cost_str = "cost unavailable" if not summary.is_cost_available else summary.cost_display
+        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({cost_str})"
 
     queue_line = f"\n• <b>Queue Position:</b> {jobs_ahead} jobs ahead" if jobs_ahead > 0 else "\n• <b>Queue Position:</b> Next up"
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
@@ -970,7 +971,7 @@ def format_completion(
     summary = get_job_token_cost_summary(job, db)
     cost_line = ""
     if summary and summary.call_count > 0:
-        cost_line = f"\n• <b>AI Cost:</b> {summary.cost_display} ({summary.total_tokens:,} tokens)"
+        cost_line = f"\n• <b>Est. AI Cost:</b> {summary.cost_display} ({summary.total_tokens:,} tokens)"
 
     # Truncate description safely to stay well within 1024 chars
     desc_clean = html.escape(desc[:120] + "..." if len(desc) > 120 else desc) if desc else ""
@@ -1041,7 +1042,7 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
 
     title = html.escape(get_job_display_title(job))
     short_id = html.escape(job.id[:8])
-    status = html.escape(job.status)
+    status = html.escape(job.status or "unknown")
     mode_str = (job.request_mode or "standard").capitalize()
     if job.request_mode == "research" and job.research_depth:
         mode_str += f" ({job.research_depth.capitalize()})"
@@ -1073,7 +1074,7 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
     # AI identity & tokens
     ai_prov, ai_model = get_job_ai_identity(job)
     if job.request_mode == "literal":
-        ai_line = "• <b>AI:</b> <code>None (Literal mode)</code>\n• <b>AI Cost:</b> $0.00 (0 tokens)"
+        ai_line = "• <b>AI:</b> <code>None (Literal mode)</code>\n• <b>Est. AI Cost:</b> $0.00 (0 tokens)"
     elif ai_prov and ai_model:
         ai_line = f"• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
     else:
@@ -1307,7 +1308,8 @@ def format_first_chunk_progress(
 
     summary = get_job_token_cost_summary(job, db)
     if summary and summary.call_count > 0:
-        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({summary.cost_display})"
+        cost_str = "cost unavailable" if not summary.is_cost_available else summary.cost_display
+        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({cost_str})"
 
     voice = html.escape(job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
     speed = float(job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))
