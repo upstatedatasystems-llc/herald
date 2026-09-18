@@ -24,31 +24,32 @@ from herald.audio.branding import (
 )
 
 
-def test_intro_template_fixed_duration():
-    intro_10 = render_intro_narration("Virginia-class submarines", target_minutes="10")
-    assert "Today's episode is 'Virginia-class submarines'" in intro_10
-    assert "running approximately 10 minutes" in intro_10
-    assert intro_10.startswith("This is Herald.")
-    assert intro_10.endswith("Let's begin.")
+def test_intro_template_modes_and_no_duration():
+    # Research topic with depth
+    intro_res = render_intro_narration("The Birth of the Nuclear Submarine", content_mode="topic", research_depth="medium")
+    assert "Herald presents: The Birth of the Nuclear Submarine." in intro_res
+    assert "This episode was generated from a research topic using medium research depth." in intro_res
+    assert "running approximately" not in intro_res
+    assert intro_res.endswith("Let's begin.")
 
-    intro_45 = render_intro_narration("Quantum Computing", target_minutes=45)
-    assert "Today's episode is 'Quantum Computing'" in intro_45
-    assert "running approximately 45 minutes" in intro_45
+    # Submitted source without publisher
+    intro_src = render_intro_narration("The Most Distant Galaxy Yet", content_mode="source")
+    assert "Herald presents: The Most Distant Galaxy Yet." in intro_src
+    assert "This episode was generated from a submitted source." in intro_src
+    assert "running approximately" not in intro_src
+    assert intro_src.endswith("Let's begin.")
 
+    # Literal mode
+    intro_lit = render_intro_narration("Deep Sea Exploration", content_mode="literal")
+    assert "Herald presents: Deep Sea Exploration." in intro_lit
+    assert "This episode was generated directly from a submitted source." in intro_lit
+    assert "running approximately" not in intro_lit
 
-def test_intro_template_auto_and_literal():
-    intro_auto = render_intro_narration("James Webb Space Telescope", target_minutes="auto")
-    assert "Today's episode is 'James Webb Space Telescope'" in intro_auto
-    assert "running approximately" not in intro_auto
-    assert intro_auto.endswith("Let's begin.")
-
-    intro_none = render_intro_narration("Mars Rover", target_minutes=None)
-    assert "Today's episode is 'Mars Rover'" in intro_none
-    assert "running approximately" not in intro_none
-
-    intro_literal = render_intro_narration("Deep Sea Exploration", target_minutes="10", content_mode="literal")
-    assert "Today's episode is 'Deep Sea Exploration'" in intro_literal
-    assert "running approximately" not in intro_literal
+    # Expanded source with research depth
+    intro_exp = render_intro_narration("Quantum Advantage", content_mode="expanded", research_depth="high")
+    assert "Herald presents: Quantum Advantage." in intro_exp
+    assert "This episode was generated from a submitted source with high research." in intro_exp
+    assert "running approximately" not in intro_exp
 
 
 def test_intro_with_publisher_conditional():
@@ -56,30 +57,31 @@ def test_intro_with_publisher_conditional():
     intro_pub = render_intro_narration(
         episode_title="The Most Distant Galaxy Yet",
         publisher="BBC Sky at Night Magazine",
+        content_mode="source",
     )
-    assert intro_pub == "This is Herald. Today's episode is 'The Most Distant Galaxy Yet'. Based on reporting from BBC Sky at Night Magazine. Let's begin."
+    assert intro_pub == "Herald presents: The Most Distant Galaxy Yet. This episode was generated from a submitted source. Based on reporting from BBC Sky at Night Magazine. Let's begin."
 
     # When publisher is absent
     intro_no_pub = render_intro_narration(
         episode_title="The Most Distant Galaxy Yet",
         publisher=None,
+        content_mode="source",
     )
-    assert intro_no_pub == "This is Herald. Today's episode is 'The Most Distant Galaxy Yet'. Let's begin."
+    assert intro_no_pub == "Herald presents: The Most Distant Galaxy Yet. This episode was generated from a submitted source. Let's begin."
     assert "Based on reporting" not in intro_no_pub
     assert "at." not in intro_no_pub
 
 
 def test_intro_prevents_malformed_headline_and_dangling_artifacts():
-    # Raw headline does not produce broken "podcast about the James Webb Space Telescope has found..."
     raw_headline = "The James Webb Space Telescope has found the most distant galaxy yet"
     intro = render_intro_narration(
         source_title=raw_headline,
         publisher="at.",  # Dangling word artifact from old bugs
+        content_mode="source",
     )
-    # Dangling publisher stripped cleanly
     assert "Based on reporting from at" not in intro
     assert "at. Enjoy." not in intro
-    assert intro == f"This is Herald. Today's episode is '{sanitize_branding_topic(raw_headline)}'. Let's begin."
+    assert intro == f"Herald presents: {sanitize_branding_topic(raw_headline)}. This episode was generated from a submitted source. Let's begin."
 
 
 def test_publisher_sanitization():
@@ -134,23 +136,26 @@ def test_url_topic_sanitization():
     assert sanitize_branding_topic(domain_url) == "Arstechnica"
 
 
-def test_truthful_duration_reporting_when_underfilled():
+def test_no_duration_in_intro_even_when_underfilled():
     # User requested 45 minutes, but actual body was only 320 seconds (~5 minutes)
+    # New policy: Never announce estimated runtime in intro
     intro_underfilled = render_intro_narration(
         topic="Solid State Batteries",
         target_minutes="45",
         actual_body_duration_seconds=320.0,
     )
-    assert "running approximately 5 minutes" in intro_underfilled
-    assert "45" not in intro_underfilled
+    assert "running approximately" not in intro_underfilled
+    assert "minutes" not in intro_underfilled
+    assert "Herald presents: Solid State Batteries." in intro_underfilled
 
-    # If actual body matches target (~44.5 min = 2670s for 45 min target)
+    # If actual body matches target
     intro_matched = render_intro_narration(
         topic="Solid State Batteries",
         target_minutes="45",
         actual_body_duration_seconds=2670.0,
     )
-    assert "running approximately 45 minutes" in intro_matched
+    assert "running approximately" not in intro_matched
+    assert "Herald presents: Solid State Batteries." in intro_matched
 
 
 def test_synthesize_branding_segment_contract(tmp_path):

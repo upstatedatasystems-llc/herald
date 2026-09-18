@@ -158,7 +158,8 @@ def transition_job_state(
     if to_state == JobState.COMPLETE.value:
         job.completed_at = datetime.now(UTC)
     elif to_state in (JobState.FAILED_RETRYABLE.value, JobState.FAILED_FINAL.value):
-        job.failed_stage = from_state
+        if not job.failed_stage:
+            job.failed_stage = from_state
         if error_category:
             job.error_code = error_category
         if message:

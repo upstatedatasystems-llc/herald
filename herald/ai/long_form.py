@@ -27,6 +27,7 @@ from herald.ai.schema import (
 from herald.config import settings
 from herald.db.models import ContentMode, PodcastJob
 from herald.services.diagnostic_recorder import record_job_diagnostic_event
+from herald.services.quality_gate import clean_metadata_scaffolding
 
 logger = logging.getLogger("herald.ai.long_form")
 
@@ -1839,12 +1840,17 @@ def audit_and_repair_fidelity(
         try:
             if scope == EvidenceScope.SOURCE_ONLY:
                 def _do_repair_src(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
-                    return p_inst.repair_script_fidelity(
+                    resp = p_inst.repair_script_fidelity(
                         source_text=src,
                         script_dict=current_script_dict,
                         audit_result=audit_payload,
                         job_id=job.id,
                     )
+                    if isinstance(resp, dict):
+                        resp = PodcastScriptResponse(**resp)
+                    if not isinstance(resp, PodcastScriptResponse) or not resp.segments:
+                        raise ValueError("Fidelity repair response returned invalid schema or empty segments")
+                    return resp
 
                 repaired_res: PodcastScriptResponse = execute_with_failover(
                     job=job,
@@ -1856,13 +1862,18 @@ def audit_and_repair_fidelity(
                 )
             else:
                 def _do_repair_res(p_inst: Any, att: int, src: str) -> PodcastScriptResponse:
-                    return p_inst.repair_research_script(
+                    resp = p_inst.repair_research_script(
                         source_text=src,
                         research_dossier=dossier_data,
                         script_dict=current_script_dict,
                         audit_result=audit_payload,
                         job_id=job.id,
                     )
+                    if isinstance(resp, dict):
+                        resp = PodcastScriptResponse(**resp)
+                    if not isinstance(resp, PodcastScriptResponse) or not resp.segments:
+                        raise ValueError("Fidelity repair response returned invalid schema or empty segments")
+                    return resp
 
                 repaired_res: PodcastScriptResponse = execute_with_failover(
                     job=job,
@@ -1929,6 +1940,7 @@ def audit_and_repair_fidelity(
         "repair_attempted": repair_attempted,
         "repair_succeeded": repair_succeeded,
         "unresolved_issue": unresolved_issue,
+        "has_unresolved_material_issues": bool(unresolved_issue or (audit_status == "unresolved_issue_remains")),
         "content_warning": has_content_warning,
         "findings": audit_findings,
         "omitted_numbers": omitted_numbers[:10],
@@ -2002,6 +2014,151 @@ def assemble_and_smooth_script(
     )
 
 
+def _set_script_substage(job: PodcastJob, substage: str, db: Any = None):
+    cfg = dict(job.configuration_state_json or {})
+    cfg["script_substage"] = substage
+    job.configuration_state_json = cfg
+    if db:
+        try:
+            db.commit()
+        except Exception:
+            pass
+
+
+def detect_content_gap(
+    completed_sections: list[dict[str, Any]],
+    planned_target: int | None,
+    outline: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Detect whether script has a genuine content gap using Herald's centralized underfill tolerances.
+    Returns gap info dict if underfilled, or None if acceptable.
+    """
+    if not planned_target or planned_target <= 500:
+        return None
+    total_words = sum(s.get("word_count", 0) for s in completed_sections)
+    fill_ratio = total_words / float(planned_target)
+    underfill_tolerance = getattr(settings, "HERALD_TOTAL_UNDERFILL_TOLERANCE_RATIO", 0.80)
+
+    if fill_ratio >= underfill_tolerance:
+        return None
+
+    deficit = planned_target - total_words
+    return {
+        "total_words": total_words,
+        "planned_target": planned_target,
+        "fill_ratio": fill_ratio,
+        "deficit": deficit,
+    }
+
+
+def expand_script_content_gap(
+    job: PodcastJob,
+    completed_sections: list[dict[str, Any]],
+    gap_info: dict[str, Any],
+    topic: str,
+    evidence_packet: dict[str, Any],
+    scope: EvidenceScope,
+    db: Any = None,
+    status_notifier: Any = None,
+) -> list[dict[str, Any]]:
+    """
+    Fill genuine content gaps with new research / uncovered evidence rather than padding,
+    preserving existing section content.
+    """
+    sections = [dict(s) for s in completed_sections]
+    deficit = max(250, min(1200, gap_info.get("deficit", 300)))
+    total_words = gap_info.get("total_words", sum(s.get("word_count", 0) for s in sections))
+    planned_target = gap_info.get("planned_target", total_words + deficit)
+    fill_ratio = gap_info.get("fill_ratio", total_words / float(planned_target))
+
+    covered_evidence_ids = {ev for s in sections for ev in s.get("relevant_evidence_ids", [])}
+    all_packet_items = evidence_packet.get("items", []) if evidence_packet else []
+    uncovered_items = [
+        it for it in all_packet_items
+        if it.get("evidence_id") and it["evidence_id"] not in covered_evidence_ids and not it.get("is_seed_source")
+    ]
+
+    if uncovered_items and scope != EvidenceScope.SOURCE_ONLY:
+        first_uncovered = uncovered_items[0]
+        uncovered_heading = first_uncovered.get("title") or f"Additional Findings on {topic}"
+        logger.info(
+            f"Long-form underfilled ({total_words}/{planned_target} words) with uncovered evidence. "
+            f"Generating bounded section on uncovered material: {uncovered_heading}"
+        )
+        uncovered_sec_def = {
+            "section_index": len(sections) + 1,
+            "heading": uncovered_heading,
+            "purpose": f"Analyze specific uncovered findings regarding: {first_uncovered.get('focus_area', topic)}.",
+            "word_budget": deficit,
+            "word_budget_min": int(round(deficit * 0.85)),
+            "word_budget_max": int(round(deficit * 1.15)),
+            "relevant_evidence_ids": [it["evidence_id"] for it in uncovered_items[:3]],
+            "key_points": [first_uncovered.get("snippet", "")[:120]],
+            "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
+            "transition_intent": "Explore additional uncovered evidence",
+        }
+        covered_ctx = build_already_covered_context(
+            sections,
+            current_heading=uncovered_heading,
+            current_purpose=uncovered_sec_def["purpose"],
+            current_idx=uncovered_sec_def["section_index"],
+        )
+        try:
+            extra_sec = generate_single_section(
+                job=job,
+                section_info=uncovered_sec_def,
+                topic=topic,
+                evidence_packet=evidence_packet,
+                previous_summary=covered_ctx,
+                scope=scope,
+                db=db,
+            )
+            if extra_sec.get("word_count", 0) > 100:
+                extra_sec["cumulative_words"] = total_words + extra_sec.get("word_count", 0)
+                extra_sec["remaining_target"] = max(0, planned_target - extra_sec["cumulative_words"])
+                sections.append(extra_sec)
+                job.section_progress_json = sections
+                record_job_diagnostic_event(
+                    job.id,
+                    "INFO",
+                    "duration",
+                    "UNCOVERED_EVIDENCE_SECTION_GENERATED",
+                    f"Generated bounded extra section on uncovered evidence: {uncovered_heading}",
+                    metadata={
+                        "extra_section_heading": uncovered_heading,
+                        "word_count": extra_sec.get("word_count", 0),
+                        "uncovered_evidence_ids": uncovered_sec_def["relevant_evidence_ids"],
+                    },
+                    db=db,
+                )
+                if db:
+                    db.commit()
+        except Exception as extra_err:
+            logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
+    else:
+        underfill_msg = (
+            f"Generated {total_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
+            "No uncovered evidence remaining; accepting faithful shorter script without artificial recap filler."
+        )
+        logger.info(underfill_msg)
+        record_job_diagnostic_event(
+            job.id,
+            "WARNING",
+            "duration",
+            "DURATION_UNDERFILL_ACCEPTED",
+            underfill_msg,
+            metadata={
+                "total_words": total_words,
+                "planned_target": planned_target,
+                "fill_ratio": round(fill_ratio, 3),
+            },
+            db=db,
+        )
+
+    return sections
+
+
 def execute_unified_long_form_pipeline(
     db: Any,
     job: PodcastJob,
@@ -2038,6 +2195,7 @@ def execute_unified_long_form_pipeline(
         effective_scope = EvidenceScope.SOURCE_ONLY
 
     # 2. Research Plan & Evidence Gathering
+    _set_script_substage(job, "broad_research", db)
     r_plan = None
     if not job.evidence_packet_json:
         if effective_scope in (EvidenceScope.RESEARCH, EvidenceScope.SOURCE_PLUS_RESEARCH):
@@ -2173,6 +2331,7 @@ def execute_unified_long_form_pipeline(
                 evidence_packet["scope"] = EvidenceScope.SOURCE_ONLY.value
 
     # 3. Episode Outline & Word Budgeting
+    _set_script_substage(job, "narrative_plan", db)
     if not job.outline_json:
         if status_notifier:
             status_notifier("Building episode outline and section word budgets...")
@@ -2191,6 +2350,7 @@ def execute_unified_long_form_pipeline(
         outline = job.outline_json
 
     # 4. Sequential Section Generation with Dynamic Budgeting and Checkpointing
+    _set_script_substage(job, "section_generation", db)
     sections_def = outline.get("sections", [])
     completed_sections: list[dict[str, Any]] = list(job.section_progress_json or [])
     completed_indices = {s["section_index"] for s in completed_sections}
@@ -2336,170 +2496,39 @@ def execute_unified_long_form_pipeline(
         job.section_progress_json = completed_sections
         db.commit()
 
-    # Fixed duration enforcement: check for material underfill across all sections
-    total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
-
-    if planned_target and planned_target > 500:
-        fill_ratio = total_generated_words / float(planned_target)
-        if fill_ratio >= 0.90:
-            logger.info(
-                f"Long-form generation reached {fill_ratio:.1%} of target "
-                f"({total_generated_words}/{planned_target} words). Accepted cleanly."
-            )
-        elif 0.80 <= fill_ratio < 0.90:
-            underfill_msg = (
-                f"Generated {total_generated_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
-                "Accepted within 80-90% duration tolerance without padding."
-            )
-            logger.info(underfill_msg)
-            record_job_diagnostic_event(
-                job.id,
-                "INFO",
-                "duration",
-                "DURATION_UNDERFILL_ACCEPTED",
-                underfill_msg,
-                metadata={
-                    "total_words": total_generated_words,
-                    "planned_target": planned_target,
-                    "fill_ratio": round(fill_ratio, 3),
-                },
-                db=db,
-            )
-        else:
-            # < 80%: An additional section is permitted ONLY if genuinely uncovered evidence exists
-            covered_evidence_ids = {ev for s in completed_sections for ev in s.get("relevant_evidence_ids", [])}
-            all_packet_items = evidence_packet.get("items", []) if evidence_packet else []
-            uncovered_items = [
-                it for it in all_packet_items
-                if it.get("evidence_id") and it["evidence_id"] not in covered_evidence_ids and not it.get("is_seed_source")
-            ]
-
-            if uncovered_items and effective_scope != EvidenceScope.SOURCE_ONLY:
-                first_uncovered = uncovered_items[0]
-                uncovered_heading = first_uncovered.get("title") or f"Additional Findings on {topic}"
-                logger.info(
-                    f"Long-form underfilled ({total_generated_words}/{planned_target} words) with uncovered evidence. "
-                    f"Generating bounded section on uncovered material: {uncovered_heading}"
-                )
-                deficit = max(250, min(1200, planned_target - total_generated_words))
-                uncovered_sec_def = {
-                    "section_index": len(completed_sections) + 1,
-                    "heading": uncovered_heading,
-                    "purpose": f"Analyze specific uncovered findings regarding: {first_uncovered.get('focus_area', topic)}.",
-                    "word_budget": deficit,
-                    "word_budget_min": int(round(deficit * 0.85)),
-                    "word_budget_max": int(round(deficit * 1.15)),
-                    "relevant_evidence_ids": [it["evidence_id"] for it in uncovered_items[:3]],
-                    "key_points": [first_uncovered.get("snippet", "")[:120]],
-                    "anti_repetition": "Focus strictly on newly introduced uncovered findings. Do not recap earlier sections.",
-                    "transition_intent": "Explore additional uncovered evidence",
-                }
-                covered_ctx = build_already_covered_context(
-                    completed_sections,
-                    current_heading=uncovered_heading,
-                    current_purpose=uncovered_sec_def["purpose"],
-                    current_idx=uncovered_sec_def["section_index"],
-                )
-                try:
-                    extra_sec = generate_single_section(
-                        job=job,
-                        section_info=uncovered_sec_def,
-                        topic=topic,
-                        evidence_packet=evidence_packet,
-                        previous_summary=covered_ctx,
-                        scope=effective_scope,
-                        db=db,
-                    )
-                    if extra_sec.get("word_count", 0) > 100:
-                        extra_sec["cumulative_words"] = total_generated_words + extra_sec.get("word_count", 0)
-                        extra_sec["remaining_target"] = max(0, planned_target - extra_sec["cumulative_words"])
-                        completed_sections.append(extra_sec)
-                        job.section_progress_json = completed_sections
-                        total_generated_words = sum(s.get("word_count", 0) for s in completed_sections)
-                        record_job_diagnostic_event(
-                            job.id,
-                            "INFO",
-                            "duration",
-                            "UNCOVERED_EVIDENCE_SECTION_GENERATED",
-                            f"Generated bounded extra section on uncovered evidence: {uncovered_heading}",
-                            metadata={
-                                "extra_section_heading": uncovered_heading,
-                                "word_count": extra_sec.get("word_count", 0),
-                                "uncovered_evidence_ids": uncovered_sec_def["relevant_evidence_ids"],
-                            },
-                            db=db,
-                        )
-                        db.commit()
-                except Exception as extra_err:
-                    logger.warning(f"Uncovered material section generation failed non-fatally: {extra_err}")
-            else:
-                underfill_msg = (
-                    f"Generated {total_generated_words} words ({fill_ratio:.1%} of planned {planned_target} words). "
-                    "No uncovered evidence remaining; accepting faithful shorter script without artificial recap filler."
-                )
-                logger.info(underfill_msg)
-                record_job_diagnostic_event(
-                    job.id,
-                    "WARNING",
-                    "duration",
-                    "DURATION_UNDERFILL_ACCEPTED",
-                    underfill_msg,
-                    metadata={
-                        "total_words": total_generated_words,
-                        "planned_target": planned_target,
-                        "fill_ratio": round(fill_ratio, 3),
-                    },
-                    db=db,
-                )
-
-    # 5. Semantic Fidelity Audit & Bounded Repair
+    # 5. Initial Script Assembly & Smoothing
+    _set_script_substage(job, "script_assembly", db)
     if status_notifier:
-        status_notifier("Verifying source coverage and factual fidelity...")
+        status_notifier("Assembling initial podcast script...")
 
-    repaired_sections, audit_res = audit_and_repair_fidelity(
-        job=job,
-        sections=completed_sections,
-        source_ledger=source_ledger,
-        evidence_packet=evidence_packet,
-        scope=effective_scope,
-        db=db,
-        source_text=source_text,
-    )
-    job.fidelity_audit_json = audit_res
-
-    # 6. Final Coherence Pass & Assembly
-    if status_notifier:
-        status_notifier("Assembling final podcast script...")
-
-    final_script = assemble_and_smooth_script(
-        episode_title=topic,
+    initial_title = clean_metadata_scaffolding(job.custom_title or topic)
+    assembled_script = assemble_and_smooth_script(
+        episode_title=initial_title,
         episode_description=outline.get("episode_description", f"Episode about {topic}"),
-        sections=repaired_sections,
+        sections=completed_sections,
         source_title=source_title,
         planned_target_words=planned_target,
     )
-    job.script_json = final_script.model_dump()
+    job.script_json = assembled_script.model_dump()
+    db.commit()
 
-    # Calculate precise duration using cadence, numeric/acronym density & pause models
-    from herald.services.eta_calculator import calculate_script_duration
+    # 6. Quality Gate: Anti-Repetition & Structural Checks
+    _set_script_substage(job, "quality_gate", db)
     from herald.services.quality_gate import run_quality_gate
 
-    dur_info = calculate_script_duration(
-        job.script_json, job.custom_speed or settings.KOKORO_SPEED
-    )
-    job.program_duration_seconds = dur_info.get("predicted_duration_seconds")
-
-    # Run deterministic local quality gate
     cleaned_script, q_report = run_quality_gate(
         job.script_json,
         job=job,
         outline=outline,
-        fidelity_audit=audit_res,
     )
     job.script_json = cleaned_script
+    job._recent_distinctive_warnings = q_report.distinctive_phrase_warnings
+    metadata_cleanup_needed = q_report.metadata_cleanup_recommended
 
-    # Pre-TTS Duplicate Repair Gate (AI modes only, non-Literal)
+    # 7. Post-Generation Repetition Cleanup (rewriting only later section, bounded 1 pass)
+    _set_script_substage(job, "repetition_repair", db)
     duplicate_repair_enabled = getattr(settings, "HERALD_DUPLICATE_REPAIR_ENABLED", True)
+    repaired_sections = list(completed_sections)
     if (
         duplicate_repair_enabled
         and not is_literal
@@ -2517,19 +2546,18 @@ def execute_unified_long_form_pipeline(
         )
         if dup_meta.get("repaired_count", 0) > 0:
             repaired_sections = repaired_secs
-            final_script = assemble_and_smooth_script(
+            assembled_script = assemble_and_smooth_script(
                 episode_title=job.script_json.get("episode_title", topic),
                 episode_description=outline.get("episode_description", f"Episode about {topic}"),
                 sections=repaired_sections,
                 source_title=source_title,
                 planned_target_words=planned_target,
             )
-            job.script_json = final_script.model_dump()
+            job.script_json = assembled_script.model_dump()
             cleaned_script, q_report = run_quality_gate(
                 job.script_json,
                 job=job,
                 outline=outline,
-                fidelity_audit=audit_res,
             )
             job.script_json = cleaned_script
             record_job_diagnostic_event(
@@ -2546,8 +2574,50 @@ def execute_unified_long_form_pipeline(
                 db=db,
             )
 
-    # Title & Heading Metadata Cleanup (AI modes only, non-Literal)
-    if not is_literal and q_report.metadata_cleanup_recommended:
+    # 8. Content Gap Research & Targeted Expansion
+    # Evaluates total generated words vs planned budget using centralized tolerances.
+    # Fills genuine gaps with fresh research/uncovered evidence rather than artificial padding,
+    # strictly preserving existing section content.
+    _set_script_substage(job, "gap_expansion", db)
+    gap_info = detect_content_gap(repaired_sections, planned_target, outline)
+    if gap_info and not is_literal:
+        expanded_sections = expand_script_content_gap(
+            job=job,
+            completed_sections=repaired_sections,
+            gap_info=gap_info,
+            topic=topic,
+            evidence_packet=evidence_packet,
+            scope=effective_scope,
+            db=db,
+            status_notifier=status_notifier,
+        )
+        if len(expanded_sections) > len(repaired_sections):
+            repaired_sections = expanded_sections
+            assembled_script = assemble_and_smooth_script(
+                episode_title=job.script_json.get("episode_title", topic),
+                episode_description=outline.get("episode_description", f"Episode about {topic}"),
+                sections=repaired_sections,
+                source_title=source_title,
+                planned_target_words=planned_target,
+            )
+            job.script_json = assembled_script.model_dump()
+    elif not gap_info and planned_target and planned_target > 500:
+        tot_w = sum(s.get("word_count", 0) for s in repaired_sections)
+        logger.info(
+            f"Long-form generation reached {tot_w / float(planned_target):.1%} of target "
+            f"({tot_w}/{planned_target} words). Accepted cleanly."
+        )
+
+    # 9. Final Quality Check & Title/Heading Metadata Cleanup
+    _set_script_substage(job, "final_quality_check", db)
+    cleaned_script, q_report = run_quality_gate(
+        job.script_json,
+        job=job,
+        outline=outline,
+    )
+    job.script_json = cleaned_script
+
+    if not is_literal and (q_report.metadata_cleanup_recommended or metadata_cleanup_needed):
         pol_script = cleanup_script_metadata(
             job=job,
             script_dict=dict(job.script_json),
@@ -2560,7 +2630,6 @@ def execute_unified_long_form_pipeline(
             job.script_json,
             job=job,
             outline=outline,
-            fidelity_audit=audit_res,
         )
         job.script_json = cleaned_script
         record_job_diagnostic_event(
@@ -2571,6 +2640,7 @@ def execute_unified_long_form_pipeline(
             f"Polished episode metadata: title='{job.script_json.get('episode_title')}'",
             db=db,
         )
+
     if q_report.has_warnings:
         record_job_diagnostic_event(
             job.id,
@@ -2581,6 +2651,49 @@ def execute_unified_long_form_pipeline(
             metadata={"warning_count": len(q_report.warnings), "warnings": [w.to_dict() for w in q_report.warnings]},
             db=db,
         )
+
+    # 10. Semantic Fidelity Audit & Bounded Repair
+    # Placed AFTER repetition repair and gap expansion so all final content is audited.
+    _set_script_substage(job, "fidelity_audit", db)
+    if status_notifier:
+        status_notifier("Verifying source coverage and factual fidelity...")
+
+    repaired_sections, audit_res = audit_and_repair_fidelity(
+        job=job,
+        sections=repaired_sections,
+        source_ledger=source_ledger,
+        evidence_packet=evidence_packet,
+        scope=effective_scope,
+        db=db,
+        source_text=source_text,
+    )
+    job.fidelity_audit_json = audit_res
+
+    # If fidelity repair updated sections, reassemble script and rerun local quality gate
+    if audit_res.get("repair_succeeded"):
+        assembled_script = assemble_and_smooth_script(
+            episode_title=job.script_json.get("episode_title", topic),
+            episode_description=outline.get("episode_description", f"Episode about {topic}"),
+            sections=repaired_sections,
+            source_title=source_title,
+            planned_target_words=planned_target,
+        )
+        job.script_json = assembled_script.model_dump()
+        cleaned_script, q_report = run_quality_gate(
+            job.script_json,
+            job=job,
+            outline=outline,
+            fidelity_audit=audit_res,
+        )
+        job.script_json = cleaned_script
+
+    # Duration calculation
+    from herald.services.eta_calculator import calculate_script_duration
+
+    dur_info = calculate_script_duration(
+        job.script_json, job.custom_speed or settings.KOKORO_SPEED
+    )
+    job.program_duration_seconds = dur_info.get("predicted_duration_seconds")
 
     if audit_res.get("content_warning"):
         record_job_diagnostic_event(
@@ -2604,9 +2717,31 @@ def execute_unified_long_form_pipeline(
         "duration_estimation": dur_info,
         "quality_gate": q_report.to_dict(),
         "content_warning": bool(audit_res.get("content_warning")),
+        "script_substage": "fidelity_audit",
     })
     job.configuration_state_json = cfg_state
     db.commit()
 
+    if isinstance(job.script_json, dict) and "segments" in job.script_json and "episode_description" in job.script_json and "warnings" in job.script_json:
+        try:
+            final_script = PodcastScriptResponse(**job.script_json)
+        except Exception:
+            final_script = assemble_and_smooth_script(
+                episode_title=job.script_json.get("episode_title", topic),
+                episode_description=outline.get("episode_description", f"Episode about {topic}"),
+                sections=repaired_sections,
+                source_title=source_title,
+                planned_target_words=planned_target,
+            )
+            job.script_json = final_script.model_dump()
+    else:
+        final_script = assemble_and_smooth_script(
+            episode_title=job.script_json.get("episode_title", topic) if isinstance(job.script_json, dict) else topic,
+            episode_description=outline.get("episode_description", f"Episode about {topic}"),
+            sections=repaired_sections,
+            source_title=source_title,
+            planned_target_words=planned_target,
+        )
+        job.script_json = final_script.model_dump()
     return final_script
 

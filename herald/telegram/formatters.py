@@ -16,6 +16,7 @@ from herald.services.settings_fingerprint import (
     format_settings_display,
     get_job_generation_settings,
 )
+from herald.services.token_cost import aggregate_job_tokens_and_cost
 
 logger = logging.getLogger(__name__)
 
@@ -840,7 +841,33 @@ def format_rerun_confirmation(
     return text, reply_markup
 
 
-def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | None = None) -> str:
+def get_job_token_cost_summary(job: PodcastJob, db: Any = None):
+    """
+    Compute token and cost summary for a job if AI interactions are available
+    via `job.ai_interactions` or the database.
+    """
+    mode = getattr(job, "request_mode", None)
+    if mode == RequestMode.LITERAL.value:
+        return aggregate_job_tokens_and_cost([])
+
+    interactions = getattr(job, "ai_interactions", None)
+    if interactions is None and db is not None:
+        try:
+            from herald.db.models import AIInteraction
+            interactions = db.query(AIInteraction).filter(AIInteraction.job_id == job.id).all()
+        except Exception:
+            interactions = None
+    if interactions:
+        return aggregate_job_tokens_and_cost(interactions)
+    return None
+
+
+def format_queued(
+    job: PodcastJob,
+    script_json: dict | None,
+    eta_info: dict | None = None,
+    db: Any = None,
+) -> str:
     """Format rich queued card for automatically queued or explicitly approved jobs."""
     script_obj = script_json or job.script_json or {}
     title_raw = get_job_display_title(job)
@@ -872,6 +899,9 @@ def format_queued(job: PodcastJob, script_json: dict | None, eta_info: dict | No
 
     ai_prov, ai_model = get_job_ai_identity(job)
     ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
+    summary = get_job_token_cost_summary(job, db)
+    if summary and summary.call_count > 0:
+        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({summary.cost_display})"
 
     queue_line = f"\n• <b>Queue Position:</b> {jobs_ahead} jobs ahead" if jobs_ahead > 0 else "\n• <b>Queue Position:</b> Next up"
     desc_section = f"\n<i>{desc_clean}</i>\n" if desc_clean else ""
@@ -896,6 +926,7 @@ def format_completion(
     actual_chunks_count: int | None = None,
     file_size_bytes: int | None = None,
     active_processing_seconds: int | float | None = None,
+    db: Any = None,
 ) -> str:
     """
     Format concise rich caption for audio delivery adhering to Telegram's 1024-char limit.
@@ -936,6 +967,10 @@ def format_completion(
 
     ai_prov, ai_model = get_job_ai_identity(job)
     ai_line = f"\n• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>" if ai_prov and ai_model else ""
+    summary = get_job_token_cost_summary(job, db)
+    cost_line = ""
+    if summary and summary.call_count > 0:
+        cost_line = f"\n• <b>AI Cost:</b> {summary.cost_display} ({summary.total_tokens:,} tokens)"
 
     # Truncate description safely to stay well within 1024 chars
     desc_clean = html.escape(desc[:120] + "..." if len(desc) > 120 else desc) if desc else ""
@@ -956,6 +991,7 @@ def format_completion(
         f"• <b>Mode:</b> {mode_str}\n"
         f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
         f"{ai_line}"
+        f"{cost_line}"
         f"{words_line}"
         f"{chunks_line}"
         f"{proc_line}\n"
@@ -972,6 +1008,7 @@ def format_completion(
             f"• <b>Mode:</b> {mode_str}\n"
             f"• <b>Voice & Speed:</b> <code>{voice}</code> @ {speed:.1f}x"
             f"{ai_line}"
+            f"{cost_line}"
             f"{words_line}"
             f"{chunks_line}"
             f"{proc_line}\n"
@@ -1036,7 +1073,7 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
     # AI identity & tokens
     ai_prov, ai_model = get_job_ai_identity(job)
     if job.request_mode == "literal":
-        ai_line = "• <b>AI:</b> <code>None (Literal mode)</code>"
+        ai_line = "• <b>AI:</b> <code>None (Literal mode)</code>\n• <b>AI Cost:</b> $0.00 (0 tokens)"
     elif ai_prov and ai_model:
         ai_line = f"• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
     else:
@@ -1050,8 +1087,8 @@ def format_diagnostics_card(job: PodcastJob, db: Any = None) -> str:
             chunks_str = f"\n• <b>TTS Chunks:</b> {tts_count}"
         ai_calls = db.query(AIInteraction).filter(AIInteraction.job_id == job.id).all()
         if ai_calls:
-            tot_tok = sum(c.total_tokens for c in ai_calls if c.total_tokens is not None)
-            tok_str = f" ({tot_tok:,} tokens)" if tot_tok else ""
+            summary = aggregate_job_tokens_and_cost(ai_calls)
+            tok_str = f" ({summary.total_tokens:,} tokens, {summary.cost_display})" if summary.total_tokens else f" ({summary.cost_display})"
             ai_line += f"\n• <b>AI Interactions:</b> {len(ai_calls)} call(s){tok_str}"
 
     # Retries / Errors
@@ -1249,6 +1286,7 @@ def format_first_chunk_progress(
     total_chunks: int,
     eta_range: str,
     completed_chunks: int = 1,
+    db: Any = None,
 ) -> str:
     """
     Format milestone notification card sent when TTS synthesis progress is reported.
@@ -1266,6 +1304,10 @@ def format_first_chunk_progress(
         ai_line = f"• <b>AI Model:</b> <code>{html.escape(ai_prov)} ({html.escape(ai_model)})</code>"
     else:
         ai_line = "• <b>AI:</b> <code>None</code>"
+
+    summary = get_job_token_cost_summary(job, db)
+    if summary and summary.call_count > 0:
+        ai_line += f"\n• <b>AI Usage:</b> {summary.tokens_display} ({summary.cost_display})"
 
     voice = html.escape(job.custom_voice or getattr(settings, "KOKORO_VOICE", "af_heart"))
     speed = float(job.custom_speed or getattr(settings, "KOKORO_SPEED", 1.0))

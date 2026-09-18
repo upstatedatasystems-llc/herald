@@ -337,7 +337,67 @@ def int_to_words(n: int) -> str:
         hundred_part = f"{ONES[n // 100]} hundred"
         rem = n % 100
         return f"{hundred_part} {int_to_words(rem)}" if rem else hundred_part
+ROMAN_NUMERALS_MAP = {
+    "I": "one",
+    "II": "two",
+    "III": "three",
+    "IV": "four",
+    "V": "five",
+    "VI": "six",
+    "VII": "seven",
+    "VIII": "eight",
+    "IX": "nine",
+    "X": "ten",
+    "XI": "eleven",
+    "XII": "twelve",
+    "XIII": "thirteen",
+    "XIV": "fourteen",
+    "XV": "fifteen",
+    "XVI": "sixteen",
+    "XVII": "seventeen",
+    "XVIII": "eighteen",
+    "XIX": "nineteen",
+    "XX": "twenty",
+}
+
+
+def cardinal_to_words(n: int) -> str:
+    """Convert an integer up to billions into spoken words."""
+    if n < 0:
+        return f"negative {cardinal_to_words(-n)}"
+    if n < 1000:
+        return int_to_words(n)
+    if n < 1_000_000:
+        thousands = n // 1000
+        rem = n % 1000
+        th_str = f"{int_to_words(thousands)} thousand"
+        if rem == 0:
+            return th_str
+        return f"{th_str} {int_to_words(rem)}"
+    if n < 1_000_000_000:
+        millions = n // 1_000_000
+        rem = n % 1_000_000
+        m_str = f"{int_to_words(millions)} million"
+        if rem == 0:
+            return m_str
+        return f"{m_str} {cardinal_to_words(rem)}"
     return str(n)
+
+
+def isotope_number_to_words(n: int) -> str:
+    """Convert an isotope mass number (e.g. 235, 238, 14, 60) into spoken words."""
+    if n < 100:
+        return int_to_words(n)
+    if 100 <= n < 1000:
+        first_digit = ONES[n // 100]
+        rem = n % 100
+        if rem == 0:
+            return f"{first_digit} hundred"
+        elif rem < 10:
+            return f"{first_digit} oh-{ONES[rem]}"
+        else:
+            return f"{first_digit} {int_to_words(rem)}"
+    return cardinal_to_words(n)
 
 
 def year_to_words(year: int) -> str:
@@ -451,6 +511,114 @@ def normalize_for_speech(
                         rule="lexicon_entry",
                     )
                 )
+
+    # 2b. Contextual nautical pronunciation & awkward compounds
+    nautical_bow_patterns = [
+        (re.compile(r"\b(submarine(?:'s)?)\s+bow\b", re.IGNORECASE), r"\1 bough"),
+        (re.compile(r"\bbow\s+(sonar|section|form|planes|torpedo(?:es)?|compartment|thruster(?:s)?|doors?|cap|buoyancy)\b", re.IGNORECASE), r"bough \1"),
+        (re.compile(r"\b(ship(?:'s)?|boat(?:'s)?|vessel(?:'s)?|destroyer(?:'s)?|cruiser(?:'s)?|carrier(?:'s)?|frigate(?:'s)?|cutter(?:'s)?)\s+bow\b", re.IGNORECASE), r"\1 bough"),
+        (re.compile(r"\b(port|starboard)\s+bow\b", re.IGNORECASE), r"\1 bough"),
+        (re.compile(r"\b(at|on|over|across|near|off)\s+the\s+bow\b", re.IGNORECASE), r"\1 the bough"),
+        (re.compile(r"\bbow\s+of\s+the\s+(submarine|ship|boat|vessel|craft|destroyer|cruiser|carrier|frigate)\b", re.IGNORECASE), r"bough of the \1"),
+    ]
+    for pat, rep in nautical_bow_patterns:
+        matches = list(pat.finditer(working))
+        for m in reversed(matches):
+            orig = m.group(0)
+            sub_val = pat.sub(rep, orig)
+            working = working[:m.start()] + sub_val + working[m.end():]
+            transformations.append(TransformationRecord(original=orig, spoken=sub_val, rule="nautical_bow"))
+
+    hard_won_pat = re.compile(r"\bhard-won\b", re.IGNORECASE)
+    matches = list(hard_won_pat.finditer(working))
+    for m in reversed(matches):
+        orig = m.group(0)
+        rep = "hard-earned" if orig.islower() else ("Hard-earned" if orig[0].isupper() else "hard-earned")
+        working = working[:m.start()] + rep + working[m.end():]
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="compound_softening"))
+
+    # 2c. Allowlisted chemical isotopes (e.g. uranium-235, U-235, plutonium-239, carbon-14)
+    ISOTOPE_ELEMENTS = "uranium|plutonium|thorium|carbon|cobalt|cesium|strontium|radium|iodine|hydrogen"
+    ISOTOPE_SYMBOLS = "U|Pu|Th|Co|Cs|Sr|Ra|I|H"
+
+    def _replace_isotope_element(match: re.Match) -> str:
+        elem = match.group(1)
+        num_str = match.group(2)
+        try:
+            num = int(num_str)
+            words = isotope_number_to_words(num)
+            orig = match.group(0)
+            rep = f"{elem} {words}"
+            transformations.append(TransformationRecord(original=orig, spoken=rep, rule="isotope"))
+            return rep
+        except ValueError:
+            return match.group(0)
+
+    working = re.sub(rf"\b({ISOTOPE_ELEMENTS})-(\d{{1,3}})\b", _replace_isotope_element, working, flags=re.IGNORECASE)
+
+    def _replace_isotope_symbol(match: re.Match) -> str:
+        sym = match.group(1)
+        num_str = match.group(2)
+        try:
+            num = int(num_str)
+            words = isotope_number_to_words(num)
+            orig = match.group(0)
+            rep = f"{sym} {words}"
+            transformations.append(TransformationRecord(original=orig, spoken=rep, rule="isotope_symbol"))
+            return rep
+        except ValueError:
+            return match.group(0)
+
+    working = re.sub(rf"\b({ISOTOPE_SYMBOLS})-(\d{{1,3}})\b", _replace_isotope_symbol, working)
+
+    # 2d. Processor, Architecture & Model IDs
+    def _replace_x86_64(match: re.Match) -> str:
+        orig = match.group(0)
+        rep = "x eighty-six sixty-four"
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="processor_id"))
+        return rep
+
+    working = re.sub(r"\bx86[-_]64\b", _replace_x86_64, working, flags=re.IGNORECASE)
+
+    def _replace_x86(match: re.Match) -> str:
+        orig = match.group(0)
+        rep = "x eighty-six"
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="processor_id"))
+        return rep
+
+    working = re.sub(r"\bx86\b(?![-_]64)", _replace_x86, working, flags=re.IGNORECASE)
+
+    def _replace_arm64(match: re.Match) -> str:
+        orig = match.group(0)
+        rep = "A R M sixty-four"
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="processor_id"))
+        return rep
+
+    working = re.sub(r"\bARM64\b", _replace_arm64, working, flags=re.IGNORECASE)
+
+    def _replace_m_series(match: re.Match) -> str:
+        orig = match.group(0)
+        digit = int(match.group(1))
+        rep = f"M {ONES[digit]}"
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="processor_id"))
+        return rep
+
+    working = re.sub(r"\bM([1-4])\b", _replace_m_series, working)
+
+    def _replace_mark(match: re.Match) -> str:
+        orig = match.group(0)
+        roman = match.group(1)
+        spoken_num = ROMAN_NUMERALS_MAP.get(roman.upper(), roman)
+        rep = f"Mark {spoken_num}"
+        transformations.append(TransformationRecord(original=orig, spoken=rep, rule="mark_designation"))
+        return rep
+
+    working = re.sub(
+        r"\bMark\s+(I{1,3}|IV|V|VI{1,3}|IX|X|XI{1,3}|XIV|XV|XVI{1,3}|XIX|XX)\b",
+        _replace_mark,
+        working,
+        flags=re.IGNORECASE,
+    )
 
     # 3. Letter-number identifiers (e.g. B-52 -> B fifty-two, F-16 -> F sixteen, 64-bit -> sixty-four bit)
     def _replace_letter_hyphen_number(match: re.Match) -> str:
@@ -631,6 +799,20 @@ def normalize_for_speech(
         return rep
 
     working = unit_pattern.sub(_replace_unit, working)
+
+    # 5d. Cardinals with commas: 4,100 -> "four thousand one hundred", 8,200 -> "eight thousand two hundred"
+    def _replace_comma_cardinal(match: re.Match) -> str:
+        orig = match.group(0)
+        num_str = orig.replace(",", "")
+        try:
+            val = int(num_str)
+            spoken = cardinal_to_words(val)
+            transformations.append(TransformationRecord(original=orig, spoken=spoken, rule="comma_cardinal"))
+            return spoken
+        except ValueError:
+            return orig
+
+    working = re.sub(r"\b\d{1,3}(?:,\d{3})+\b", _replace_comma_cardinal, working)
 
     # 6. Normalize excess whitespace
     working = re.sub(r"[ \t]+", " ", working).strip()

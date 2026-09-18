@@ -83,6 +83,7 @@ def notify_tts_chunk_progress(
         total_chunks=total_chunks,
         eta_range=eta_range,
         completed_chunks=chunk_index,
+        db=db,
     )
 
     client = telegram_client or TelegramClient()

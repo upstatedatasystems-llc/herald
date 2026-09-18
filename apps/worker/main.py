@@ -547,6 +547,42 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             if not segments:
                 raise ValueError("Job script_json contains no segments to synthesize.")
 
+            # Fidelity verification fail-closed check prior to TTS synthesis:
+            # If unresolved material fidelity issues remain and the job has not been explicitly approved,
+            # fail closed immediately to prevent synthesizing inaccurate or unverified audio.
+            fid_audit = getattr(job, "fidelity_audit_json", None) or {}
+            if isinstance(fid_audit, dict):
+                has_unresolved_fidelity = (
+                    fid_audit.get("status") == "unresolved_issue_remains"
+                    or fid_audit.get("unresolved_issue") is True
+                ) and fid_audit.get("has_material_issues") is not False
+                if has_unresolved_fidelity and not getattr(job, "approved_at", None):
+                    err_msg = fid_audit.get("repair_instructions") or "Unresolved material fidelity issues remain without user approval."
+                    record_job_diagnostic_event(
+                        job.id,
+                        "ERROR",
+                        "fidelity",
+                        "FIDELITY_VERIFICATION_FAILED",
+                        f"Unresolved material fidelity issues remain and job was not approved. Halting before TTS synthesis: {err_msg}",
+                        metadata=fid_audit,
+                        db=db,
+                    )
+                    job.failed_stage = "FIDELITY_VERIFICATION"
+                    job.error_code = "FIDELITY_VERIFICATION_FAILED"
+                    job.error_detail = err_msg
+                    transition_job_state(
+                        db, job, JobState.FAILED_FINAL.value,
+                        component="herald-worker",
+                        message=f"Fidelity verification failed: {err_msg}",
+                    )
+                    db.commit()
+                    try:
+                        from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                        ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                    except Exception as arc_err:
+                        logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
+                    return
+
             # Pronunciation & Spoken-Text Preflight before TTS synthesis
             try:
                 all_narration = " ".join(s.get("narration", "") for s in segments)
@@ -703,6 +739,8 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                         target_minutes=getattr(job, "target_minutes", None),
                         actual_body_duration_seconds=program_dur_sec,
                         content_mode=getattr(job, "content_mode", None),
+                        research_depth=getattr(job, "research_depth", None),
+                        request_mode=getattr(job, "request_mode", None),
                     )
                     intro_wav_path = chunks_dir / f"branding_intro_{job.id}.wav"
                     intro_res = synthesize_branding_segment(

@@ -173,6 +173,7 @@ def deliver_single_job(db: Session, job: PodcastJob, client: TelegramClient) -> 
         actual_chunks_count=chunks_count,
         file_size_bytes=file_size_bytes,
         active_processing_seconds=active_sec,
+        db=db,
     )
     completion_markup = format_completion_markup(job)
 

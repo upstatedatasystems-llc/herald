@@ -40,6 +40,10 @@ from herald.services.redaction import (
     sanitize_content_dict,
     scan_for_secrets,
 )
+from herald.services.token_cost import (
+    aggregate_job_tokens_and_cost,
+    calculate_interaction_cost,
+)
 
 logger = logging.getLogger("herald.diagnostics.export")
 
@@ -253,6 +257,8 @@ def build_manifest_dict(
     audio_minutes = (duration_sec / 60.0) if duration_sec and duration_sec > 0 else 0.0
     ai_tokens_per_audio_min = round(total_ai_tokens / audio_minutes, 1) if audio_minutes > 0 else None
 
+    cost_summary = aggregate_job_tokens_and_cost(ai_interactions)
+
     return {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "herald_version": getattr(settings, "HERALD_VERSION", "2.0.0"),
@@ -277,6 +283,11 @@ def build_manifest_dict(
             "repair_tokens": repair_ai_tokens,
             "research_tokens": research_ai_tokens,
             "ai_tokens_per_audio_minute": ai_tokens_per_audio_min,
+            "total_cost_usd": cost_summary.total_cost_usd,
+            "cost_display": cost_summary.cost_display,
+            "is_cost_complete": cost_summary.is_cost_complete,
+            "is_cost_available": cost_summary.is_cost_available,
+            "by_model": cost_summary.by_model,
         },
         "research_depth": job.research_depth,
         "resolved_default": bool(getattr(job, "resolved_default", False)),
@@ -638,6 +649,8 @@ Configured API keys, credentials, and Authorization headers have been scrubbed.
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
                 "total_tokens": r.total_tokens,
+                "cost_usd": calculate_interaction_cost(r)[0],
+                "pricing_known": calculate_interaction_cost(r)[1],
                 "error_category": r.error_category,
                 "error_message": redact_text(r.error_message),
                 "request_evidence": redact_dict(r.request_json_sanitized),

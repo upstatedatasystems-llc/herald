@@ -34,11 +34,26 @@ GENERIC_CATCHUP_PATTERNS = [
 ]
 
 RAW_PREFIX_PATTERNS = [
-    r"^(?:topic|subject|title):\s*",
-    r"^(?:section\s+\d+|chapter\s+\d+):\s*",
-    r"^(?:heading|header):\s*",
-    r"^(?:narration|script):\s*",
+    r"^(?:topic|subject|title|heading|header|narration|script)\s*[:.\-–—]\s*",
+    r"^(?:grounded\s+finding|key\s+finding|finding|key\s+takeaway|takeaway)\s*(?:\d+|[ivxlcdm]+)?\s*[:.\-–—]\s*",
+    r"^(?:section|chapter|part|segment)\s+(?:\d+|[ivxlcdm]+)\s*[:.\-–—]\s*",
 ]
+
+
+def clean_metadata_scaffolding(text: str) -> str:
+    """
+    Deterministically strip scaffolding prefixes (e.g. 'Grounded Finding 1:', 'Chapter 2:', 'Section 3:')
+    and dangling trailing punctuation from titles and headings.
+    """
+    if not text:
+        return ""
+    cleaned = text.strip()
+    for pat in RAW_PREFIX_PATTERNS:
+        if re.search(pat, cleaned, re.IGNORECASE):
+            cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+            break
+    cleaned = re.sub(r"[:,\-–—\.]\s*$", "", cleaned).strip()
+    return cleaned
 
 TTS_RISK_PATTERNS = [
     (r"https?://\S+", "Unexpanded raw URL detected in narration"),
@@ -80,6 +95,10 @@ class QualityReport(BaseModel):
         return len(self.warnings) > 0
 
     @property
+    def distinctive_phrase_warnings(self) -> list[QualityWarning]:
+        return [w for w in self.warnings if w.code == "REPEATED_DISTINCTIVE_PHRASE"]
+
+    @property
     def near_duplicate_warnings(self) -> list[QualityWarning]:
         return [w for w in self.warnings if w.code == "NEAR_DUPLICATE_PASSAGE"]
 
@@ -114,7 +133,40 @@ class QualityReport(BaseModel):
         d = self.model_dump()
         d["duplicate_repair_recommended"] = self.duplicate_repair_recommended
         d["metadata_cleanup_recommended"] = self.metadata_cleanup_recommended
+        d["distinctive_phrase_warnings"] = [w.to_dict() for w in self.distinctive_phrase_warnings]
         return d
+
+
+COMMON_PHRASE_STOPWORDS = {
+    "a", "an", "the", "in", "on", "at", "by", "for", "with", "about", "against",
+    "between", "into", "through", "during", "before", "after", "above", "below",
+    "to", "from", "up", "down", "out", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "when", "where", "why", "how", "all", "any",
+    "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can",
+    "will", "just", "don", "should", "now", "and", "but", "if", "or", "because",
+    "as", "until", "while", "of", "it", "its", "is", "was", "are", "were", "be",
+    "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing",
+    "would", "could", "ought", "i", "you", "he", "she", "we", "they", "this",
+    "that", "these", "those",
+}
+
+
+def _extract_distinctive_phrases(text: str, min_words: int = 4, max_words: int = 6) -> set[str]:
+    """Extract distinctive 4-6 word candidate phrases, filtering out common stop-word boilerplate."""
+    raw_tokens = text.split()
+    words = [re.sub(r"[^\w\-]", "", w.lower()) for w in raw_tokens]
+    words = [w for w in words if w]
+    if len(words) < min_words:
+        return set()
+    phrases = set()
+    for n in range(min_words, max_words + 1):
+        for i in range(len(words) - n + 1):
+            ngram = words[i : i + n]
+            non_stop = [w for w in ngram if w not in COMMON_PHRASE_STOPWORDS]
+            if len(non_stop) >= 2 and len(non_stop) / len(ngram) >= 0.4:
+                phrases.add(" ".join(ngram))
+    return phrases
 
 
 def _extract_trigrams(text: str) -> set[tuple[str, str, str]]:
@@ -163,7 +215,7 @@ def run_quality_gate(
             break
 
     # Clean dangling trailing punctuation from title
-    ep_title_clean = re.sub(r"[:,\-–—]\s*$", "", ep_title).strip()
+    ep_title_clean = re.sub(r"[:,\-–—\.]\s*$", "", ep_title).strip()
     if ep_title_clean != ep_title:
         cleanups.append(f"Stripped trailing punctuation from episode title ('{ep_title}' -> '{ep_title_clean}')")
         ep_title = ep_title_clean
@@ -192,6 +244,7 @@ def run_quality_gate(
     seen_headings: dict[str, int] = {}
     paragraphs_pool: list[tuple[int, str, set[tuple[str, str, str]]]] = []
     openings_pool: list[tuple[int, str]] = []
+    section_phrases_pool: dict[int, set[str]] = {}
 
     for idx, seg in enumerate(segments, 1):
         if not isinstance(seg, dict):
@@ -208,7 +261,7 @@ def run_quality_gate(
                 break
 
         # Clean dangling trailing punctuation from heading
-        h_clean = re.sub(r"[:,\-–—]\s*$", "", h_raw).strip()
+        h_clean = re.sub(r"[:,\-–—\.]\s*$", "", h_raw).strip()
         if h_clean != h_raw:
             cleanups.append(f"Stripped trailing punctuation from section {idx} heading ('{h_raw}' -> '{h_clean}')")
             h_raw = h_clean
@@ -331,6 +384,11 @@ def run_quality_gate(
             if trigrams:
                 paragraphs_pool.append((idx, p, trigrams))
 
+        # Distinctive phrase extraction for lightweight advisory repetition detection
+        sec_phrases = _extract_distinctive_phrases(narr_raw)
+        if sec_phrases:
+            section_phrases_pool[idx] = sec_phrases
+
         cleaned_segments.append(seg_clean)
 
     cleaned_script["segments"] = cleaned_segments
@@ -378,7 +436,27 @@ def run_quality_gate(
                         )
                     )
 
-    # 5. Section budget divergence
+    # 5. Advisory Distinctive Phrase / Concept Detector
+    # Evaluates distinctive 4-6 word n-grams repeated across multiple distinct sections.
+    # Strictly advisory (severity=QualitySeverity.INFO) so legitimate terminology does not trigger unwanted repair.
+    phrase_to_sections: dict[str, set[int]] = {}
+    for s_idx, p_phrases in section_phrases_pool.items():
+        for ph in p_phrases:
+            phrase_to_sections.setdefault(ph, set()).add(s_idx)
+
+    for ph, sec_set in phrase_to_sections.items():
+        if len(sec_set) >= 3:
+            sorted_secs = sorted(sec_set)
+            warnings.append(
+                QualityWarning(
+                    code="REPEATED_DISTINCTIVE_PHRASE",
+                    message=f"Distinctive phrase repeated across sections {sorted_secs}: '{ph}'",
+                    severity=QualitySeverity.INFO,
+                    metadata={"phrase": ph, "sections": sorted_secs, "repetition_count": len(sorted_secs)},
+                )
+            )
+
+    # 6. Section budget divergence
     if outline and outline.get("sections"):
         outline_budgets = {s.get("section_index"): s.get("word_budget") for s in outline["sections"]}
         for seg in cleaned_segments:

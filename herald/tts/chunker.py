@@ -10,13 +10,17 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from herald.audio.pause_policy import PAUSE_BY_BOUNDARY, BoundaryType
+from herald.audio.pause_policy import (
+    PAUSE_BY_BOUNDARY,
+    BoundaryType,
+    calculate_complexity_pause,
+)
 from herald.tts.lexicon import PronunciationLexicon
 from herald.tts.normalizer import TransformationRecord, normalize_for_speech
 
 
 class TTSChunk:
-    """Represents a chunk prepared for Kokoro TTS synthesis."""
+    """Represents a discrete audio synthesis chunk with associated metadata."""
 
     def __init__(
         self,
@@ -28,6 +32,7 @@ class TTSChunk:
         canonical_text: str | None = None,
         pause_duration_seconds: float | None = None,
         transformations: list[dict[str, str]] | None = None,
+        pause_reason: str | None = None,
     ):
         self.index = index
         self.text = text  # Spoken narration sent to Kokoro
@@ -45,8 +50,11 @@ class TTSChunk:
         self.canonical_text = canonical_text if canonical_text is not None else text
         if pause_duration_seconds is not None:
             self.pause_duration_seconds = float(pause_duration_seconds)
+            self.pause_reason = pause_reason or "explicit"
         else:
-            self.pause_duration_seconds = PAUSE_BY_BOUNDARY.get(self.boundary_type, 0.5)
+            calc_pause, reason = calculate_complexity_pause(self.text, self.boundary_type)
+            self.pause_duration_seconds = calc_pause
+            self.pause_reason = reason
 
         self.transformations = transformations or []
 
@@ -59,8 +67,12 @@ class TTSChunk:
             "is_section_end": self.is_section_end,
             "boundary_type": self.boundary_type.value,
             "pause_duration_seconds": self.pause_duration_seconds,
+            "pause_reason": getattr(self, "pause_reason", "baseline"),
             "transformations": self.transformations,
         }
+
+
+Chunk = TTSChunk
 
 
 def split_text_into_sentences(text: str) -> list[str]:

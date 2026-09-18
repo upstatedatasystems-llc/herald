@@ -596,6 +596,61 @@ def handle_telegram_command(
             wait_str = f"{m}m {s}s" if m > 0 else f"{s}s"
             tts_queue_line = f"• <b>TTS Queue:</b> {len(queued_tts_jobs)} waiting (oldest waiting {wait_str})\n"
 
+        # Active jobs detailed progress breakdown (script vs audio)
+        active_jobs = (
+            db.query(PodcastJob)
+            .filter(PodcastJob.status.in_(nonterminal_states))
+            .order_by(PodcastJob.created_at.asc())
+            .all()
+        )
+        script_progress_lines = []
+        audio_progress_lines = []
+        for aj in active_jobs:
+            short_jid = html.escape(aj.id[:8])
+            cfg = aj.configuration_state_json or {}
+            st = aj.status
+            # Script stage jobs
+            if st in (
+                JobState.RECEIVED.value,
+                JobState.VALIDATING.value,
+                JobState.EXTRACTING.value,
+                JobState.AWAITING_CONFIGURATION.value,
+                JobState.SOURCE_READY.value,
+                JobState.SCRIPTING.value,
+                JobState.SCRIPT_READY.value,
+                JobState.AWAITING_APPROVAL.value,
+                JobState.AWAITING_RERUN_CONFIRMATION.value,
+            ):
+                substage = cfg.get("script_substage")
+                sec_prog = aj.section_progress_json or {}
+                sec_curr = sec_prog.get("current_section")
+                sec_tot = sec_prog.get("total_sections")
+                detail_parts = []
+                if substage:
+                    detail_parts.append(f"substage: {html.escape(str(substage))}")
+                if sec_curr is not None and sec_tot is not None:
+                    detail_parts.append(f"sections: {sec_curr}/{sec_tot}")
+                detail_str = f" ({', '.join(detail_parts)})" if detail_parts else ""
+                script_progress_lines.append(f"  • <code>{short_jid}</code>: {html.escape(st)}{detail_str}")
+            # Audio stage jobs
+            elif st in (
+                JobState.QUEUED_TTS.value,
+                JobState.SYNTHESIZING.value,
+                JobState.ENCODING.value,
+                JobState.AUDIO_READY.value,
+                JobState.UPLOADING.value,
+                JobState.DELIVERING.value,
+            ):
+                c_idx = aj.completed_chunk_index or 0
+                detail_str = f" (chunks: {c_idx})" if c_idx else ""
+                audio_progress_lines.append(f"  • <code>{short_jid}</code>: {html.escape(st)}{detail_str}")
+
+        active_breakdown_section = ""
+        if script_progress_lines:
+            active_breakdown_section += "• <b>Script Progress:</b>\n" + "\n".join(script_progress_lines) + "\n"
+        if audio_progress_lines:
+            active_breakdown_section += "• <b>Audio Progress:</b>\n" + "\n".join(audio_progress_lines) + "\n"
+
         status_msg = (
             f"📊 <b>Herald System Status</b>\n\n"
             f"• <b>Uptime:</b> {html.escape(uptime_str)}\n"
@@ -603,6 +658,7 @@ def handle_telegram_command(
             f"• <b>AI Provider:</b> {ai_status_str}\n"
             f"• <b>Disk Space:</b> {free_mb:.1f} MB free\n"
             f"• <b>Active Jobs:</b> {active_count}\n"
+            f"{active_breakdown_section}"
             f"• <b>Completed Jobs:</b> {completed_count}\n"
             f"{tts_queue_line}"
         )
@@ -1240,7 +1296,7 @@ def handle_telegram_content_message(
 
     # Case A: Rich queued card (unique + confirmation OFF or directly queued)
     if job:
-        queued_text = format_queued(job, job.script_json, eta_info)
+        queued_text = format_queued(job, job.script_json, eta_info, db=db)
     else:
         queued_text = (
             f"🎙️ <b>Podcast Queued!</b>\n\n"
@@ -2110,7 +2166,7 @@ def handle_telegram_callback_query(
 
         if gen_resp.status == JobState.QUEUED_TTS.value:
             eta_info = calculate_job_eta(db, job)
-            queued_text = format_queued(job, job.script_json, eta_info)
+            queued_text = format_queued(job, job.script_json, eta_info, db=db)
             try:
                 client.edit_message_text(
                     chat_id=chat_id,
@@ -2215,7 +2271,7 @@ def handle_telegram_callback_query(
 
             client.answer_callback_query(cb_id, text="Approved! Queued for synthesis.")
             eta_info = calculate_job_eta(db, job)
-            queued_text = format_queued(job, job.script_json, eta_info)
+            queued_text = format_queued(job, job.script_json, eta_info, db=db)
             try:
                 client.edit_message_text(
                     chat_id=chat_id,

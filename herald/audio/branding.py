@@ -119,13 +119,20 @@ def render_intro_narration(
     episode_title: str | None = None,
     publisher: str | None = None,
     source_title: str | None = None,
+    research_depth: str | None = None,
+    request_mode: str | None = None,
 ) -> str:
-    """Render deterministic intro narration string using controlled conditional templates.
+    """Render deterministic intro narration string describing generation mode without runtime estimate.
 
-    Separates episode title, source headline, and publisher attribution.
-    Truthfulness guarantee:
-    If actual synthesized body duration materially underfilled the requested duration,
-    announces the actual rounded duration.
+    Format examples:
+    - Research-topic episode:
+      "Herald presents: The Birth of the Nuclear Submarine. This episode was generated from a research topic using medium research depth. Let's begin."
+    - Source/article episode:
+      "Herald presents: The Birth of the Nuclear Submarine. This episode was generated from a submitted source. Based on reporting from [Publisher]. Let's begin."
+    - Source + supplemental research:
+      "Herald presents: The Birth of the Nuclear Submarine. This episode was generated from a submitted source with medium research. Let's begin."
+    - Literal mode:
+      "Herald presents: The Birth of the Nuclear Submarine. This episode was generated directly from a submitted source. Let's begin."
     """
     platform_name = getattr(settings, "BRANDING_PLATFORM_NAME", "Herald")
     raw_title = episode_title or source_title or topic
@@ -133,34 +140,21 @@ def render_intro_narration(
 
     clean_pub = sanitize_publisher_name(publisher)
 
-    t_str = str(target_minutes).lower().strip() if target_minutes is not None else ""
-    has_duration = (
-        t_str
-        and t_str.isdigit()
-        and int(t_str) > 0
-        and not (content_mode and str(content_mode).lower().strip() == "literal")
-    )
+    lead = f"{platform_name} presents: {clean_title}."
 
-    if has_duration:
-        req_mins = int(t_str)
-        effective_mins = req_mins
-        if actual_body_duration_seconds is not None and actual_body_duration_seconds > 0:
-            act_mins = max(1, round(actual_body_duration_seconds / 60.0))
-            if act_mins < req_mins * 0.6:
-                effective_mins = act_mins
+    c_mode = (content_mode or request_mode or "source").lower().strip()
+    depth_str = (research_depth or "medium").lower().strip()
 
-        min_unit = "minute" if effective_mins == 1 else "minutes"
-        lead = (
-            f"This is {platform_name}. Today's episode is '{clean_title}', "
-            f"running approximately {effective_mins} {min_unit}."
-        )
-    else:
-        lead = INTRO_EPISODE_TEMPLATE.format(
-            platform_name=platform_name,
-            episode_title=clean_title,
-        )
+    if c_mode in ("topic", "research"):
+        desc = f"This episode was generated from a research topic using {depth_str} research depth."
+    elif c_mode == "expanded":
+        desc = f"This episode was generated from a submitted source with {depth_str} research."
+    elif c_mode == "literal":
+        desc = "This episode was generated directly from a submitted source."
+    else:  # source mode
+        desc = "This episode was generated from a submitted source."
 
-    parts = [lead]
+    parts = [lead, desc]
     if clean_pub:
         parts.append(INTRO_REPORTING_TEMPLATE.format(publisher=clean_pub))
     parts.append(INTRO_CLOSING)
