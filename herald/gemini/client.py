@@ -317,6 +317,9 @@ def generate_grounded_research(
     job_id: str | None = None,
     research_plan: dict | None = None,
     max_attempts: int | None = None,
+    operation: str = "grounded_research",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> dict:
     """
     Stage 1a: Call GEMINI_RESEARCH_MODEL with Google Search grounding to retrieve external evidence.
@@ -388,11 +391,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
     effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
 
-    for attempt in range(1, effective_max_attempts + 1):
+    for loop_attempt in range(1, effective_max_attempts + 1):
+        curr_attempt = attempt if effective_max_attempts == 1 else loop_attempt
         t0 = datetime.now(UTC)
         interaction_recorded = False
         try:
-            logger.info(f"Sending grounded research request to Gemini ({model}), attempt {attempt}/{effective_max_attempts}")
+            logger.info(f"Sending grounded research request to Gemini ({model}), attempt {curr_attempt}/{effective_max_attempts}")
             from herald.concurrency import get_semaphores
             with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
                 resp = client.post(url, json=payload, headers=headers)
@@ -404,12 +408,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="grounded_research",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
                     http_status=resp.status_code,
-                    attempt=attempt,
+                    attempt=curr_attempt,
                     input_chars=len(prompt),
                     error=f"Gemini API authentication failed ({resp.status_code}): {resp.text}",
                     provider_request_id=req_id,
@@ -421,12 +425,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="grounded_research",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
                     http_status=resp.status_code,
-                    attempt=attempt,
+                    attempt=curr_attempt,
                     input_chars=len(prompt),
                     error=f"HTTP 429: {resp.text}",
                     provider_request_id=req_id,
@@ -435,7 +439,7 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 interaction_recorded = True
                 if _is_billing_exhausted_text(resp.text):
                     raise GeminiBillingExhaustedError(f"Gemini API prepayment credits or billing exhausted: {resp.text}")
-                if attempt < effective_max_attempts:
+                if loop_attempt < effective_max_attempts:
                     time.sleep(backoff)
                     backoff *= 2.0
                     continue
@@ -444,12 +448,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="grounded_research",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
                     http_status=resp.status_code,
-                    attempt=attempt,
+                    attempt=curr_attempt,
                     input_chars=len(prompt),
                     error=f"HTTP {resp.status_code}: {resp.text}",
                     provider_request_id=req_id,
@@ -475,12 +479,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="grounded_research",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
                     http_status=resp.status_code,
-                    attempt=attempt,
+                    attempt=curr_attempt,
                     input_chars=len(prompt),
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
@@ -547,12 +551,12 @@ Report your comprehensive grounded findings in detail, concluding with the compa
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="grounded_research",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=True,
                 http_status=resp.status_code,
-                attempt=attempt,
+                attempt=curr_attempt,
                 input_chars=len(prompt),
                 prompt_tokens=p_tok,
                 completion_tokens=c_tok,
@@ -586,11 +590,11 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="grounded_research",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
-                    attempt=attempt,
+                    attempt=curr_attempt,
                     input_chars=len(prompt),
                     error=e,
                     metadata={"research_depth": depth},
@@ -598,7 +602,7 @@ Report your comprehensive grounded findings in detail, concluding with the compa
                 interaction_recorded = True
             if isinstance(e, (GeminiAuthError, GeminiQuotaError, GeminiValidationError, GeminiModelUnavailableError)):
                 raise
-            if attempt == max_attempts:
+            if loop_attempt == effective_max_attempts:
                 raise GeminiError(f"Grounded research failed: {e}")
             time.sleep(backoff)
             backoff *= 2.0
@@ -1399,6 +1403,8 @@ def generate_podcast_script(
     max_attempts: int | None = None,
     is_isolated_section: bool = False,
     operation: str = "script_generation",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
@@ -1483,7 +1489,8 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
         ],
     }
 
-    effective_max_attempts = max_attempts if max_attempts is not None else settings.GEMINI_RETRY_COUNT
+    initial_attempt = attempt
+    effective_max_attempts = (initial_attempt + max_attempts - 1) if max_attempts is not None else settings.GEMINI_RETRY_COUNT
     backoff = 2.0
     last_error = ""
     last_finish_reason = ""
@@ -1497,7 +1504,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
     current_max_tokens = min(base_max_tokens, model_ceiling) if model_ceiling is not None else base_max_tokens
     truncation_budget_retry_used = False
 
-    attempt = 1
+    attempt = initial_attempt
     while attempt <= effective_max_attempts:
         t0 = datetime.now(UTC)
         interaction_recorded = False
@@ -1540,7 +1547,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="script_generation",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
@@ -2359,6 +2366,7 @@ def generate_structured_output(
     operation: str = "structured_output",
     temperature: float = 0.1,
     max_output_tokens: int | None = None,
+    attempt: int = 1,
 ) -> Any:
     """
     Generate structured output validated against response_schema using Gemini.
@@ -2400,34 +2408,82 @@ def generate_structured_output(
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
-                json_data = json.loads(raw_text)
-                # Provider-neutral validation against response_schema
-                if hasattr(response_schema, "model_validate"):
-                    parsed_obj = response_schema.model_validate(json_data)
-                elif hasattr(response_schema, "__call__"):
-                    parsed_obj = response_schema(**json_data) if isinstance(json_data, dict) else json_data
-                else:
-                    parsed_obj = json_data
+                try:
+                    json_data = json.loads(raw_text)
+                    # Provider-neutral validation against response_schema
+                    if hasattr(response_schema, "model_validate"):
+                        parsed_obj = response_schema.model_validate(json_data)
+                    elif hasattr(response_schema, "__call__"):
+                        parsed_obj = response_schema(**json_data) if isinstance(json_data, dict) else json_data
+                    else:
+                        parsed_obj = json_data
 
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=True,
+                        http_status=resp.status_code,
+                        attempt=attempt,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                    )
+                    interaction_recorded = True
+                    return parsed_obj
+                except Exception as parse_err:
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=False,
+                        attempt=attempt,
+                        http_status=resp.status_code,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        error=parse_err,
+                    )
+                    interaction_recorded = True
+                    from herald.ai.errors import AISchemaInvalidError
+                    raise AISchemaInvalidError(
+                        f"Gemini response schema invalid: {parse_err}",
+                        provider="gemini",
+                        model=model,
+                        operation=operation,
+                    )
+            else:
+                from herald.ai.errors import AISchemaInvalidError
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
                     operation=operation,
                     started_at=t0,
                     completed_at=t1,
-                    success=True,
+                    success=False,
+                    attempt=attempt,
                     http_status=resp.status_code,
                     input_chars=len(prompt),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
                     provider_request_id=req_id,
+                    error="Gemini API returned no response candidates.",
                 )
                 interaction_recorded = True
-                return parsed_obj
-            else:
-                raise GeminiValidationError("Gemini API returned no response candidates.")
+                raise AISchemaInvalidError(
+                    "Gemini API returned no response candidates.",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
 
         _record_gemini_interaction(
             job_id=job_id,
@@ -2436,6 +2492,7 @@ def generate_structured_output(
             started_at=t0,
             completed_at=t1,
             success=False,
+            attempt=attempt,
             http_status=resp.status_code,
             input_chars=len(prompt),
             error=f"HTTP {resp.status_code}: {resp.text}",
@@ -2459,6 +2516,7 @@ def generate_structured_output(
                 started_at=t0,
                 completed_at=t1,
                 success=False,
+                attempt=attempt,
                 error=e,
                 input_chars=len(prompt),
             )

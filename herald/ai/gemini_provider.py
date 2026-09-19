@@ -121,6 +121,7 @@ class GeminiProvider(AIProvider):
             max_attempts=1,
             is_isolated_section=is_isolated_section,
             operation=kwargs.get("operation", "script_generation"),
+            attempt=kwargs.get("attempt", 1),
         )
 
     def generate_structured_output(
@@ -138,6 +139,7 @@ class GeminiProvider(AIProvider):
             model_name=self.configured_model,
             job_id=job_id,
             operation=operation,
+            attempt=kwargs.get("attempt", 1),
             temperature=kwargs.get("temperature", 0.1),
             max_output_tokens=kwargs.get("max_output_tokens"),
         )
@@ -148,6 +150,8 @@ class GeminiProvider(AIProvider):
         research_depth: str = "medium",
         job_id: str | None = None,
         research_plan: dict[str, Any] | None = None,
+        operation: str = "grounded_research",
+        **kwargs: Any,
     ) -> dict[str, Any]:
         from herald.gemini.client import generate_grounded_research as _ggr
         return _ggr(
@@ -157,6 +161,9 @@ class GeminiProvider(AIProvider):
             job_id=job_id,
             research_plan=research_plan,
             max_attempts=1,
+            operation=operation,
+            attempt=kwargs.get("attempt", 1),
+            **kwargs,
         )
 
     def normalize_research_dossier(

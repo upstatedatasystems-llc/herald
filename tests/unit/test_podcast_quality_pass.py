@@ -373,8 +373,8 @@ def test_worker_fails_closed_prior_to_tts_on_unresolved_fidelity(db_session, tmp
         assert "Unverified factual claim" in job.error_detail
 
 
-def test_worker_proceeds_when_explicitly_approved(db_session, tmp_path):
-    """Worker allows TTS synthesis when job has approval timestamp even with previous unresolved audit."""
+def test_worker_fails_closed_even_when_explicitly_approved(db_session, tmp_path):
+    """Worker fails closed before TTS when job has unresolved material fidelity issues, even if approved_at is set."""
     from apps.worker.main import process_next_job
     from datetime import datetime, timezone
 
@@ -405,11 +405,13 @@ def test_worker_proceeds_when_explicitly_approved(db_session, tmp_path):
          patch("apps.worker.main.chunk_podcast_script", return_value=[]), \
          patch("apps.worker.main.record_stage_metric"):
 
-        # It should NOT fail at the fidelity verification stage
+        # Unresolved material fidelity MUST fail closed to FAILED_FINAL before TTS synthesis
         process_next_job(db=db_session, kokoro_client=MagicMock(), worker_id="test-worker-1")
 
         db_session.refresh(job)
-        assert job.failed_stage != "FIDELITY_VERIFICATION"
+        assert job.status == JobState.FAILED_FINAL.value
+        assert job.failed_stage == "FIDELITY_VERIFICATION"
+        assert job.error_code == "FIDELITY_VERIFICATION_FAILED"
 
 
 def test_extract_distinctive_phrases_short_concepts():
@@ -519,9 +521,9 @@ def test_targeted_gap_research_triggered_when_no_uncovered_evidence():
 
     def mock_failover(*args, **kwargs):
         op = kwargs.get("operation")
-        if op == "supplemental_research":
+        if op in ("supplemental_research", "targeted_gap_research"):
             return mock_supp_data
-        elif op in ("section_expansion", "generate_isolated_section"):
+        elif op in ("section_expansion", "generate_isolated_section", "gap_expansion"):
             return mock_expanded_script
         return mock_expanded_script
 
@@ -811,14 +813,14 @@ def test_supplemental_research_depth_and_normalization():
     def mock_failover(*args, **kwargs):
         nonlocal captured_depth
         op = kwargs.get("operation")
-        if op == "supplemental_research":
+        if op in ("supplemental_research", "targeted_gap_research"):
             mock_provider = MagicMock()
             mock_provider.generate_grounded_research.return_value = provider_grounded_response
             exec_fn = kwargs.get("execute_fn")
             res = exec_fn(mock_provider, 1, "source")
             captured_depth = mock_provider.generate_grounded_research.call_args[1].get("research_depth")
             return res
-        elif op == "section_expansion":
+        elif op in ("section_expansion", "gap_expansion"):
             return mock_expanded_script
         return mock_expanded_script
 
@@ -1022,9 +1024,9 @@ def test_single_supplemental_research_operation_addresses_multiple_section_gaps(
     def mock_failover_fn(*args, **kwargs):
         op = kwargs.get("operation")
         captured_operations.append(op)
-        if op == "supplemental_research":
+        if op in ("supplemental_research", "targeted_gap_research"):
             return mock_supp_result
-        elif op == "section_expansion":
+        elif op in ("section_expansion", "gap_expansion"):
             mock_res = MagicMock()
             mock_res.segments = [MagicMock(narration="Expanded section narration with fresh technical facts. " * 15)]
             return mock_res
@@ -1041,7 +1043,7 @@ def test_single_supplemental_research_operation_addresses_multiple_section_gaps(
             return_metadata=True,
         )
 
-        assert captured_operations.count("supplemental_research") == 1
+        assert (captured_operations.count("supplemental_research") + captured_operations.count("targeted_gap_research")) == 1
         assert gap_meta["supplemental_research_triggered"] is True
         assert "Reactor Coolant" in gap_meta["supplemental_research"]["gap_focus"]
         assert "Sonar Arrays" in gap_meta["supplemental_research"]["gap_focus"]

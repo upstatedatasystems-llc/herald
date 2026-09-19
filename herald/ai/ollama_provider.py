@@ -158,7 +158,8 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
 """
 
         url = f"{self._base_url}/api/chat"
-        attempt = 1
+        attempt = kwargs.get("attempt", 1)
+        operation = kwargs.get("operation", "script_generation")
         t0 = datetime.now(UTC)
         payload = {
             "model": self._model,
@@ -179,7 +180,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 job_id=job_id,
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -191,14 +192,14 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 f"Ollama client timeout connecting to {self._model}",
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
         except Exception as net_err:
             record_ai_interaction(
                 job_id=job_id,
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -211,7 +212,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 f"Ollama network failure: {safe_net_err}",
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
 
         if resp.status_code != 200:
@@ -219,7 +220,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 job_id=job_id,
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 started_at=t0,
@@ -268,7 +269,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 job_id=job_id,
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 started_at=t0,
@@ -285,7 +286,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 job_id=job_id,
                 provider="ollama",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 started_at=t0,
@@ -438,33 +439,57 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
         res_json = resp.json()
         msg = res_json.get("message", {})
         raw_content = msg.get("content", "")
-        data = _extract_json_block(raw_content)
 
         p_tok = res_json.get("prompt_eval_count")
         c_tok = res_json.get("eval_count")
         t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
 
-        if hasattr(response_schema, "model_validate"):
-            parsed = response_schema.model_validate(data)
-        elif hasattr(response_schema, "__call__"):
-            parsed = response_schema(**data) if isinstance(data, dict) else data
-        else:
-            parsed = data
+        try:
+            data = _extract_json_block(raw_content)
+            if hasattr(response_schema, "model_validate"):
+                parsed = response_schema.model_validate(data)
+            elif hasattr(response_schema, "__call__"):
+                parsed = response_schema(**data) if isinstance(data, dict) else data
+            else:
+                parsed = data
 
-        record_ai_interaction(
-            job_id=job_id,
-            provider="ollama",
-            model=self._model,
-            operation=operation,
-            attempt=attempt,
-            http_status=200,
-            input_chars=len(prompt),
-            started_at=t0,
-            completed_at=datetime.now(UTC),
-            success=True,
-            prompt_tokens=p_tok,
-            completion_tokens=c_tok,
-            total_tokens=t_tok,
-        )
-        return parsed
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=200,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            return parsed
+        except Exception as parse_err:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=200,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=parse_err,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            raise AISchemaInvalidError(
+                f"Ollama structured output schema invalid: {parse_err}",
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+            )
 

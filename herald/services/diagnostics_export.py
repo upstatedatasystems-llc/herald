@@ -236,12 +236,15 @@ def build_manifest_dict(
     audit_ai_tokens = 0
     repair_ai_tokens = 0
     research_ai_tokens = 0
+    cleanup_ai_tokens = 0
 
     for ai in ai_interactions:
         toks = ai.total_tokens or ((ai.prompt_tokens or 0) + (ai.completion_tokens or 0))
         total_ai_tokens += toks
         op = (ai.operation or "").lower()
-        if "research" in op and "audit" not in op and "repair" not in op:
+        if "cleanup" in op:
+            cleanup_ai_tokens += toks
+        elif "research" in op and "audit" not in op and "repair" not in op:
             research_ai_tokens += toks
         elif "audit" in op or "review" in op or ("verification" in op and "repair" not in op):
             audit_ai_tokens += toks
@@ -282,6 +285,7 @@ def build_manifest_dict(
             "audit_tokens": audit_ai_tokens,
             "repair_tokens": repair_ai_tokens,
             "research_tokens": research_ai_tokens,
+            "cleanup_tokens": cleanup_ai_tokens,
             "ai_tokens_per_audio_minute": ai_tokens_per_audio_min,
             "total_cost_usd": cost_summary.total_cost_usd,
             "cost_display": cost_summary.cost_display,

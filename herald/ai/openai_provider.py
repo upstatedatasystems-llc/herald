@@ -820,24 +820,75 @@ Generate the podcast script JSON response now.
             self._classify_http_error(resp, attempt=attempt, max_attempts=1, operation=operation)
 
         res_json = resp.json()
-        p_tok, c_tok, t_tok = self._extract_token_usage(res_json)
+        usage = res_json.get("usage", {}) or {}
+        p_tok = usage.get("prompt_tokens")
+        c_tok = usage.get("completion_tokens")
+        t_tok = usage.get("total_tokens")
+
         choices = res_json.get("choices", [])
         if not choices:
-            raise AISchemaValidationError(
-                "No choices returned from provider",
+            err = AISchemaInvalidError(
+                f"{self.provider_name} returned no choices in structured output",
                 provider=self.provider_name.lower(),
                 model=self._model,
+                operation=operation,
+                safe_detail="AI structured output missing choices",
             )
-        raw_text = choices[0].get("message", {}).get("content", "")
-        data = json.loads(raw_text)
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=200,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            raise err
 
-        # Provider-neutral validation against response_schema
-        if hasattr(response_schema, "model_validate"):
-            parsed = response_schema.model_validate(data)
-        elif hasattr(response_schema, "__call__"):
-            parsed = response_schema(**data) if isinstance(data, dict) else data
-        else:
-            parsed = data
+        raw_text = choices[0].get("message", {}).get("content", "")
+        try:
+            data = json.loads(raw_text)
+            # Provider-neutral validation against response_schema
+            if hasattr(response_schema, "model_validate"):
+                parsed = response_schema.model_validate(data)
+            elif hasattr(response_schema, "__call__"):
+                parsed = response_schema(**data) if isinstance(data, dict) else data
+            else:
+                parsed = data
+        except Exception as parse_err:
+            err = AISchemaInvalidError(
+                f"{self.provider_name} structured output schema validation failed: {parse_err}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                safe_detail="AI structured output failed schema validation",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=200,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                total_tokens=t_tok,
+            )
+            raise err
 
         record_ai_interaction(
             job_id=job_id,

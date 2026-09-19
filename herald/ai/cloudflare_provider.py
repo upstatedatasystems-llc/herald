@@ -421,7 +421,8 @@ class CloudflareProvider(AIProvider):
             "Content-Type": "application/json",
         }
 
-        attempt = 1
+        attempt = kwargs.get("attempt", 1)
+        operation = kwargs.get("operation", "script_generation")
         t0 = datetime.now(UTC)
         req_evidence = {
             "mode": mode_clean,
@@ -444,7 +445,7 @@ class CloudflareProvider(AIProvider):
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -457,14 +458,14 @@ class CloudflareProvider(AIProvider):
                 f"Cloudflare Workers AI client timeout connecting to {self._model}",
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
         except Exception as net_err:
             record_ai_interaction(
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -478,7 +479,7 @@ class CloudflareProvider(AIProvider):
                 f"Cloudflare Workers AI network failure: {safe_net_err}",
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
 
         req_id = resp.headers.get("cf-ray") or resp.headers.get("x-request-id")
@@ -487,7 +488,7 @@ class CloudflareProvider(AIProvider):
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -500,7 +501,7 @@ class CloudflareProvider(AIProvider):
                 response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
                 metadata={"attempt": attempt, "mode": mode_clean},
             )
-            self._classify_http_error(resp, operation="script_generation")
+            self._classify_http_error(resp, operation=operation)
 
         result_json = resp.json()
         try:
@@ -515,7 +516,7 @@ class CloudflareProvider(AIProvider):
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -548,7 +549,7 @@ class CloudflareProvider(AIProvider):
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -572,7 +573,7 @@ class CloudflareProvider(AIProvider):
                 job_id=job_id,
                 provider="cloudflare",
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -924,15 +925,38 @@ class CloudflareProvider(AIProvider):
             self._classify_http_error(resp, operation=operation)
 
         res_json = resp.json()
-        raw_text = extract_cloudflare_content(res_json)
-        data = _extract_json_block(raw_text)
-
-        if hasattr(response_schema, "model_validate"):
-            parsed = response_schema.model_validate(data)
-        elif hasattr(response_schema, "__call__"):
-            parsed = response_schema(**data) if isinstance(data, dict) else data
-        else:
-            parsed = data
+        try:
+            raw_text = extract_cloudflare_content(res_json)
+            data = _extract_json_block(raw_text)
+            if hasattr(response_schema, "model_validate"):
+                parsed = response_schema.model_validate(data)
+            elif hasattr(response_schema, "__call__"):
+                parsed = response_schema(**data) if isinstance(data, dict) else data
+            else:
+                parsed = data
+        except Exception as parse_err:
+            err = AISchemaInvalidError(
+                f"Cloudflare structured output schema validation failed: {parse_err}",
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI structured output failed schema validation",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=200,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
 
         record_ai_interaction(
             job_id=job_id,

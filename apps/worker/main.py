@@ -548,22 +548,22 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
                 raise ValueError("Job script_json contains no segments to synthesize.")
 
             # Fidelity verification fail-closed check prior to TTS synthesis:
-            # If unresolved material fidelity issues remain and the job has not been explicitly approved,
-            # fail closed immediately to prevent synthesizing inaccurate or unverified audio.
+            # If unresolved material fidelity issues remain, the pipeline must NEVER proceed to TTS synthesis,
+            # even if approved by the user. Fail closed immediately.
             fid_audit = getattr(job, "fidelity_audit_json", None) or {}
             if isinstance(fid_audit, dict):
                 has_unresolved_fidelity = (
                     fid_audit.get("status") == "unresolved_issue_remains"
                     or fid_audit.get("unresolved_issue") is True
                 ) and fid_audit.get("has_material_issues") is not False
-                if has_unresolved_fidelity and not getattr(job, "approved_at", None):
-                    err_msg = fid_audit.get("repair_instructions") or "Unresolved material fidelity issues remain without user approval."
+                if has_unresolved_fidelity:
+                    err_msg = fid_audit.get("repair_instructions") or "Unresolved material fidelity issues remain."
                     record_job_diagnostic_event(
                         job.id,
                         "ERROR",
                         "fidelity",
                         "FIDELITY_VERIFICATION_FAILED",
-                        f"Unresolved material fidelity issues remain and job was not approved. Halting before TTS synthesis: {err_msg}",
+                        f"Unresolved material fidelity issues remain. Halting before TTS synthesis: {err_msg}",
                         metadata=fid_audit,
                         db=db,
                     )

@@ -79,6 +79,8 @@ class AIProvider(ABC):
         research_depth: str = "medium",
         job_id: str | None = None,
         research_plan: dict[str, Any] | None = None,
+        operation: str = "grounded_research",
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Generate grounded web search research. Subclasses override if supported."""
         from herald.ai.errors import AIUnsupportedCapabilityError

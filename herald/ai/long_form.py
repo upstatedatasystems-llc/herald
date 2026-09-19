@@ -1692,6 +1692,7 @@ EVALUATION RULES:
             response_schema=RepetitionReviewResponse,
             job_id=job.id,
             operation="repetition_review",
+            attempt=attempt,
         )
         if isinstance(resp, dict):
             return RepetitionReviewResponse(**resp)
@@ -1889,9 +1890,11 @@ REPAIR CONTRACT:
                     job_id=job.id,
                     generation_instructions=prompt,
                     is_isolated_section=True,
+                    operation="duplicate_repair",
+                    attempt=attempt,
                 )
             except TypeError as te:
-                if "is_isolated_section" in str(te):
+                if "is_isolated_section" in str(te) or "operation" in str(te):
                     resp = p_inst.generate_script(
                         source_text=src,
                         request_mode="standard",
@@ -2157,14 +2160,16 @@ def audit_and_repair_fidelity(
             "warnings": [],
         }
 
-    def _run_semantic_audit(curr_script: dict[str, Any]) -> tuple[bool, str, dict[str, Any], bool, bool]:
+    def _run_semantic_audit(curr_script: dict[str, Any]) -> tuple[bool, str, dict[str, Any], int, int, int]:
         findings: dict[str, Any] = {}
         issues_detected = False
         repair_instructions_parts: list[str] = []
-        audit_executed = False
-        audit_failed = False
+        expected_audits = 0
+        completed_audits = 0
+        failed_audits = 0
 
         if scope == EvidenceScope.SOURCE_ONLY:
+            expected_audits += 1
             try:
                 def _audit_source_fn(p_inst: Any, attempt: int, src: str) -> Any:
                     return p_inst.audit_script_fidelity(
@@ -2181,19 +2186,20 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text,
                     required_capability="verification",
                 )
-                audit_executed = True
+                completed_audits += 1
                 if hasattr(res, "has_material_issues") and res.has_material_issues:
                     issues_detected = True
                     if getattr(res, "repair_instructions", None):
                         repair_instructions_parts.append(res.repair_instructions)
                 findings["source_audit"] = res.model_dump() if hasattr(res, "model_dump") else str(res)
             except Exception as e:
-                audit_failed = True
+                failed_audits += 1
                 logger.warning(f"Semantic source fidelity audit skipped/failed non-fatally: {e}")
 
         elif scope == EvidenceScope.SOURCE_PLUS_RESEARCH:
             # Expanded mode: Perform BOTH seed-source audit AND research/evidence support audit
             if primary_source_text:
+                expected_audits += 1
                 try:
                     def _audit_source_fn(p_inst: Any, attempt: int, src: str) -> Any:
                         return p_inst.audit_script_fidelity(
@@ -2210,16 +2216,17 @@ def audit_and_repair_fidelity(
                         source_text=primary_source_text,
                         required_capability="verification",
                     )
-                    audit_executed = True
+                    completed_audits += 1
                     if hasattr(res_s, "has_material_issues") and res_s.has_material_issues:
                         issues_detected = True
                         if getattr(res_s, "repair_instructions", None):
                             repair_instructions_parts.append(f"Source fidelity: {res_s.repair_instructions}")
                     findings["source_audit"] = res_s.model_dump() if hasattr(res_s, "model_dump") else str(res_s)
                 except Exception as e:
-                    audit_failed = True
+                    failed_audits += 1
                     logger.warning(f"Semantic source fidelity audit in expanded mode skipped/failed: {e}")
 
+            expected_audits += 1
             try:
                 def _audit_res_fn(p_inst: Any, attempt: int, src: str) -> Any:
                     return p_inst.audit_research_script(
@@ -2237,18 +2244,19 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text or "Topic research",
                     required_capability="verification",
                 )
-                audit_executed = True
+                completed_audits += 1
                 if hasattr(res_r, "has_material_issues") and res_r.has_material_issues:
                     issues_detected = True
                     if getattr(res_r, "repair_instructions", None):
                         repair_instructions_parts.append(f"Research fidelity: {res_r.repair_instructions}")
                 findings["research_audit"] = res_r.model_dump() if hasattr(res_r, "model_dump") else str(res_r)
             except Exception as e:
-                audit_failed = True
+                failed_audits += 1
                 logger.warning(f"Semantic research support audit in expanded mode skipped/failed: {e}")
 
         elif scope == EvidenceScope.RESEARCH:
             # Topic mode: Perform research/evidence support audit
+            expected_audits += 1
             try:
                 def _audit_topic_fn(p_inst: Any, attempt: int, src: str) -> Any:
                     return p_inst.audit_research_script(
@@ -2266,21 +2274,21 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text or "Topic research",
                     required_capability="verification",
                 )
-                audit_executed = True
+                completed_audits += 1
                 if hasattr(res_t, "has_material_issues") and res_t.has_material_issues:
                     issues_detected = True
                     if getattr(res_t, "repair_instructions", None):
                         repair_instructions_parts.append(res_t.repair_instructions)
                 findings["research_audit"] = res_t.model_dump() if hasattr(res_t, "model_dump") else str(res_t)
             except Exception as e:
-                audit_failed = True
+                failed_audits += 1
                 logger.warning(f"Semantic topic research audit skipped/failed non-fatally: {e}")
 
-        return issues_detected, " ".join(repair_instructions_parts), findings, audit_executed, audit_failed
+        return issues_detected, " ".join(repair_instructions_parts), findings, expected_audits, completed_audits, failed_audits
 
     # 1. Initial Authoritative Semantic Audit
     current_script_dict = _build_script_dict(sections)
-    has_material_issues, repair_instructions, audit_findings, audit_executed, audit_failed = _run_semantic_audit(current_script_dict)
+    has_material_issues, repair_instructions, audit_findings, expected_audits, completed_audits, failed_audits = _run_semantic_audit(current_script_dict)
 
     # 2. Supplementary Coverage Ledger Check (Inexpensive signal)
     combined_narration = "\n\n".join(s.get("narration", "") for s in sections)
@@ -2415,11 +2423,14 @@ def audit_and_repair_fidelity(
         # 4. Final Semantic Re-Audit (Bounded: exactly 1 verification pass, no loop)
         if repair_succeeded:
             repaired_script_dict = _build_script_dict(sections)
-            re_issues, _, re_findings, _, _ = _run_semantic_audit(repaired_script_dict)
+            re_issues, _, re_findings, re_exp, re_comp, re_failed = _run_semantic_audit(repaired_script_dict)
             audit_findings["final_re_audit"] = re_findings
-            if not re_issues:
+            if not re_issues and re_comp == re_exp and re_failed == 0 and re_exp > 0:
+                repair_succeeded = True
                 audit_status = "repair_succeeded"
+                unresolved_issue = False
             else:
+                repair_succeeded = False
                 audit_status = "unresolved_issue_remains"
                 unresolved_issue = True
         else:
@@ -2429,18 +2440,20 @@ def audit_and_repair_fidelity(
         audit_status = "repair_attempted"
     elif has_material_issues:
         audit_status = "issue_detected"
-    elif not audit_executed:
-        if audit_failed:
-            audit_status = "failed_nonfatal"
-        else:
-            audit_status = "skipped"
-    else:
+    elif failed_audits > 0:
+        audit_status = "failed_nonfatal"
+    elif completed_audits == expected_audits and expected_audits > 0 and not has_material_issues:
         audit_status = "clean"
+    else:
+        audit_status = "skipped"
 
     has_content_warning = bool(unresolved_issue or (audit_status == "unresolved_issue_remains"))
     audit_result = {
         "status": audit_status,
-        "audit_executed": audit_executed,
+        "audit_executed": completed_audits > 0,
+        "expected_audits": expected_audits,
+        "completed_audits": completed_audits,
+        "failed_audits": failed_audits,
         "has_material_issues": has_material_issues,
         "repair_instructions": repair_instructions,
         "repair_attempted": repair_attempted,
@@ -2448,6 +2461,7 @@ def audit_and_repair_fidelity(
         "unresolved_issue": unresolved_issue,
         "has_unresolved_material_issues": bool(unresolved_issue or (audit_status == "unresolved_issue_remains")),
         "content_warning": has_content_warning,
+        "fidelity_blocked": bool(unresolved_issue or (audit_status == "unresolved_issue_remains") or (has_material_issues and not repair_succeeded)),
         "findings": audit_findings,
         "omitted_numbers": omitted_numbers[:10],
         "omitted_entities": omitted_entities[:10],
@@ -2753,12 +2767,14 @@ def expand_script_content_gap(
                 source_text=supp_prompt,
                 research_depth=valid_depth,
                 job_id=job.id,
+                operation="targeted_gap_research",
+                attempt=att,
             )
 
         try:
             supp_data = execute_with_failover(
                 job=job,
-                operation="supplemental_research",
+                operation="targeted_gap_research",
                 execute_fn=_do_supplemental_research,
                 db=db,
                 source_text=gap_focus,
@@ -2900,7 +2916,8 @@ EXPANSION CONTRACT:
                         job_id=job.id,
                         generation_instructions=exp_prompt,
                         is_isolated_section=True,
-                        operation="section_expansion",
+                        operation="gap_expansion",
+                        attempt=attempt,
                     )
                 except TypeError as te:
                     if "is_isolated_section" in str(te) or "operation" in str(te):
@@ -2920,7 +2937,7 @@ EXPANSION CONTRACT:
             try:
                 res: PodcastScriptResponse = execute_with_failover(
                     job=job,
-                    operation="section_expansion",
+                    operation="gap_expansion",
                     execute_fn=_exec_sec_expansion,
                     db=db,
                     source_text=new_ev_snippet,

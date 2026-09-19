@@ -1625,69 +1625,80 @@ def execute_script_generation(
         job.configuration_state_json = cfg
 
         fid_audit = getattr(job, "fidelity_audit_json", None) or {}
+        has_unresolved_material_fidelity = (
+            isinstance(fid_audit, dict)
+            and (
+                fid_audit.get("status") == "unresolved_issue_remains"
+                or fid_audit.get("unresolved_issue") is True
+            )
+            and fid_audit.get("has_material_issues") is not False
+        )
+        if has_unresolved_material_fidelity:
+            err_detail = (
+                fid_audit.get("repair_instructions")
+                or "Unresolved material fidelity issues remain in script."
+            )
+            job.failed_stage = "FIDELITY_VERIFICATION"
+            job.error_code = "FIDELITY_VERIFICATION_FAILED"
+            job.error_detail = err_detail
+            transition_job_state(
+                db, job, JobState.FAILED_FINAL.value,
+                component="herald-core",
+                message=f"Fidelity verification failed: {err_detail}",
+            )
+            record_job_diagnostic_event(
+                job.id,
+                "ERROR",
+                "fidelity",
+                "FIDELITY_VERIFICATION_FAILED",
+                f"Fidelity verification failed closed: {err_detail}",
+                metadata=fid_audit,
+                db=db,
+            )
+            db.commit()
+            try:
+                from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+            except Exception as arc_err:
+                logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
+            return HeraldResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=is_duplicate,
+                rerun_of_job_id=rerun_of_job_id,
+                message=f"Fidelity verification failed: {err_detail}",
+                episode_title=ep_title,
+                estimated_minutes=dur_info.get("estimated_minutes"),
+            )
+
         has_content_warning = (
-            (isinstance(fid_audit, dict) and (fid_audit.get("content_warning") is True or fid_audit.get("unresolved_issue") is True or fid_audit.get("status") == "unresolved_issue_remains"))
+            (isinstance(fid_audit, dict) and fid_audit.get("content_warning") is True)
             or (isinstance(cfg, dict) and cfg.get("content_warning") is True)
         )
-        if has_content_warning:
-            if hold_for_approval:
-                job.approval_required = True
-                job.approval_requested_at = None
-                job.telegram_approval_message_id = None
-                transition_job_state(
-                    db, job, JobState.AWAITING_APPROVAL.value, component="herald-core"
-                )
-                record_job_diagnostic_event(
-                    job.id, "INFO", "approval", "APPROVAL_REQUESTED", "Job held for user approval (content warning)", db=db
-                )
-                db.commit()
-                return HeraldResponse(
-                    job_id=job.id,
-                    status=job.status,
-                    request_mode=job.request_mode,
-                    source_type=job.source_type,
-                    is_duplicate=is_duplicate,
-                    rerun_of_job_id=rerun_of_job_id,
-                    message="Script ready and awaiting approval (content warning).",
-                    episode_title=ep_title,
-                    estimated_minutes=dur_info.get("estimated_minutes"),
-                )
-            else:
-                err_detail = (fid_audit.get("repair_instructions") if isinstance(fid_audit, dict) else None) or "Unresolved material fidelity issues remain in non-interactive pipeline."
-                job.failed_stage = "FIDELITY_VERIFICATION"
-                job.error_code = "FIDELITY_VERIFICATION_FAILED"
-                job.error_detail = err_detail
-                transition_job_state(
-                    db, job, JobState.FAILED_FINAL.value,
-                    component="herald-core",
-                    message=f"Fidelity verification failed: {err_detail}",
-                )
-                record_job_diagnostic_event(
-                    job.id,
-                    "ERROR",
-                    "fidelity",
-                    "FIDELITY_VERIFICATION_FAILED",
-                    f"Fidelity verification failed closed: {err_detail}",
-                    metadata=fid_audit if isinstance(fid_audit, dict) else {},
-                    db=db,
-                )
-                db.commit()
-                try:
-                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
-                except Exception as arc_err:
-                    logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
-                return HeraldResponse(
-                    job_id=job.id,
-                    status=job.status,
-                    request_mode=job.request_mode,
-                    source_type=job.source_type,
-                    is_duplicate=is_duplicate,
-                    rerun_of_job_id=rerun_of_job_id,
-                    message=f"Fidelity verification failed: {err_detail}",
-                    episode_title=ep_title,
-                    estimated_minutes=dur_info.get("estimated_minutes"),
-                )
+        if has_content_warning and hold_for_approval:
+            job.approval_required = True
+            job.approval_requested_at = None
+            job.telegram_approval_message_id = None
+            transition_job_state(
+                db, job, JobState.AWAITING_APPROVAL.value, component="herald-core"
+            )
+            record_job_diagnostic_event(
+                job.id, "INFO", "approval", "APPROVAL_REQUESTED", "Job held for user approval (content warning)", db=db
+            )
+            db.commit()
+            return HeraldResponse(
+                job_id=job.id,
+                status=job.status,
+                request_mode=job.request_mode,
+                source_type=job.source_type,
+                is_duplicate=is_duplicate,
+                rerun_of_job_id=rerun_of_job_id,
+                message="Script ready and awaiting approval (content warning).",
+                episode_title=ep_title,
+                estimated_minutes=dur_info.get("estimated_minutes"),
+            )
 
         if hold_for_approval:
             job.approval_required = True
