@@ -151,6 +151,7 @@ class GeminiProvider(AIProvider):
         job_id: str | None = None,
         research_plan: dict[str, Any] | None = None,
         operation: str = "grounded_research",
+        attempt: int = 1,
         **kwargs: Any,
     ) -> dict[str, Any]:
         from herald.gemini.client import generate_grounded_research as _ggr
@@ -162,7 +163,7 @@ class GeminiProvider(AIProvider):
             research_plan=research_plan,
             max_attempts=1,
             operation=operation,
-            attempt=kwargs.get("attempt", 1),
+            attempt=attempt,
             **kwargs,
         )
 

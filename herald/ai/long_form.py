@@ -3278,6 +3278,8 @@ def execute_unified_long_form_pipeline(
                     research_depth=research_depth,
                     job_id=job.id,
                     research_plan=r_plan,
+                    operation="grounded_research",
+                    attempt=att,
                 )
 
             try:

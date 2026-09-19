@@ -1289,6 +1289,8 @@ def execute_script_generation(
                         source_text=src,
                         research_depth=job.research_depth or "medium",
                         job_id=job.id,
+                        operation="grounded_research",
+                        attempt=att,
                     )
                 grounded_data = execute_with_failover(
                     job=job,
@@ -1628,10 +1630,16 @@ def execute_script_generation(
         has_unresolved_material_fidelity = (
             isinstance(fid_audit, dict)
             and (
-                fid_audit.get("status") == "unresolved_issue_remains"
-                or fid_audit.get("unresolved_issue") is True
+                fid_audit.get("fidelity_blocked") is True
+                or fid_audit.get("has_unresolved_material_issues") is True
+                or (
+                    fid_audit.get("status") in {
+                        "unresolved_issue_remains",
+                        "issue_detected",
+                    }
+                    and fid_audit.get("has_material_issues") is True
+                )
             )
-            and fid_audit.get("has_material_issues") is not False
         )
         if has_unresolved_material_fidelity:
             err_detail = (

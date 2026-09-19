@@ -383,6 +383,8 @@ def discover_same_publisher_replacement_url(
             source_text=f"Find the original article published on {domain} matching: {original_url}\nSearch query: {discovery_query}",
             research_depth="low",
             job_id=job_id,
+            operation="grounded_research",
+            attempt=1,
         )
     except Exception as e:
         logger.warning(f"Grounded discovery call to {prov_id} failed: {e}")

@@ -80,6 +80,7 @@ class AIProvider(ABC):
         job_id: str | None = None,
         research_plan: dict[str, Any] | None = None,
         operation: str = "grounded_research",
+        attempt: int = 1,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Generate grounded web search research. Subclasses override if supported."""

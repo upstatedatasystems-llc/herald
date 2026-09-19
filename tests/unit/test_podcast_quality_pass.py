@@ -414,6 +414,228 @@ def test_worker_fails_closed_even_when_explicitly_approved(db_session, tmp_path)
         assert job.error_code == "FIDELITY_VERIFICATION_FAILED"
 
 
+def test_pipeline_fails_closed_on_fidelity_blocked_even_when_approved(db_session):
+    """
+    execute_script_generation fails closed to FAILED_FINAL with failed_stage='FIDELITY_VERIFICATION'
+    when status='issue_detected', has_material_issues=True, unresolved_issue=False, fidelity_blocked=True,
+    even when hold_for_approval=True and approved_at is set.
+    """
+    from datetime import datetime, timezone
+
+    job = PodcastJob(
+        id="pipeline-fid-blocked-1234",
+        request_mode="topic",
+        content_mode="topic",
+        status=JobState.RECEIVED.value,
+        custom_title="Approved But Blocked Episode",
+        source_text="Some source text",
+        source_hash="fidelity-hash-blocked-1234",
+        approved_at=datetime.now(timezone.utc),
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    with patch("herald.ai.long_form.execute_unified_long_form_pipeline") as mock_pipe:
+        def side_effect(*args, **kwargs):
+            job.fidelity_audit_json = {
+                "status": "issue_detected",
+                "has_material_issues": True,
+                "unresolved_issue": False,
+                "fidelity_blocked": True,
+                "content_warning": True,
+                "repair_instructions": "Material factual inconsistencies detected.",
+            }
+            return PodcastScriptResponse(
+                episode_title="Approved But Blocked Episode",
+                episode_description="Description",
+                segments=[PodcastSegment(order=1, heading="Intro", narration="Narration text.")],
+                warnings=[],
+            )
+        mock_pipe.side_effect = side_effect
+
+        response = execute_script_generation(
+            db=db_session,
+            job=job,
+            hold_for_approval=True,
+        )
+
+        assert response.status == JobState.FAILED_FINAL.value
+        assert job.status == JobState.FAILED_FINAL.value
+        assert job.failed_stage == "FIDELITY_VERIFICATION"
+        assert job.error_code == "FIDELITY_VERIFICATION_FAILED"
+        assert "Material factual inconsistencies detected" in job.error_detail
+
+
+def test_worker_fails_closed_on_issue_detected_fidelity_blocked_approved(db_session, tmp_path):
+    """
+    Worker halts before TTS and sets FAILED_FINAL with failed_stage='FIDELITY_VERIFICATION'
+    when status='issue_detected', has_material_issues=True, unresolved_issue=False, fidelity_blocked=True,
+    even on an approved job.
+    """
+    from apps.worker.main import process_next_job
+    from datetime import datetime, timezone
+
+    job = PodcastJob(
+        id="worker-fid-issue-detected-8899",
+        status=JobState.QUEUED_TTS.value,
+        request_mode="source",
+        source_hash="worker-hash-8899",
+        source_text="Some source text",
+        approved_at=datetime.now(timezone.utc),
+        fidelity_audit_json={
+            "status": "issue_detected",
+            "has_material_issues": True,
+            "unresolved_issue": False,
+            "fidelity_blocked": True,
+            "repair_instructions": "Factual inaccuracy identified prior to TTS.",
+        },
+        script_json={
+            "episode_title": "Approved Risky Episode 2",
+            "segments": [{"order": 1, "heading": "Intro", "narration": "Approved narration."}],
+        },
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    mock_kokoro = MagicMock()
+    with patch("apps.worker.main.check_free_disk_mb", return_value=1000.0), \
+         patch("apps.worker.main.WorkerLeaseHeartbeat"):
+
+        process_next_job(db=db_session, kokoro_client=mock_kokoro, worker_id="test-worker-1")
+
+        db_session.refresh(job)
+        assert job.status == JobState.FAILED_FINAL.value
+        assert job.failed_stage == "FIDELITY_VERIFICATION"
+        assert job.error_code == "FIDELITY_VERIFICATION_FAILED"
+        assert "Factual inaccuracy identified" in job.error_detail
+        mock_kokoro.synthesize.assert_not_called()
+
+
+def test_fidelity_audit_repair_limit_sets_fidelity_blocked_and_fails_final(db_session, tmp_path):
+    """
+    Recovery regression:
+    When verify_repair_count=1, audit_and_repair_fidelity skips bounded repair,
+    yielding status='issue_detected', has_material_issues=True, fidelity_blocked=True.
+    Then the worker fails closed to FAILED_FINAL before TTS.
+    """
+    from herald.ai.long_form import audit_and_repair_fidelity
+    from apps.worker.main import process_next_job
+    from datetime import datetime, timezone
+
+    job = PodcastJob(
+        id="job-repair-limit-77",
+        status=JobState.QUEUED_TTS.value,
+        request_mode="source",
+        source_hash="repair-limit-hash-77",
+        source_text="Primary source text about robotics.",
+        approved_at=datetime.now(timezone.utc),
+        verify_repair_count=1,
+        script_json={
+            "episode_title": "Robotics Episode",
+            "segments": [{"order": 1, "heading": "Robotics", "narration": "Robotics narrative."}],
+        },
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    sections = [
+        {"section_index": 1, "heading": "Robotics", "narration": "Robotics narrative.", "relevant_evidence_ids": []}
+    ]
+
+    findings_payload = {
+        "has_material_issues": True,
+        "material_issues": ["Critical omitted data"],
+        "unsupported_claims": [],
+        "invented_facts": [],
+        "repair_instructions": "Re-insert missing robotics data.",
+        "omitted_numbers": [],
+        "omitted_entities": [],
+        "factual_contradictions": [],
+        "accidental_invented_context": [],
+    }
+    mock_audit_findings = MagicMock(**findings_payload)
+    mock_audit_findings.model_dump.return_value = findings_payload
+
+    with patch("herald.ai.long_form.execute_with_failover", return_value=mock_audit_findings):
+        _, audit_result = audit_and_repair_fidelity(
+            job=job,
+            sections=sections,
+            source_ledger=None,
+            evidence_packet={},
+            scope=EvidenceScope.SOURCE_ONLY,
+            db=db_session,
+            source_text="Primary source text about robotics.",
+        )
+
+    assert audit_result["repair_attempted"] is False
+    assert audit_result["repair_succeeded"] is False
+    assert audit_result["status"] == "issue_detected"
+    assert audit_result["has_material_issues"] is True
+    assert audit_result["unresolved_issue"] is False
+    assert audit_result["fidelity_blocked"] is True
+
+    job.fidelity_audit_json = audit_result
+    db_session.commit()
+
+    mock_kokoro = MagicMock()
+    with patch("apps.worker.main.check_free_disk_mb", return_value=1000.0), \
+         patch("apps.worker.main.WorkerLeaseHeartbeat"):
+
+        process_next_job(db=db_session, kokoro_client=mock_kokoro, worker_id="test-worker-1")
+
+        db_session.refresh(job)
+        assert job.status == JobState.FAILED_FINAL.value
+        assert job.failed_stage == "FIDELITY_VERIFICATION"
+        assert job.error_code == "FIDELITY_VERIFICATION_FAILED"
+        mock_kokoro.synthesize.assert_not_called()
+
+
+def test_fidelity_audit_failed_nonfatal_does_not_block_tts(db_session, tmp_path):
+    """
+    status='failed_nonfatal' is an infrastructure failure, not an unresolved material defect.
+    It must NOT trigger the pre-TTS fidelity fail-closed guard.
+    """
+    from apps.worker.main import process_next_job
+    from datetime import datetime, timezone
+
+    job = PodcastJob(
+        id="worker-fid-nonfatal-1122",
+        status=JobState.QUEUED_TTS.value,
+        request_mode="source",
+        source_hash="worker-hash-1122",
+        source_text="Some source text",
+        approved_at=datetime.now(timezone.utc),
+        fidelity_audit_json={
+            "status": "failed_nonfatal",
+            "failed_audits": 1,
+            "completed_audits": 0,
+            "expected_audits": 1,
+            "has_material_issues": False,
+            "unresolved_issue": False,
+            "fidelity_blocked": False,
+        },
+        script_json={
+            "episode_title": "Nonfatal Audio Episode",
+            "segments": [{"order": 1, "heading": "Intro", "narration": "Narration audio."}],
+        },
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    with patch("apps.worker.main.check_free_disk_mb", return_value=1000.0), \
+         patch("apps.worker.main.WorkerLeaseHeartbeat"), \
+         patch("apps.worker.main.run_pronunciation_preflight"), \
+         patch("apps.worker.main.chunk_podcast_script", return_value=[]), \
+         patch("apps.worker.main.record_stage_metric"):
+
+        process_next_job(db=db_session, kokoro_client=MagicMock(), worker_id="test-worker-1")
+
+        db_session.refresh(job)
+        assert job.failed_stage != "FIDELITY_VERIFICATION"
+        assert job.error_code != "FIDELITY_VERIFICATION_FAILED"
+
+
+
 def test_extract_distinctive_phrases_short_concepts():
     """Verify _extract_distinctive_phrases captures 2-3 word distinctive concepts (capitalized, numeric, or technical)."""
     text = "The submarine executed a Crazy Ivan while maneuvering near the 300,000-gallon tank to test sonar baffles."

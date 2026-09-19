@@ -1682,3 +1682,107 @@ def test_outer_json_decode_bounded_retry_in_failover(mock_db):
     assert attempts_seen == [1, 2]
     assert res == {"result": "success"}
 
+
+def test_gemini_provider_generate_grounded_research_attempt_forwarding_regression():
+    """
+    Direct regression test for GeminiProvider.generate_grounded_research:
+    Calls real GeminiProvider.generate_grounded_research with operation='targeted_gap_research' and attempt=2.
+    Only mocks herald.gemini.client.generate_grounded_research.
+    Asserts operation='targeted_gap_research' and attempt=2 are received with no TypeError.
+    """
+    prov = GeminiProvider(model="gemini-3.5-flash", research_model="gemini-3.5-pro")
+    with patch("herald.gemini.client.generate_grounded_research") as mock_ggr:
+        mock_ggr.return_value = {
+            "raw_text": "Grounded findings",
+            "sources": [{"title": "Source 1", "url": "https://example.com"}],
+            "items": [],
+        }
+        res = prov.generate_grounded_research(
+            source_text="Research prompt text",
+            research_depth="medium",
+            job_id="test-job-ggr",
+            operation="targeted_gap_research",
+            attempt=2,
+        )
+
+        assert res["raw_text"] == "Grounded findings"
+        mock_ggr.assert_called_once()
+        _, call_kwargs = mock_ggr.call_args
+        assert call_kwargs["operation"] == "targeted_gap_research"
+        assert call_kwargs["attempt"] == 2
+        assert call_kwargs["model_name"] == "gemini-3.5-pro"
+        assert call_kwargs["job_id"] == "test-job-ggr"
+
+
+def test_expand_script_content_gap_real_gemini_provider_wrapper_path(mock_db):
+    """
+    Exercises the real expand_script_content_gap -> real GeminiProvider.generate_grounded_research wrapper path.
+    Only mocks herald.gemini.client.generate_grounded_research and script generation.
+    Simulates retry attempt 2 and asserts call arguments forwarded from expand_script_content_gap.
+    """
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-gap-real-wrapper")
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Section 1",
+            "purpose": "Overview",
+            "key_points": ["Fact A"],
+            "narration": "Short draft.",
+            "word_count": 20,
+            "relevant_evidence_ids": [],
+        }
+    ]
+    gap_info = {
+        "deficit": 300,
+        "total_words": 20,
+        "planned_target": 320,
+        "fill_ratio": 0.06,
+        "is_overall_underfilled": True,
+        "underfilled_sections": [{"section_index": 1, "target_budget": 320, "actual_words": 20, "deficit": 300}],
+    }
+
+    gemini_prov = GeminiProvider(model="gemini-3.5-flash", research_model="gemini-3.5-pro")
+    # DO NOT mock gemini_prov.generate_grounded_research - test the real wrapper method!
+    gemini_prov.generate_script = MagicMock(return_value=PodcastScriptResponse(
+        episode_title="Expanded Episode",
+        episode_description="Clean",
+        segments=[PodcastSegment(order=1, heading="Section 1", narration="Short draft with new detailed facts.")],
+        warnings=[],
+    ))
+
+    ggr_calls = []
+    def mock_ggr(*args, **kwargs):
+        ggr_calls.append(kwargs)
+        if len(ggr_calls) == 1:
+            from herald.ai.errors import AIProviderTimeoutError
+            raise AIProviderTimeoutError("Temporary timeout on attempt 1", provider="gemini")
+        return {
+            "raw_text": "New grounded research facts.",
+            "grounding_metadata": {"webSearchQueries": ["query 1"]},
+            "sources": [{"title": "Source 1", "url": "https://example.com"}],
+            "items": [{"evidence_id": "SUPP_1", "title": "S1", "snippet": "Text snippet.", "url": "https://example.com"}],
+        }
+
+    with patch("herald.ai.failover.create_provider", return_value=gemini_prov), \
+         patch("herald.gemini.client.generate_grounded_research", side_effect=mock_ggr):
+        expanded, meta = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Deep Space",
+            evidence_packet={"items": []},
+            scope=EvidenceScope.RESEARCH,
+            db=mock_db,
+            return_metadata=True,
+        )
+
+    assert meta["attempted"] is True
+    assert meta["succeeded"] is True
+    assert len(ggr_calls) == 2
+    assert ggr_calls[0]["operation"] == "targeted_gap_research"
+    assert ggr_calls[0]["attempt"] == 1
+    assert ggr_calls[1]["operation"] == "targeted_gap_research"
+    assert ggr_calls[1]["attempt"] == 2
+    assert ggr_calls[1]["model_name"] == "gemini-3.5-pro"
+
+

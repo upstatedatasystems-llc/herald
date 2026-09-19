@@ -551,37 +551,46 @@ def process_next_job(db: Session, kokoro_client: KokoroClient, worker_id: str = 
             # If unresolved material fidelity issues remain, the pipeline must NEVER proceed to TTS synthesis,
             # even if approved by the user. Fail closed immediately.
             fid_audit = getattr(job, "fidelity_audit_json", None) or {}
-            if isinstance(fid_audit, dict):
-                has_unresolved_fidelity = (
-                    fid_audit.get("status") == "unresolved_issue_remains"
-                    or fid_audit.get("unresolved_issue") is True
-                ) and fid_audit.get("has_material_issues") is not False
-                if has_unresolved_fidelity:
-                    err_msg = fid_audit.get("repair_instructions") or "Unresolved material fidelity issues remain."
-                    record_job_diagnostic_event(
-                        job.id,
-                        "ERROR",
-                        "fidelity",
-                        "FIDELITY_VERIFICATION_FAILED",
-                        f"Unresolved material fidelity issues remain. Halting before TTS synthesis: {err_msg}",
-                        metadata=fid_audit,
-                        db=db,
+            has_unresolved_material_fidelity = (
+                isinstance(fid_audit, dict)
+                and (
+                    fid_audit.get("fidelity_blocked") is True
+                    or fid_audit.get("has_unresolved_material_issues") is True
+                    or (
+                        fid_audit.get("status") in {
+                            "unresolved_issue_remains",
+                            "issue_detected",
+                        }
+                        and fid_audit.get("has_material_issues") is True
                     )
-                    job.failed_stage = "FIDELITY_VERIFICATION"
-                    job.error_code = "FIDELITY_VERIFICATION_FAILED"
-                    job.error_detail = err_msg
-                    transition_job_state(
-                        db, job, JobState.FAILED_FINAL.value,
-                        component="herald-worker",
-                        message=f"Fidelity verification failed: {err_msg}",
-                    )
-                    db.commit()
-                    try:
-                        from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
-                        ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
-                    except Exception as arc_err:
-                        logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
-                    return
+                )
+            )
+            if has_unresolved_material_fidelity:
+                err_msg = fid_audit.get("repair_instructions") or "Unresolved material fidelity issues remain."
+                record_job_diagnostic_event(
+                    job.id,
+                    "ERROR",
+                    "fidelity",
+                    "FIDELITY_VERIFICATION_FAILED",
+                    f"Unresolved material fidelity issues remain. Halting before TTS synthesis: {err_msg}",
+                    metadata=fid_audit,
+                    db=db,
+                )
+                job.failed_stage = "FIDELITY_VERIFICATION"
+                job.error_code = "FIDELITY_VERIFICATION_FAILED"
+                job.error_detail = err_msg
+                transition_job_state(
+                    db, job, JobState.FAILED_FINAL.value,
+                    component="herald-worker",
+                    message=f"Fidelity verification failed: {err_msg}",
+                )
+                db.commit()
+                try:
+                    from herald.services.diagnostics_export import ensure_terminal_diagnostics_archive
+                    ensure_terminal_diagnostics_archive(job.id, JobState.FAILED_FINAL.value)
+                except Exception as arc_err:
+                    logger.warning("Failed ensuring terminal diagnostics archive: %s", arc_err)
+                return
 
             # Pronunciation & Spoken-Text Preflight before TTS synthesis
             try:
