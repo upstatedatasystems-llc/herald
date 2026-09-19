@@ -1398,6 +1398,7 @@ def generate_podcast_script(
     generation_instructions: str | None = None,
     max_attempts: int | None = None,
     is_isolated_section: bool = False,
+    operation: str = "script_generation",
 ) -> PodcastScriptResponse:
     """
     Generate structured podcast script using GEMINI_MODEL (non-search call).
@@ -1558,7 +1559,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="script_generation",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
@@ -1584,7 +1585,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="script_generation",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
@@ -1634,7 +1635,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="script_generation",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=True,
@@ -1678,7 +1679,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="script_generation",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
@@ -1735,7 +1736,7 @@ Generate the podcast script JSON response adhering to spoken prose rules and out
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="script_generation",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
                     success=False,
@@ -2347,4 +2348,119 @@ Return the corrected PodcastScriptResponse JSON now.
         raise GeminiError(f"Failed to repair script fidelity: {e}")
 
     raise GeminiError("Failed to repair script fidelity.")
+
+
+def generate_structured_output(
+    prompt: str,
+    response_schema: type,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    job_id: str | None = None,
+    operation: str = "structured_output",
+    temperature: float = 0.1,
+    max_output_tokens: int | None = None,
+) -> Any:
+    """
+    Generate structured output validated against response_schema using Gemini.
+    Records AIInteraction with exact operation name and token counts.
+    """
+    key = api_key or settings.GEMINI_API_KEY
+    model = model_name or settings.GEMINI_MODEL
+
+    if not key:
+        raise GeminiAuthError("Gemini API key is not configured.")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": key}
+
+    gen_config: dict[str, Any] = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens or getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 8192) or 8192,
+        "responseMimeType": "application/json",
+    }
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": gen_config,
+    }
+
+    t0 = datetime.now(UTC)
+    interaction_recorded = False
+    try:
+        from herald.concurrency import get_semaphores
+        with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+            resp = client.post(url, json=payload, headers=headers)
+
+        t1 = datetime.now(UTC)
+        req_id = _extract_request_id(resp)
+
+        if resp.status_code == 200:
+            result_json = resp.json()
+            candidates = result_json.get("candidates", [])
+            if candidates:
+                raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
+                json_data = json.loads(raw_text)
+                # Provider-neutral validation against response_schema
+                if hasattr(response_schema, "model_validate"):
+                    parsed_obj = response_schema.model_validate(json_data)
+                elif hasattr(response_schema, "__call__"):
+                    parsed_obj = response_schema(**json_data) if isinstance(json_data, dict) else json_data
+                else:
+                    parsed_obj = json_data
+
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=True,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=t_tok,
+                    thought_tokens=th_tok,
+                    provider_request_id=req_id,
+                )
+                interaction_recorded = True
+                return parsed_obj
+            else:
+                raise GeminiValidationError("Gemini API returned no response candidates.")
+
+        _record_gemini_interaction(
+            job_id=job_id,
+            model=model,
+            operation=operation,
+            started_at=t0,
+            completed_at=t1,
+            success=False,
+            http_status=resp.status_code,
+            input_chars=len(prompt),
+            error=f"HTTP {resp.status_code}: {resp.text}",
+            provider_request_id=req_id,
+        )
+        interaction_recorded = True
+        if resp.status_code in (401, 403):
+            raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+        elif resp.status_code == 429:
+            raise GeminiQuotaError(f"Gemini API rate limit exceeded ({resp.status_code}): {resp.text}")
+        else:
+            raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
+
+    except Exception as e:
+        if not interaction_recorded:
+            t1 = datetime.now(UTC)
+            _record_gemini_interaction(
+                job_id=job_id,
+                model=model,
+                operation=operation,
+                started_at=t0,
+                completed_at=t1,
+                success=False,
+                error=e,
+                input_chars=len(prompt),
+            )
+        raise
 

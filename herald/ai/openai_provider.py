@@ -361,6 +361,8 @@ Generate the podcast script JSON response now.
         }
 
         attempt = kwargs.get("attempt", attempt)
+        max_attempts = kwargs.get("max_attempts", 1)
+        operation = kwargs.get("operation", "script_generation")
         t0 = datetime.now(UTC)
         req_evidence = {
             "mode": mode_clean,
@@ -388,7 +390,7 @@ Generate the podcast script JSON response now.
                 job_id=job_id,
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -401,14 +403,14 @@ Generate the podcast script JSON response now.
                 f"{self.provider_name} client timeout connecting to {self._model}",
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
         except Exception as net_err:
             record_ai_interaction(
                 job_id=job_id,
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -422,7 +424,7 @@ Generate the podcast script JSON response now.
                 f"{self.provider_name} network failure: {safe_net_err}",
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
             )
 
         req_id = resp.headers.get("x-request-id") or resp.headers.get("cf-ray") or resp.headers.get("openai-organization")
@@ -431,7 +433,7 @@ Generate the podcast script JSON response now.
                 job_id=job_id,
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -444,7 +446,7 @@ Generate the podcast script JSON response now.
                 response_json={"http_status": resp.status_code, "response_character_count": len(resp.text)},
                 metadata={"attempt": attempt, "mode": mode_clean},
             )
-            self._classify_http_error(resp, attempt=attempt, max_attempts=1, operation="script_generation")
+            self._classify_http_error(resp, attempt=attempt, max_attempts=max_attempts, operation=operation)
 
         result_json = resp.json()
         req_id = req_id or result_json.get("id")
@@ -475,7 +477,7 @@ Generate the podcast script JSON response now.
                 job_id=job_id,
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -503,7 +505,7 @@ Generate the podcast script JSON response now.
                 job_id=job_id,
                 provider=self.provider_name.lower(),
                 model=self._model,
-                operation="script_generation",
+                operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
                 provider_request_id=req_id,
@@ -743,3 +745,114 @@ Generate the podcast script JSON response now.
                 model=self._model,
                 operation="distillation",
             )
+
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Generate structured output adhering to response_schema using OpenAI-compatible JSON mode.
+        Validates output against response_schema and records AIInteraction.
+        """
+        if not self.is_configured():
+            raise AIAuthFailedError(
+                f"{self.provider_name} API key is not configured.",
+                provider=self.provider_name.lower(),
+                model=self._model,
+            )
+
+        url = f"{self._api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            **self._custom_headers,
+        }
+
+        attempt = kwargs.get("attempt", 1)
+        t0 = datetime.now(UTC)
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": kwargs.get("temperature", 0.1),
+        }
+
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+        except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+            )
+            raise
+
+        req_id = resp.headers.get("x-request-id") or resp.headers.get("cf-ray") or resp.headers.get("openai-organization")
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            )
+            self._classify_http_error(resp, attempt=attempt, max_attempts=1, operation=operation)
+
+        res_json = resp.json()
+        p_tok, c_tok, t_tok = self._extract_token_usage(res_json)
+        choices = res_json.get("choices", [])
+        if not choices:
+            raise AISchemaValidationError(
+                "No choices returned from provider",
+                provider=self.provider_name.lower(),
+                model=self._model,
+            )
+        raw_text = choices[0].get("message", {}).get("content", "")
+        data = json.loads(raw_text)
+
+        # Provider-neutral validation against response_schema
+        if hasattr(response_schema, "model_validate"):
+            parsed = response_schema.model_validate(data)
+        elif hasattr(response_schema, "__call__"):
+            parsed = response_schema(**data) if isinstance(data, dict) else data
+        else:
+            parsed = data
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider=self.provider_name.lower(),
+            model=self._model,
+            operation=operation,
+            attempt=attempt,
+            http_status=200,
+            provider_request_id=req_id,
+            input_chars=len(prompt),
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=True,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+        )
+        return parsed

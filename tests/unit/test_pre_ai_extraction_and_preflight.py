@@ -152,7 +152,7 @@ def test_url_context_primary_lacks_capability_secondary_used():
 
     assert res["body"] == "Gemini URL Body"
     assert calls == [("url_context", "Gemini")]
-    assert job.ai_failover_index == 1
+    assert job.ai_failover_index == 0
     assert job.ai_effective_provider == "gemini"
 
 

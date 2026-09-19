@@ -383,3 +383,107 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             if isinstance(e, httpx.NetworkError):
                 raise AIProviderUnavailableError(f"Anthropic network error during distillation: {e}", provider="anthropic", model=self._model, operation="distillation")
             raise AIProviderError(f"Anthropic distillation error: {e}", provider="anthropic", model=self._model, operation="distillation")
+
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Generate structured output adhering to response_schema using Anthropic Messages API.
+        Validates output against response_schema and records AIInteraction.
+        """
+        if not self.is_configured():
+            raise AIAuthFailedError("Anthropic API key is not configured", provider="anthropic")
+
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "content-type": "application/json",
+        }
+        system_instruction = (
+            "You are a structured data extractor. You MUST respond ONLY with a single valid JSON "
+            "object matching the requested schema. Do NOT include markdown code fences, comments, or explanations."
+        )
+        payload = {
+            "model": self._model,
+            "max_tokens": kwargs.get("max_tokens", 4096),
+            "system": system_instruction,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": kwargs.get("temperature", 0.1),
+        }
+
+        attempt = kwargs.get("attempt", 1)
+        t0 = datetime.now(UTC)
+
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(ANTHROPIC_API_URL, json=payload, headers=headers)
+        except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+            )
+            raise
+
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            )
+            self._classify_http_error(resp, operation=operation)
+
+        res_json = resp.json()
+        content_blocks = res_json.get("content", [])
+        text_response = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+        data = _extract_json_block(text_response)
+
+        usage = res_json.get("usage", {})
+        p_tok = usage.get("input_tokens")
+        c_tok = usage.get("output_tokens")
+        t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
+
+        if hasattr(response_schema, "model_validate"):
+            parsed = response_schema.model_validate(data)
+        elif hasattr(response_schema, "__call__"):
+            parsed = response_schema(**data) if isinstance(data, dict) else data
+        else:
+            parsed = data
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="anthropic",
+            model=self._model,
+            operation=operation,
+            attempt=attempt,
+            http_status=200,
+            input_chars=len(prompt),
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=True,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+        )
+        return parsed
+

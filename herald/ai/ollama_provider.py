@@ -347,3 +347,124 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             if isinstance(e, httpx.NetworkError):
                 raise AIProviderUnavailableError(f"Ollama network error during distillation: {e}", provider="ollama", model=self._model, operation="distillation")
             raise AIProviderError(f"Ollama distillation error: {e}", provider="ollama", model=self._model, operation="distillation")
+
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Generate structured output adhering to response_schema using Ollama JSON format.
+        Validates output against response_schema and records AIInteraction.
+        """
+        if not self.is_configured():
+            raise AIProviderUnavailableError("Ollama base URL is not configured", provider="ollama")
+
+        url = f"{self._base_url}/api/chat"
+        attempt = kwargs.get("attempt", 1)
+        t0 = datetime.now(UTC)
+
+        system_instruction = (
+            "You are a structured data extractor. You MUST respond ONLY with valid JSON "
+            "matching the requested schema. No markdown formatting, no code fences, no commentary."
+        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt},
+            ],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": kwargs.get("temperature", 0.1)},
+        }
+
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload)
+        except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+            )
+            raise
+
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            )
+            if resp.status_code == 404:
+                raise AIModelUnavailableError(
+                    f"Ollama model '{self._model}' not found: HTTP 404",
+                    provider="ollama",
+                    model=self._model,
+                    http_status=404,
+                )
+            if resp.status_code >= 500:
+                raise AIProviderUnavailableError(
+                    f"Ollama API returned HTTP {resp.status_code}",
+                    provider="ollama",
+                    model=self._model,
+                    http_status=resp.status_code,
+                )
+            raise AIProviderError(
+                f"Ollama API error ({resp.status_code}): {resp.text[:300]}",
+                provider="ollama",
+                model=self._model,
+                http_status=resp.status_code,
+            )
+
+        res_json = resp.json()
+        msg = res_json.get("message", {})
+        raw_content = msg.get("content", "")
+        data = _extract_json_block(raw_content)
+
+        p_tok = res_json.get("prompt_eval_count")
+        c_tok = res_json.get("eval_count")
+        t_tok = (p_tok + c_tok) if (p_tok is not None and c_tok is not None) else None
+
+        if hasattr(response_schema, "model_validate"):
+            parsed = response_schema.model_validate(data)
+        elif hasattr(response_schema, "__call__"):
+            parsed = response_schema(**data) if isinstance(data, dict) else data
+        else:
+            parsed = data
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="ollama",
+            model=self._model,
+            operation=operation,
+            attempt=attempt,
+            http_status=200,
+            input_chars=len(prompt),
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=True,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+        )
+        return parsed
+

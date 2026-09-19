@@ -196,3 +196,29 @@ class RepetitionReviewResponse(BaseModel):
     )
 
 
+class MetadataSectionHeading(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    order: int = Field(default=1, description="Section order index (1-based)")
+    heading: str = Field(..., description="Cleaned, polished section heading")
+
+
+class MetadataCleanupResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    episode_title: str | None = Field(default=None, description="Cleaned, polished episode title")
+    headings: list[MetadataSectionHeading] = Field(
+        default_factory=list,
+        description="List of updated section headings",
+    )
+    segments: list[MetadataSectionHeading] | None = Field(
+        default=None,
+        description="Optional alias if provider outputs segments instead of headings",
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.headings and self.segments:
+            self.headings = list(self.segments)
+
+
+

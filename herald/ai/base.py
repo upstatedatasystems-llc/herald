@@ -54,6 +54,18 @@ class AIProvider(ABC):
     ) -> PodcastScriptResponse:
         """Generate structured podcast script from source text and trusted generation instructions."""
 
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        """Generate structured output validated against response_schema. Subclasses override if supported."""
+        from herald.ai.errors import AIUnsupportedCapabilityError
+        raise AIUnsupportedCapabilityError(f"Provider {self.provider_name} does not support structured output")
+
     @abstractmethod
     def check_connection(self, timeout_seconds: float = 5.0, force_refresh: bool = False) -> dict[str, Any]:
         """

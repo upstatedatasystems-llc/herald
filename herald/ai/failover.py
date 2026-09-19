@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable
 
 from herald.ai.adaptation import adapt_source_text
+from herald.ai.capabilities import validate_capability
 from herald.ai.errors import (
     AIChainExhaustedError,
     AIContextExceededError,
@@ -234,6 +235,18 @@ def _call_execute_fn(fn: Callable[..., Any], provider: Any, attempt: int, source
         return fn(provider, attempt)
 
 
+def _compute_durable_cursor(initial_index: int, genuinely_failed_indices: set[int]) -> int:
+    """
+    Compute the durable failover cursor.
+    Advances past genuinely failed providers only.
+    Operation-local capability skips do not count as provider failure.
+    """
+    idx = initial_index
+    while idx in genuinely_failed_indices:
+        idx += 1
+    return idx
+
+
 def execute_with_failover(
     job: PodcastJob,
     operation: str,
@@ -256,6 +269,9 @@ def execute_with_failover(
         max_same_provider_attempts: Max attempts on same provider before failover.
         db: Database session for persisting failover transitions and cursor.
     """
+    if required_capability:
+        validate_capability(required_capability)
+
     chain = get_job_provider_chain(job)
     if not chain:
         raise AIChainExhaustedError("Job has no configured AI provider candidates in chain", failures=[])
@@ -275,7 +291,9 @@ def execute_with_failover(
         return _call_execute_fn(execute_fn, prov, 1, source_text)
 
     max_attempts = max_same_provider_attempts or getattr(settings, "AI_REQUEST_MAX_ATTEMPTS", 3)
-    curr_index = max(0, int(getattr(job, "ai_failover_index", 0) or 0))
+    initial_failover_index = max(0, int(getattr(job, "ai_failover_index", 0) or 0))
+    curr_index = initial_failover_index
+    genuinely_failed_indices: set[int] = set()
     failures_log: list[dict[str, Any]] = []
 
     # Bounded adaptation budget persists across failover without resetting
@@ -313,10 +331,8 @@ def execute_with_failover(
                         metadata=skip_info,
                         db=db,
                     )
+                # Operation-local capability skip: advance loop index only without mutating durable cursor
                 curr_index += 1
-                job.ai_failover_index = curr_index
-                if db:
-                    db.commit()
                 continue
 
         # 2. Check credentials configuration
@@ -339,8 +355,9 @@ def execute_with_failover(
                     metadata=cfg_fail,
                     db=db,
                 )
+            genuinely_failed_indices.add(curr_index)
             curr_index += 1
-            job.ai_failover_index = curr_index
+            job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
             if db:
                 db.commit()
             continue
@@ -366,8 +383,9 @@ def execute_with_failover(
                     metadata=cb_fail,
                     db=db,
                 )
+            genuinely_failed_indices.add(curr_index)
             curr_index += 1
-            job.ai_failover_index = curr_index
+            job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
             if db:
                 db.commit()
             continue
@@ -441,7 +459,7 @@ def execute_with_failover(
                 # Sticky Failover: current candidate becomes active provider for job
                 job.ai_effective_provider = p_id
                 job.ai_effective_model = m_id
-                job.ai_failover_index = curr_index
+                job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
                 if db:
                     db.commit()
                     if getattr(job, "id", None):
@@ -573,9 +591,10 @@ def execute_with_failover(
                             metadata=transition_meta,
                             db=db,
                         )
+                    genuinely_failed_indices.add(curr_index)
                     # Advance failover cursor
                     curr_index += 1
-                    job.ai_failover_index = curr_index
+                    job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
                     if db:
                         db.commit()
                     break  # Break inner loop to start with next candidate
@@ -616,10 +635,19 @@ def execute_with_failover(
         # If inner loop exhausted same-provider attempts without success (RETRY_SAME_PROVIDER exhausted
         # or ADAPT failed and didn't raise) — advance cursor for FAILOVER path only
         if curr_index == prev_index:
+            genuinely_failed_indices.add(curr_index)
             curr_index += 1
-            job.ai_failover_index = curr_index
+            job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
             if db:
                 db.commit()
+
+    # Durable cursor advances past genuinely failed candidates only
+    job.ai_failover_index = _compute_durable_cursor(initial_failover_index, genuinely_failed_indices)
+    if db:
+        try:
+            db.commit()
+        except Exception:
+            pass
 
     # All candidates in snapshotted chain exhausted
     exhausted_summary = "\n".join(

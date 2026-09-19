@@ -120,6 +120,26 @@ class GeminiProvider(AIProvider):
             generation_instructions=generation_instructions,
             max_attempts=1,
             is_isolated_section=is_isolated_section,
+            operation=kwargs.get("operation", "script_generation"),
+        )
+
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        from herald.gemini.client import generate_structured_output as _gso
+        return _gso(
+            prompt=prompt,
+            response_schema=response_schema,
+            model_name=self.configured_model,
+            job_id=job_id,
+            operation=operation,
+            temperature=kwargs.get("temperature", 0.1),
+            max_output_tokens=kwargs.get("max_output_tokens"),
         )
 
     def generate_grounded_research(

@@ -849,3 +849,104 @@ class CloudflareProvider(AIProvider):
                 operation="distillation",
             )
 
+    def generate_structured_output(
+        self,
+        prompt: str,
+        response_schema: type,
+        job_id: str | None = None,
+        operation: str = "structured_output",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Generate structured output adhering to response_schema using Cloudflare Workers AI.
+        Validates output against response_schema and records AIInteraction.
+        """
+        if not self.is_configured():
+            raise AIProviderUnavailableError(
+                "Cloudflare Workers AI is not configured (missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID)",
+                provider="cloudflare",
+                model=self._model,
+            )
+
+        model_clean = self._model.strip().lstrip("/")
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self._account_id.strip()}/ai/run/{model_clean}"
+        headers = {
+            "Authorization": f"Bearer {self._api_token.strip()}",
+            "Content-Type": "application/json",
+        }
+
+        attempt = kwargs.get("attempt", 1)
+        t0 = datetime.now(UTC)
+        system_instruction = (
+            "You are a structured data extractor. You MUST respond ONLY with valid JSON "
+            "matching the requested schema. No markdown formatting, no code fences, no commentary."
+        )
+        payload = self._build_request_payload(
+            system_prompt=system_instruction,
+            user_prompt=prompt,
+            temperature=kwargs.get("temperature", 0.1),
+        )
+
+        try:
+            from herald.concurrency import get_semaphores
+            with get_semaphores().script, httpx.Client(timeout=settings.effective_ai_timeout_seconds) as client:
+                resp = client.post(url, json=payload, headers=headers)
+        except Exception as e:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=e,
+            )
+            raise
+
+        req_id = resp.headers.get("cf-ray") or resp.headers.get("x-request-id")
+        if resp.status_code != 200:
+            record_ai_interaction(
+                job_id=job_id,
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+            )
+            self._classify_http_error(resp, operation=operation)
+
+        res_json = resp.json()
+        raw_text = extract_cloudflare_content(res_json)
+        data = _extract_json_block(raw_text)
+
+        if hasattr(response_schema, "model_validate"):
+            parsed = response_schema.model_validate(data)
+        elif hasattr(response_schema, "__call__"):
+            parsed = response_schema(**data) if isinstance(data, dict) else data
+        else:
+            parsed = data
+
+        record_ai_interaction(
+            job_id=job_id,
+            provider="cloudflare",
+            model=self._model,
+            operation=operation,
+            attempt=attempt,
+            http_status=200,
+            provider_request_id=req_id,
+            input_chars=len(prompt),
+            started_at=t0,
+            completed_at=datetime.now(UTC),
+            success=True,
+        )
+        return parsed
+
+

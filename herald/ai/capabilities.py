@@ -19,6 +19,29 @@ class ProviderCapabilities:
     usage_metrics: bool = True
 
 
+VALID_CAPABILITIES: frozenset[str] = frozenset({
+    "script_brief",
+    "script_standard",
+    "structured_output",
+    "research_grounding",
+    "url_context_extraction",
+    "verification",
+    "usage_metrics",
+})
+
+
+def validate_capability(capability_name: str) -> None:
+    """
+    Validate that capability_name is a known legal provider capability.
+    Raises ValueError immediately if the capability name is unknown or invalid.
+    """
+    if not capability_name or capability_name not in VALID_CAPABILITIES:
+        raise ValueError(
+            f"Unknown AI provider capability '{capability_name}'. "
+            f"Valid capabilities are: {sorted(VALID_CAPABILITIES)}"
+        )
+
+
 @dataclass
 class AIModelCapabilities:
     """Declared capabilities, limits, and defaults for a specific AI model."""

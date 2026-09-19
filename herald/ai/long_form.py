@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from herald.ai.failover import execute_with_failover
 from herald.ai.schema import (
+    MetadataCleanupResponse,
     PodcastScriptResponse,
     PodcastSegment,
     RepetitionReviewItem,
@@ -1704,7 +1705,7 @@ EVALUATION RULES:
             execute_fn=_exec_rep_review,
             db=db,
             source_text=topic,
-            required_capability="script_generation",
+            required_capability="structured_output",
         )
     except Exception as e:
         logger.warning(f"Structured repetition review failed non-fatally; falling back to heuristic warnings: {e}")
@@ -1944,16 +1945,26 @@ def cleanup_script_metadata(
     topic: str,
     scope: EvidenceScope = EvidenceScope.SOURCE_ONLY,
     db: Any = None,
-) -> dict[str, Any]:
+    return_metadata: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
     """
     Perform a single bounded AI metadata cleanup pass on episode title and section headings ONLY.
     Never alters or regenerates script narration.
     Supports 'as of <date>' when topic is genuinely time-sensitive, using the job creation date.
     """
+    meta = {
+        "attempted": False,
+        "performed": False,
+        "failed": False,
+        "skipped": False,
+        "error": None,
+    }
     curr_title = script_dict.get("episode_title", topic)
     segments = script_dict.get("segments", [])
     if not segments:
-        return script_dict
+        meta["skipped"] = True
+        meta["reason"] = "no_segments"
+        return (script_dict, meta) if return_metadata else script_dict
 
     job_dt = getattr(job, "created_at", None) or datetime.now(UTC)
     date_str = job_dt.strftime("%B %Y")
@@ -1991,39 +2002,85 @@ METADATA CONTRACT:
 2. Section Headings: Replace generic continuation labels (such as 'Part 2' or 'Reading Part 2') with distinct, topic-focused headings that describe the specific narrative content of each section.
 3. Remove trailing dangling punctuation (dashes, colons, commas).
 4. Narration: Do NOT modify script narration; this pass only refines titles and headings.{source_grounding_block}
-5. Return a script response with the updated episode_title and updated section headings.
+5. Return a JSON object matching MetadataCleanupResponse:
+   {{
+     "episode_title": string,
+     "headings": [
+       {{"order": integer, "heading": string}}
+     ]
+   }}
 """
 
-    def _exec_meta(p_inst: Any, attempt: int, src: str) -> PodcastScriptResponse:
-        return p_inst.generate_script(
-            source_text=src,
-            request_mode="brief",
-            source_title=topic,
-            job_id=job.id,
-            generation_instructions=instructions,
-        )
+    def _exec_meta(p_inst: Any, attempt: int, src: str) -> MetadataCleanupResponse:
+        if hasattr(p_inst, "generate_structured_output"):
+            resp = p_inst.generate_structured_output(
+                prompt=instructions,
+                response_schema=MetadataCleanupResponse,
+                job_id=job.id,
+                operation="metadata_cleanup",
+            )
+        else:
+            resp = p_inst.generate_script(
+                source_text=src,
+                request_mode="brief",
+                source_title=topic,
+                job_id=job.id,
+                generation_instructions=instructions,
+            )
+        if isinstance(resp, dict):
+            return MetadataCleanupResponse(**resp)
+        if hasattr(resp, "episode_title"):
+            if isinstance(resp, MetadataCleanupResponse):
+                return resp
+            head_list = [
+                {"order": seg.order, "heading": seg.heading}
+                for seg in getattr(resp, "segments", [])
+            ]
+            return MetadataCleanupResponse(
+                episode_title=getattr(resp, "episode_title", None),
+                headings=head_list,
+            )
+        return resp
 
+    meta["attempted"] = True
     try:
-        res: PodcastScriptResponse = execute_with_failover(
+        res: MetadataCleanupResponse = execute_with_failover(
             job=job,
             operation="metadata_cleanup",
             execute_fn=_exec_meta,
             db=db,
             source_text=topic,
+            required_capability="structured_output",
         )
-        if not has_custom_title and res.episode_title and len(res.episode_title.strip()) > 3:
-            script_dict["episode_title"] = res.episode_title.strip()
+        updated = False
+        res_title = getattr(res, "episode_title", None) if not isinstance(res, dict) else res.get("episode_title")
+        if not has_custom_title and res_title and len(str(res_title).strip()) > 3:
+            script_dict["episode_title"] = str(res_title).strip()
+            updated = True
         elif has_custom_title:
             script_dict["episode_title"] = job.custom_title.strip()
 
-        if res.segments:
+        headings_list = getattr(res, "headings", None) or getattr(res, "segments", []) if not isinstance(res, dict) else (res.get("headings") or res.get("segments") or [])
+        if headings_list:
             for idx, seg in enumerate(script_dict.get("segments", [])):
-                if idx < len(res.segments) and res.segments[idx].heading:
-                    seg["heading"] = res.segments[idx].heading.strip()
+                if idx < len(headings_list):
+                    h_item = headings_list[idx]
+                    h_val = getattr(h_item, "heading", None) if hasattr(h_item, "heading") else h_item.get("heading")
+                    if h_val and str(h_val).strip():
+                        seg["heading"] = str(h_val).strip()
+                        updated = True
+
+        meta["performed"] = updated
+        if not updated:
+            meta["skipped"] = True
+            meta["reason"] = "no_changes_needed"
     except Exception as e:
         logger.warning(f"Metadata cleanup failed non-fatally: {e}")
+        meta["failed"] = True
+        meta["error"] = str(e)
 
-    return script_dict
+    return (script_dict, meta) if return_metadata else script_dict
+
 
 
 def audit_and_repair_fidelity(
@@ -2100,10 +2157,12 @@ def audit_and_repair_fidelity(
             "warnings": [],
         }
 
-    def _run_semantic_audit(curr_script: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    def _run_semantic_audit(curr_script: dict[str, Any]) -> tuple[bool, str, dict[str, Any], bool, bool]:
         findings: dict[str, Any] = {}
         issues_detected = False
         repair_instructions_parts: list[str] = []
+        audit_executed = False
+        audit_failed = False
 
         if scope == EvidenceScope.SOURCE_ONLY:
             try:
@@ -2122,12 +2181,14 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text,
                     required_capability="verification",
                 )
+                audit_executed = True
                 if hasattr(res, "has_material_issues") and res.has_material_issues:
                     issues_detected = True
                     if getattr(res, "repair_instructions", None):
                         repair_instructions_parts.append(res.repair_instructions)
                 findings["source_audit"] = res.model_dump() if hasattr(res, "model_dump") else str(res)
             except Exception as e:
+                audit_failed = True
                 logger.warning(f"Semantic source fidelity audit skipped/failed non-fatally: {e}")
 
         elif scope == EvidenceScope.SOURCE_PLUS_RESEARCH:
@@ -2149,12 +2210,14 @@ def audit_and_repair_fidelity(
                         source_text=primary_source_text,
                         required_capability="verification",
                     )
+                    audit_executed = True
                     if hasattr(res_s, "has_material_issues") and res_s.has_material_issues:
                         issues_detected = True
                         if getattr(res_s, "repair_instructions", None):
                             repair_instructions_parts.append(f"Source fidelity: {res_s.repair_instructions}")
                     findings["source_audit"] = res_s.model_dump() if hasattr(res_s, "model_dump") else str(res_s)
                 except Exception as e:
+                    audit_failed = True
                     logger.warning(f"Semantic source fidelity audit in expanded mode skipped/failed: {e}")
 
             try:
@@ -2174,12 +2237,14 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text or "Topic research",
                     required_capability="verification",
                 )
+                audit_executed = True
                 if hasattr(res_r, "has_material_issues") and res_r.has_material_issues:
                     issues_detected = True
                     if getattr(res_r, "repair_instructions", None):
                         repair_instructions_parts.append(f"Research fidelity: {res_r.repair_instructions}")
                 findings["research_audit"] = res_r.model_dump() if hasattr(res_r, "model_dump") else str(res_r)
             except Exception as e:
+                audit_failed = True
                 logger.warning(f"Semantic research support audit in expanded mode skipped/failed: {e}")
 
         elif scope == EvidenceScope.RESEARCH:
@@ -2201,19 +2266,21 @@ def audit_and_repair_fidelity(
                     source_text=primary_source_text or "Topic research",
                     required_capability="verification",
                 )
+                audit_executed = True
                 if hasattr(res_t, "has_material_issues") and res_t.has_material_issues:
                     issues_detected = True
                     if getattr(res_t, "repair_instructions", None):
                         repair_instructions_parts.append(res_t.repair_instructions)
                 findings["research_audit"] = res_t.model_dump() if hasattr(res_t, "model_dump") else str(res_t)
             except Exception as e:
+                audit_failed = True
                 logger.warning(f"Semantic topic research audit skipped/failed non-fatally: {e}")
 
-        return issues_detected, " ".join(repair_instructions_parts), findings
+        return issues_detected, " ".join(repair_instructions_parts), findings, audit_executed, audit_failed
 
     # 1. Initial Authoritative Semantic Audit
     current_script_dict = _build_script_dict(sections)
-    has_material_issues, repair_instructions, audit_findings = _run_semantic_audit(current_script_dict)
+    has_material_issues, repair_instructions, audit_findings, audit_executed, audit_failed = _run_semantic_audit(current_script_dict)
 
     # 2. Supplementary Coverage Ledger Check (Inexpensive signal)
     combined_narration = "\n\n".join(s.get("narration", "") for s in sections)
@@ -2348,7 +2415,7 @@ def audit_and_repair_fidelity(
         # 4. Final Semantic Re-Audit (Bounded: exactly 1 verification pass, no loop)
         if repair_succeeded:
             repaired_script_dict = _build_script_dict(sections)
-            re_issues, _, re_findings = _run_semantic_audit(repaired_script_dict)
+            re_issues, _, re_findings, _, _ = _run_semantic_audit(repaired_script_dict)
             audit_findings["final_re_audit"] = re_findings
             if not re_issues:
                 audit_status = "repair_succeeded"
@@ -2362,12 +2429,18 @@ def audit_and_repair_fidelity(
         audit_status = "repair_attempted"
     elif has_material_issues:
         audit_status = "issue_detected"
+    elif not audit_executed:
+        if audit_failed:
+            audit_status = "failed_nonfatal"
+        else:
+            audit_status = "skipped"
     else:
         audit_status = "clean"
 
     has_content_warning = bool(unresolved_issue or (audit_status == "unresolved_issue_remains"))
     audit_result = {
         "status": audit_status,
+        "audit_executed": audit_executed,
         "has_material_issues": has_material_issues,
         "repair_instructions": repair_instructions,
         "repair_attempted": repair_attempted,
@@ -2616,6 +2689,9 @@ def expand_script_content_gap(
     #   a) At least one underfilled section lacks relevant unused evidence (even if unrelated items exist globally!)
     #   b) The episode is overall underfilled and fewer than 2 uncovered items exist globally.
     supplemental_research_triggered = False
+    supp_attempted = False
+    supp_succeeded = False
+    supp_failure_category = None
     new_supp_items: list[dict[str, Any]] = []
     supp_provider = None
     supp_model = None
@@ -2623,6 +2699,9 @@ def expand_script_content_gap(
     source_count = 0
     gap_focus = None
     valid_depth = None
+
+    target_gap_secs = sections_lacking_relevant_evidence if sections_lacking_relevant_evidence else underfilled_secs
+    affected_sections = [s.get("section_index") for s in target_gap_secs if s.get("section_index")]
 
     should_trigger_supp = (
         scope != EvidenceScope.SOURCE_ONLY
@@ -2634,10 +2713,10 @@ def expand_script_content_gap(
 
     if should_trigger_supp:
         supplemental_research_triggered = True
+        supp_attempted = True
         if status_notifier:
             status_notifier("Performing targeted research to address content gap...")
 
-        target_gap_secs = sections_lacking_relevant_evidence if sections_lacking_relevant_evidence else underfilled_secs
         gap_headings = []
         for s in target_gap_secs:
             sec_dict = next((sec for sec in sections if sec.get("section_index") == s.get("section_index")), None)
@@ -2732,6 +2811,7 @@ def expand_script_content_gap(
                     })
 
                 if new_supp_items:
+                    supp_succeeded = True
                     all_packet_items.extend(new_supp_items)
                     evidence_packet["items"] = all_packet_items
                     job.evidence_packet_json = evidence_packet
@@ -2753,6 +2833,7 @@ def expand_script_content_gap(
                     if db:
                         db.commit()
         except Exception as supp_err:
+            supp_failure_category = type(supp_err).__name__
             logger.warning(f"Targeted gap research failed non-fatally; proceeding with available evidence: {supp_err}")
 
     # Step 2: In-place section expansion with strictly relevant evidence (score >= 1.0)
@@ -2819,9 +2900,10 @@ EXPANSION CONTRACT:
                         job_id=job.id,
                         generation_instructions=exp_prompt,
                         is_isolated_section=True,
+                        operation="section_expansion",
                     )
                 except TypeError as te:
-                    if "is_isolated_section" in str(te):
+                    if "is_isolated_section" in str(te) or "operation" in str(te):
                         resp = p_inst.generate_script(
                             source_text=src,
                             request_mode="standard",
@@ -3011,6 +3093,15 @@ EXPANSION CONTRACT:
     # Machine-readable diagnostics dictionary
     gap_diag_meta = {
         "gap_detected": bool(gap_info.get("deficit", 0) > 0 or gap_info.get("is_overall_underfilled") or underfilled_secs),
+        "triggered": supplemental_research_triggered,
+        "attempted": supp_attempted,
+        "succeeded": supp_succeeded,
+        "provider": supp_provider,
+        "model": supp_model,
+        "search_count": search_count,
+        "new_evidence_count": len(new_supp_items),
+        "affected_sections": affected_sections,
+        "failure_category": supp_failure_category,
         "initial_total_word_count": gap_info.get("total_words", total_words),
         "target_words": planned_target,
         "deficit": gap_info.get("deficit", deficit),
@@ -3028,18 +3119,19 @@ EXPANSION CONTRACT:
         "relevant_unused_evidence_ids": relevant_unused_eids_before,
         "supplemental_research_triggered": supplemental_research_triggered,
         "research_depth": valid_depth,
-        "provider": supp_provider,
-        "model": supp_model,
-        "search_count": search_count,
         "source_count": source_count,
         "gap_focus": gap_focus,
         "supplemental_research": {
             "triggered": supplemental_research_triggered,
+            "attempted": supp_attempted,
+            "succeeded": supp_succeeded,
             "provider": supp_provider,
             "model": supp_model,
             "search_count": search_count,
             "source_count": source_count,
             "new_evidence_count": len(new_supp_items),
+            "affected_sections": affected_sections,
+            "failure_category": supp_failure_category,
             "gap_focus": gap_focus,
             "research_depth": valid_depth,
         },
@@ -3665,13 +3757,19 @@ def execute_unified_long_form_pipeline(
     )
 
     if should_run_metadata_cleanup:
-        pol_script = cleanup_script_metadata(
+        cleanup_res = cleanup_script_metadata(
             job=job,
             script_dict=dict(job.script_json),
             topic=topic,
             scope=effective_scope,
             db=db,
+            return_metadata=True,
         )
+        if isinstance(cleanup_res, tuple) and len(cleanup_res) == 2:
+            pol_script, clean_meta = cleanup_res
+        else:
+            pol_script = cleanup_res
+            clean_meta = {"performed": True} if isinstance(cleanup_res, dict) else {}
         job.script_json = pol_script
         cleaned_script, q_report = run_quality_gate(
             job.script_json,
@@ -3680,12 +3778,44 @@ def execute_unified_long_form_pipeline(
             fidelity_audit=audit_res,
         )
         job.script_json = cleaned_script
+        if clean_meta.get("performed"):
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "quality_gate",
+                "METADATA_CLEANUP_PERFORMED",
+                f"Polished episode metadata: title='{job.script_json.get('episode_title')}'",
+                metadata=clean_meta,
+                db=db,
+            )
+        elif clean_meta.get("failed"):
+            record_job_diagnostic_event(
+                job.id,
+                "WARNING",
+                "quality_gate",
+                "METADATA_CLEANUP_FAILED",
+                f"Metadata cleanup failed: {clean_meta.get('error') or 'non-fatal failure'}",
+                metadata=clean_meta,
+                db=db,
+            )
+        else:
+            record_job_diagnostic_event(
+                job.id,
+                "INFO",
+                "quality_gate",
+                "METADATA_CLEANUP_SKIPPED",
+                "Metadata cleanup skipped (no changes needed or capability unavailable).",
+                metadata=clean_meta,
+                db=db,
+            )
+    else:
         record_job_diagnostic_event(
             job.id,
             "INFO",
             "quality_gate",
-            "METADATA_CLEANUP_PERFORMED",
-            f"Polished episode metadata: title='{job.script_json.get('episode_title')}'",
+            "METADATA_CLEANUP_SKIPPED",
+            "Metadata cleanup skipped (literal mode or cleanup not requested).",
+            metadata={"reason": "literal_mode" if is_literal else "not_requested"},
             db=db,
         )
 

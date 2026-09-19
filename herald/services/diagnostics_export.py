@@ -243,7 +243,7 @@ def build_manifest_dict(
         op = (ai.operation or "").lower()
         if "research" in op and "audit" not in op and "repair" not in op:
             research_ai_tokens += toks
-        elif "audit" in op or ("verification" in op and "repair" not in op):
+        elif "audit" in op or "review" in op or ("verification" in op and "repair" not in op):
             audit_ai_tokens += toks
         elif "repair" in op:
             repair_ai_tokens += toks
