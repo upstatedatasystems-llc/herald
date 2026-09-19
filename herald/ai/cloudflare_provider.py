@@ -503,7 +503,31 @@ class CloudflareProvider(AIProvider):
             )
             self._classify_http_error(resp, operation=operation)
 
-        result_json = resp.json()
+        try:
+            result_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Cloudflare returned malformed outer JSON: {json_err}",
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(source_text),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         try:
             raw_content = extract_cloudflare_content(result_json)
         except (AIProviderError, AIResponseInvalidError) as extract_err:
@@ -706,7 +730,15 @@ class CloudflareProvider(AIProvider):
                     raise AIProviderUnavailableError(f"Cloudflare Workers AI repair returned HTTP {repair_resp.status_code}", provider="cloudflare", model=self._model, http_status=repair_resp.status_code)
                 raise AIProviderError(f"Cloudflare Workers AI repair returned HTTP {repair_resp.status_code}", provider="cloudflare", model=self._model, http_status=repair_resp.status_code)
 
-            rep_json = repair_resp.json()
+            try:
+                rep_json = repair_resp.json()
+            except Exception as json_err:
+                raise AISchemaInvalidError(
+                    f"Cloudflare repair returned malformed outer JSON: {json_err}",
+                    provider="cloudflare",
+                    model=self._model,
+                    operation=operation,
+                )
             try:
                 rep_raw = extract_cloudflare_content(rep_json)
             except (AIProviderError, AIResponseInvalidError) as rep_extract_err:
@@ -924,7 +956,31 @@ class CloudflareProvider(AIProvider):
             )
             self._classify_http_error(resp, operation=operation)
 
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Cloudflare returned malformed outer JSON: {json_err}",
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="cloudflare",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         try:
             raw_text = extract_cloudflare_content(res_json)
             data = _extract_json_block(raw_text)

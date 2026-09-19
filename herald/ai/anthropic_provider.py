@@ -234,6 +234,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
             )
 
+        req_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
         if resp.status_code != 200:
             record_ai_interaction(
                 job_id=job_id,
@@ -242,6 +243,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
+                provider_request_id=req_id,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
                 success=False,
@@ -264,7 +266,31 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 raise AIProviderUnavailableError(f"Anthropic API returned HTTP {resp.status_code}", provider="anthropic", model=self._model, http_status=resp.status_code)
             raise AIProviderError(f"Anthropic API error ({resp.status_code}): {resp.text[:300]}", provider="anthropic", model=self._model, http_status=resp.status_code)
 
-        result_json = resp.json()
+        try:
+            result_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Anthropic returned malformed outer JSON: {json_err}",
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(source_text),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         content_blocks = result_json.get("content", [])
         text_response = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
 
@@ -438,6 +464,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             )
             raise
 
+        req_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
         if resp.status_code != 200:
             record_ai_interaction(
                 job_id=job_id,
@@ -446,6 +473,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
+                provider_request_id=req_id,
                 input_chars=len(prompt),
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -454,7 +482,31 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             )
             self._classify_http_error(resp, operation=operation)
 
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Anthropic returned malformed outer JSON: {json_err}",
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="anthropic",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         content_blocks = res_json.get("content", [])
         text_response = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
 

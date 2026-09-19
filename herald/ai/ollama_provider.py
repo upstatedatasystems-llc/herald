@@ -215,6 +215,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
             )
 
+        req_id = resp.headers.get("x-request-id")
         if resp.status_code != 200:
             record_ai_interaction(
                 job_id=job_id,
@@ -223,6 +224,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
+                provider_request_id=req_id,
                 started_at=t0,
                 completed_at=datetime.now(UTC),
                 success=False,
@@ -250,7 +252,31 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 http_status=resp.status_code,
             )
 
-        result_json = resp.json()
+        try:
+            result_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Ollama returned malformed outer JSON: {json_err}",
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(source_text),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         msg = result_json.get("message", {})
         raw_content = msg.get("content", "")
 
@@ -401,6 +427,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
             )
             raise
 
+        req_id = resp.headers.get("x-request-id")
         if resp.status_code != 200:
             record_ai_interaction(
                 job_id=job_id,
@@ -409,6 +436,7 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 operation=operation,
                 attempt=attempt,
                 http_status=resp.status_code,
+                provider_request_id=req_id,
                 input_chars=len(prompt),
                 started_at=t0,
                 completed_at=datetime.now(UTC),
@@ -436,7 +464,31 @@ Generate the podcast script JSON response adhering to spoken prose rules now.
                 http_status=resp.status_code,
             )
 
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"Ollama returned malformed outer JSON: {json_err}",
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider="ollama",
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         msg = res_json.get("message", {})
         raw_content = msg.get("content", "")
 

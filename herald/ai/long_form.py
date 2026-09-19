@@ -2021,6 +2021,7 @@ METADATA CONTRACT:
                 response_schema=MetadataCleanupResponse,
                 job_id=job.id,
                 operation="metadata_cleanup",
+                attempt=attempt,
             )
         else:
             resp = p_inst.generate_script(
@@ -2029,6 +2030,8 @@ METADATA CONTRACT:
                 source_title=topic,
                 job_id=job.id,
                 generation_instructions=instructions,
+                operation="metadata_cleanup",
+                attempt=attempt,
             )
         if isinstance(resp, dict):
             return MetadataCleanupResponse(**resp)
@@ -2176,6 +2179,8 @@ def audit_and_repair_fidelity(
                         source_text=src,
                         script_dict=curr_script,
                         job_id=job.id,
+                        operation="verification",
+                        attempt=attempt,
                     )
 
                 res = execute_with_failover(
@@ -2206,6 +2211,8 @@ def audit_and_repair_fidelity(
                             source_text=src,
                             script_dict=curr_script,
                             job_id=job.id,
+                            operation="verification",
+                            attempt=attempt,
                         )
 
                     res_s = execute_with_failover(
@@ -2234,6 +2241,8 @@ def audit_and_repair_fidelity(
                         research_dossier=dossier_data,
                         script_dict=curr_script,
                         job_id=job.id,
+                        operation="research_audit",
+                        attempt=attempt,
                     )
 
                 res_r = execute_with_failover(
@@ -2264,6 +2273,8 @@ def audit_and_repair_fidelity(
                         research_dossier=dossier_data,
                         script_dict=curr_script,
                         job_id=job.id,
+                        operation="research_audit",
+                        attempt=attempt,
                     )
 
                 res_t = execute_with_failover(
@@ -2353,6 +2364,8 @@ def audit_and_repair_fidelity(
                         script_dict=current_script_dict,
                         audit_result=audit_payload,
                         job_id=job.id,
+                        operation="verification_repair",
+                        attempt=att,
                     )
                     if isinstance(resp, dict):
                         resp = PodcastScriptResponse(**resp)
@@ -2376,6 +2389,8 @@ def audit_and_repair_fidelity(
                         script_dict=current_script_dict,
                         audit_result=audit_payload,
                         job_id=job.id,
+                        operation="research_repair",
+                        attempt=att,
                     )
                     if isinstance(resp, dict):
                         resp = PodcastScriptResponse(**resp)
@@ -2761,8 +2776,18 @@ def expand_script_content_gap(
 
         def _do_supplemental_research(p_inst: Any, att: int, src: str) -> dict[str, Any]:
             nonlocal supp_provider, supp_model
-            supp_provider = getattr(p_inst, "provider_name", None) or getattr(p_inst, "provider_id", "ai")
-            supp_model = getattr(p_inst, "model_name", None) or getattr(p_inst, "model", None)
+            supp_provider = (
+                getattr(p_inst, "provider_id", None)
+                or getattr(p_inst, "provider_name", None)
+                or getattr(p_inst, "name", None)
+                or "gemini"
+            ).lower()
+            supp_model = (
+                getattr(p_inst, "research_model", None)
+                or getattr(p_inst, "configured_model", None)
+                or getattr(p_inst, "model_name", None)
+                or getattr(p_inst, "model", None)
+            )
             return p_inst.generate_grounded_research(
                 source_text=supp_prompt,
                 research_depth=valid_depth,

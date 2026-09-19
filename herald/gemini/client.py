@@ -1776,6 +1776,9 @@ def audit_research_script(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    operation: str = "research_audit",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> ResearchAuditResponse:
     """
     Stage 3: Post-generation research audit.
@@ -1864,61 +1867,149 @@ If has_material_issues is true, provide concrete repair_instructions.
         req_id = _extract_request_id(resp)
 
         if resp.status_code == 200:
-            result_json = resp.json()
+            try:
+                result_json = resp.json()
+            except Exception as json_err:
+                from herald.ai.errors import AISchemaInvalidError
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    provider_request_id=req_id,
+                    error=f"Malformed outer JSON from Gemini: {json_err}",
+                )
+                interaction_recorded = True
+                raise AISchemaInvalidError(
+                    f"Malformed outer JSON from Gemini: {json_err}",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
+
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
-                audit_obj = ResearchAuditResponse(**json.loads(raw_text))
+                try:
+                    audit_obj = ResearchAuditResponse(**json.loads(raw_text))
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=True,
+                        http_status=resp.status_code,
+                        attempt=attempt,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
+                    )
+                    interaction_recorded = True
+                    return audit_obj
+                except Exception as parse_err:
+                    from herald.ai.errors import AISchemaInvalidError
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=False,
+                        attempt=attempt,
+                        http_status=resp.status_code,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        error=parse_err,
+                    )
+                    interaction_recorded = True
+                    raise AISchemaInvalidError(
+                        f"Gemini research audit schema invalid: {parse_err}",
+                        provider="gemini",
+                        model=model,
+                        operation=operation,
+                    )
+            else:
+                from herald.ai.errors import AISchemaInvalidError
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="research_audit",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
-                    success=True,
+                    success=False,
+                    attempt=attempt,
                     http_status=resp.status_code,
                     input_chars=len(prompt),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
                     provider_request_id=req_id,
-                    metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
+                    error="Gemini API returned no response candidates.",
                 )
                 interaction_recorded = True
-                return audit_obj
+                raise AISchemaInvalidError(
+                    "Gemini API returned no response candidates for research audit.",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
 
         _record_gemini_interaction(
             job_id=job_id,
             model=model,
-            operation="research_audit",
+            operation=operation,
             started_at=t0,
             completed_at=t1,
             success=False,
+            attempt=attempt,
             http_status=resp.status_code,
             input_chars=len(prompt),
             error=f"HTTP {resp.status_code}: {resp.text}",
             provider_request_id=req_id,
         )
         interaction_recorded = True
+        is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+        if is_unavail:
+            raise GeminiModelUnavailableError(
+                f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+            )
+        if resp.status_code in (401, 403):
+            raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+        elif resp.status_code == 429:
+            raise GeminiQuotaError(f"Gemini API rate limit exceeded ({resp.status_code}): {resp.text}")
+        elif resp.status_code >= 500:
+            raise GeminiError(f"Gemini server error ({resp.status_code}): {resp.text}")
+        else:
+            raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="research_audit",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=False,
+                attempt=attempt,
                 input_chars=len(prompt),
                 error=e,
             )
             interaction_recorded = True
         logger.warning(f"Research audit error: {e}")
-
-    return ResearchAuditResponse(has_material_issues=False)
+        raise
 
 
 def repair_research_script(
@@ -1929,6 +2020,9 @@ def repair_research_script(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    operation: str = "research_repair",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> PodcastScriptResponse:
     """
     Stage 4: Perform ONE targeted script repair pass using audit findings.
@@ -2008,37 +2102,112 @@ Return the corrected PodcastScriptResponse JSON now.
         req_id = _extract_request_id(resp)
 
         if resp.status_code == 200:
-            result_json = resp.json()
+            try:
+                result_json = resp.json()
+            except Exception as json_err:
+                from herald.ai.errors import AISchemaInvalidError
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    provider_request_id=req_id,
+                    error=f"Malformed outer JSON from Gemini: {json_err}",
+                )
+                interaction_recorded = True
+                raise AISchemaInvalidError(
+                    f"Malformed outer JSON from Gemini: {json_err}",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
+
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
-                repair_obj = PodcastScriptResponse(**json.loads(raw_text))
+                try:
+                    repair_obj = PodcastScriptResponse(**json.loads(raw_text))
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=True,
+                        http_status=resp.status_code,
+                        attempt=attempt,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                    )
+                    interaction_recorded = True
+                    return repair_obj
+                except Exception as parse_err:
+                    from herald.ai.errors import AISchemaInvalidError
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=False,
+                        attempt=attempt,
+                        http_status=resp.status_code,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        error=parse_err,
+                    )
+                    interaction_recorded = True
+                    raise AISchemaInvalidError(
+                        f"Gemini research repair schema invalid: {parse_err}",
+                        provider="gemini",
+                        model=model,
+                        operation=operation,
+                    )
+            else:
+                from herald.ai.errors import AISchemaInvalidError
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="research_repair",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
-                    success=True,
+                    success=False,
+                    attempt=attempt,
                     http_status=resp.status_code,
                     input_chars=len(prompt),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
                     provider_request_id=req_id,
+                    error="Gemini API returned no response candidates.",
                 )
                 interaction_recorded = True
-                return repair_obj
+                raise AISchemaInvalidError(
+                    "Gemini API returned no response candidates for research repair.",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
 
         _record_gemini_interaction(
             job_id=job_id,
             model=model,
-            operation="research_repair",
+            operation=operation,
             started_at=t0,
             completed_at=t1,
             success=False,
+            attempt=attempt,
             http_status=resp.status_code,
             input_chars=len(prompt),
             error=f"HTTP {resp.status_code}: {resp.text}",
@@ -2050,23 +2219,30 @@ Return the corrected PodcastScriptResponse JSON now.
             raise GeminiModelUnavailableError(
                 f"Gemini model '{model}' is not available or not found (404): {err_msg}"
             )
+        if resp.status_code in (401, 403):
+            raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+        elif resp.status_code == 429:
+            raise GeminiQuotaError(f"Gemini API rate limit exceeded ({resp.status_code}): {resp.text}")
+        elif resp.status_code >= 500:
+            raise GeminiError(f"Gemini server error ({resp.status_code}): {resp.text}")
+        else:
+            raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="research_repair",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=False,
+                attempt=attempt,
                 input_chars=len(prompt),
                 error=e,
             )
             interaction_recorded = True
-        raise GeminiError(f"Failed to repair research script: {e}")
-
-    raise GeminiError("Failed to repair research script.")
+        raise
 
 
 def audit_script_fidelity(
@@ -2075,6 +2251,9 @@ def audit_script_fidelity(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    operation: str = "fidelity_audit",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> FidelityAuditResponse:
     """
     Perform a Gemini fidelity audit against normalized source text for Brief/Standard script validation when verify=true.
@@ -2158,61 +2337,149 @@ If has_material_issues is true, provide concrete repair_instructions.
         req_id = _extract_request_id(resp)
 
         if resp.status_code == 200:
-            result_json = resp.json()
+            try:
+                result_json = resp.json()
+            except Exception as json_err:
+                from herald.ai.errors import AISchemaInvalidError
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    provider_request_id=req_id,
+                    error=f"Malformed outer JSON from Gemini: {json_err}",
+                )
+                interaction_recorded = True
+                raise AISchemaInvalidError(
+                    f"Malformed outer JSON from Gemini: {json_err}",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
+
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 p_tok, c_tok, t_tok, th_tok = _extract_tokens(result_json)
-                audit_obj = FidelityAuditResponse(**json.loads(raw_text))
+                try:
+                    audit_obj = FidelityAuditResponse(**json.loads(raw_text))
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=True,
+                        http_status=resp.status_code,
+                        attempt=attempt,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
+                    )
+                    interaction_recorded = True
+                    return audit_obj
+                except Exception as parse_err:
+                    from herald.ai.errors import AISchemaInvalidError
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=False,
+                        attempt=attempt,
+                        http_status=resp.status_code,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        thought_tokens=th_tok,
+                        provider_request_id=req_id,
+                        error=parse_err,
+                    )
+                    interaction_recorded = True
+                    raise AISchemaInvalidError(
+                        f"Gemini fidelity audit schema invalid: {parse_err}",
+                        provider="gemini",
+                        model=model,
+                        operation=operation,
+                    )
+            else:
+                from herald.ai.errors import AISchemaInvalidError
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="fidelity_audit",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
-                    success=True,
+                    success=False,
+                    attempt=attempt,
                     http_status=resp.status_code,
                     input_chars=len(prompt),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
-                    thought_tokens=th_tok,
                     provider_request_id=req_id,
-                    metadata={"has_material_issues": bool(audit_obj.has_material_issues)},
+                    error="Gemini API returned no response candidates.",
                 )
                 interaction_recorded = True
-                return audit_obj
+                raise AISchemaInvalidError(
+                    "Gemini API returned no response candidates for fidelity audit.",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
 
         _record_gemini_interaction(
             job_id=job_id,
             model=model,
-            operation="fidelity_audit",
+            operation=operation,
             started_at=t0,
             completed_at=t1,
             success=False,
+            attempt=attempt,
             http_status=resp.status_code,
             input_chars=len(prompt),
             error=f"HTTP {resp.status_code}: {resp.text}",
             provider_request_id=req_id,
         )
         interaction_recorded = True
+        is_unavail, err_msg = _is_gemini_model_not_found_response(resp)
+        if is_unavail:
+            raise GeminiModelUnavailableError(
+                f"Gemini model '{model}' is not available or not found (404): {err_msg}"
+            )
+        if resp.status_code in (401, 403):
+            raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+        elif resp.status_code == 429:
+            raise GeminiQuotaError(f"Gemini API rate limit exceeded ({resp.status_code}): {resp.text}")
+        elif resp.status_code >= 500:
+            raise GeminiError(f"Gemini server error ({resp.status_code}): {resp.text}")
+        else:
+            raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="fidelity_audit",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=False,
+                attempt=attempt,
                 input_chars=len(prompt),
                 error=e,
             )
             interaction_recorded = True
         logger.warning(f"Fidelity audit error: {e}")
-
-    return FidelityAuditResponse(has_material_issues=False)
+        raise
 
 
 def repair_script_fidelity(
@@ -2222,6 +2489,9 @@ def repair_script_fidelity(
     api_key: str | None = None,
     model_name: str | None = None,
     job_id: str | None = None,
+    operation: str = "fidelity_repair",
+    attempt: int = 1,
+    **kwargs: Any,
 ) -> PodcastScriptResponse:
     """
     Perform ONE controlled script repair pass for Brief/Standard script when verify=true.
@@ -2297,36 +2567,110 @@ Return the corrected PodcastScriptResponse JSON now.
         req_id = _extract_request_id(resp)
 
         if resp.status_code == 200:
-            result_json = resp.json()
+            try:
+                result_json = resp.json()
+            except Exception as json_err:
+                from herald.ai.errors import AISchemaInvalidError
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    provider_request_id=req_id,
+                    error=f"Malformed outer JSON from Gemini: {json_err}",
+                )
+                interaction_recorded = True
+                raise AISchemaInvalidError(
+                    f"Malformed outer JSON from Gemini: {json_err}",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
+
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 p_tok, c_tok, t_tok = _extract_tokens(result_json)
-                repair_obj = PodcastScriptResponse(**json.loads(raw_text))
+                try:
+                    repair_obj = PodcastScriptResponse(**json.loads(raw_text))
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=True,
+                        http_status=resp.status_code,
+                        attempt=attempt,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        provider_request_id=req_id,
+                    )
+                    interaction_recorded = True
+                    return repair_obj
+                except Exception as parse_err:
+                    from herald.ai.errors import AISchemaInvalidError
+                    _record_gemini_interaction(
+                        job_id=job_id,
+                        model=model,
+                        operation=operation,
+                        started_at=t0,
+                        completed_at=t1,
+                        success=False,
+                        attempt=attempt,
+                        http_status=resp.status_code,
+                        input_chars=len(prompt),
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        total_tokens=t_tok,
+                        provider_request_id=req_id,
+                        error=parse_err,
+                    )
+                    interaction_recorded = True
+                    raise AISchemaInvalidError(
+                        f"Gemini script repair schema invalid: {parse_err}",
+                        provider="gemini",
+                        model=model,
+                        operation=operation,
+                    )
+            else:
+                from herald.ai.errors import AISchemaInvalidError
                 _record_gemini_interaction(
                     job_id=job_id,
                     model=model,
-                    operation="fidelity_repair",
+                    operation=operation,
                     started_at=t0,
                     completed_at=t1,
-                    success=True,
+                    success=False,
+                    attempt=attempt,
                     http_status=resp.status_code,
                     input_chars=len(prompt),
-                    prompt_tokens=p_tok,
-                    completion_tokens=c_tok,
-                    total_tokens=t_tok,
                     provider_request_id=req_id,
+                    error="Gemini API returned no response candidates.",
                 )
                 interaction_recorded = True
-                return repair_obj
+                raise AISchemaInvalidError(
+                    "Gemini API returned no response candidates for script repair.",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
 
         _record_gemini_interaction(
             job_id=job_id,
             model=model,
-            operation="fidelity_repair",
+            operation=operation,
             started_at=t0,
             completed_at=t1,
             success=False,
+            attempt=attempt,
             http_status=resp.status_code,
             input_chars=len(prompt),
             error=f"HTTP {resp.status_code}: {resp.text}",
@@ -2338,23 +2682,30 @@ Return the corrected PodcastScriptResponse JSON now.
             raise GeminiModelUnavailableError(
                 f"Gemini model '{model}' is not available or not found (404): {err_msg}"
             )
+        if resp.status_code in (401, 403):
+            raise GeminiAuthError(f"Gemini API authentication failed ({resp.status_code}): {resp.text}")
+        elif resp.status_code == 429:
+            raise GeminiQuotaError(f"Gemini API rate limit exceeded ({resp.status_code}): {resp.text}")
+        elif resp.status_code >= 500:
+            raise GeminiError(f"Gemini server error ({resp.status_code}): {resp.text}")
+        else:
+            raise GeminiError(f"Gemini API error ({resp.status_code}): {resp.text}")
     except Exception as e:
         if not interaction_recorded:
             t1 = datetime.now(UTC)
             _record_gemini_interaction(
                 job_id=job_id,
                 model=model,
-                operation="fidelity_repair",
+                operation=operation,
                 started_at=t0,
                 completed_at=t1,
                 success=False,
+                attempt=attempt,
                 input_chars=len(prompt),
                 error=e,
             )
             interaction_recorded = True
-        raise GeminiError(f"Failed to repair script fidelity: {e}")
-
-    raise GeminiError("Failed to repair script fidelity.")
+        raise
 
 
 def generate_structured_output(
@@ -2403,7 +2754,30 @@ def generate_structured_output(
         req_id = _extract_request_id(resp)
 
         if resp.status_code == 200:
-            result_json = resp.json()
+            try:
+                result_json = resp.json()
+            except Exception as json_err:
+                from herald.ai.errors import AISchemaInvalidError
+                _record_gemini_interaction(
+                    job_id=job_id,
+                    model=model,
+                    operation=operation,
+                    started_at=t0,
+                    completed_at=t1,
+                    success=False,
+                    attempt=attempt,
+                    http_status=resp.status_code,
+                    input_chars=len(prompt),
+                    provider_request_id=req_id,
+                    error=f"Malformed outer JSON from Gemini: {json_err}",
+                )
+                interaction_recorded = True
+                raise AISchemaInvalidError(
+                    f"Malformed outer JSON from Gemini: {json_err}",
+                    provider="gemini",
+                    model=model,
+                    operation=operation,
+                )
             candidates = result_json.get("candidates", [])
             if candidates:
                 raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")

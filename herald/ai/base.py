@@ -102,6 +102,9 @@ class AIProvider(ABC):
         research_dossier: dict[str, Any],
         script_dict: dict[str, Any],
         job_id: str | None = None,
+        operation: str = "research_audit",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         """Audit research script against sources. Subclasses override if supported."""
         from herald.ai.errors import AIUnsupportedCapabilityError
@@ -114,6 +117,9 @@ class AIProvider(ABC):
         script_dict: dict[str, Any],
         audit_result: dict[str, Any],
         job_id: str | None = None,
+        operation: str = "research_repair",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         """Repair research script based on audit findings. Subclasses override if supported."""
         from herald.ai.errors import AIUnsupportedCapabilityError
@@ -124,6 +130,9 @@ class AIProvider(ABC):
         source_text: str,
         script_dict: dict[str, Any],
         job_id: str | None = None,
+        operation: str = "verification",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         """Audit script fidelity against source text. Subclasses override if supported."""
         from herald.ai.errors import AIUnsupportedCapabilityError
@@ -135,6 +144,9 @@ class AIProvider(ABC):
         script_dict: dict[str, Any],
         audit_result: dict[str, Any],
         job_id: str | None = None,
+        operation: str = "verification_repair",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         """Repair script based on fidelity audit findings. Subclasses override if supported."""
         from herald.ai.errors import AIUnsupportedCapabilityError

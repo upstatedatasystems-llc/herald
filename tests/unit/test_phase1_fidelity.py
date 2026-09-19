@@ -50,7 +50,7 @@ def test_audit_scopes_evidence_to_assigned_ids(mock_db):
 
     captured_dossier = None
 
-    def fake_audit_research_script(source_text, research_dossier, script_dict, job_id):
+    def fake_audit_research_script(source_text, research_dossier, script_dict, job_id=None, *args, **kwargs):
         nonlocal captured_dossier
         captured_dossier = research_dossier
         mock_res = MagicMock()

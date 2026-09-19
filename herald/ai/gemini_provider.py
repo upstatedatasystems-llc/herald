@@ -187,6 +187,9 @@ class GeminiProvider(AIProvider):
         research_dossier: dict[str, Any] | None,
         script_dict: dict[str, Any] | None,
         job_id: str | None = None,
+        operation: str = "research_audit",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         from herald.gemini.client import audit_research_script as _ars
         return _ars(
@@ -195,6 +198,9 @@ class GeminiProvider(AIProvider):
             script_dict=script_dict,
             model_name=self.configured_model,
             job_id=job_id,
+            operation=operation,
+            attempt=attempt,
+            **kwargs,
         )
 
     def repair_research_script(
@@ -204,6 +210,9 @@ class GeminiProvider(AIProvider):
         script_dict: dict[str, Any] | None,
         audit_result: dict[str, Any] | None,
         job_id: str | None = None,
+        operation: str = "research_repair",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         from herald.gemini.client import repair_research_script as _rrs
         return _rrs(
@@ -213,6 +222,9 @@ class GeminiProvider(AIProvider):
             audit_result=audit_result,
             model_name=self.configured_model,
             job_id=job_id,
+            operation=operation,
+            attempt=attempt,
+            **kwargs,
         )
 
     def audit_script_fidelity(
@@ -220,6 +232,9 @@ class GeminiProvider(AIProvider):
         source_text: str,
         script_dict: dict[str, Any] | None,
         job_id: str | None = None,
+        operation: str = "verification",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         from herald.gemini.client import audit_script_fidelity as _asf
         return _asf(
@@ -227,6 +242,9 @@ class GeminiProvider(AIProvider):
             script_dict=script_dict,
             model_name=self.configured_model,
             job_id=job_id,
+            operation=operation,
+            attempt=attempt,
+            **kwargs,
         )
 
     def repair_script_fidelity(
@@ -235,6 +253,9 @@ class GeminiProvider(AIProvider):
         script_dict: dict[str, Any] | None,
         audit_result: dict[str, Any] | None,
         job_id: str | None = None,
+        operation: str = "verification_repair",
+        attempt: int = 1,
+        **kwargs: Any,
     ) -> Any:
         from herald.gemini.client import repair_script_fidelity as _rsf
         return _rsf(
@@ -243,6 +264,9 @@ class GeminiProvider(AIProvider):
             audit_result=audit_result,
             model_name=self.configured_model,
             job_id=job_id,
+            operation=operation,
+            attempt=attempt,
+            **kwargs,
         )
 
     def extract_article_via_url_context(

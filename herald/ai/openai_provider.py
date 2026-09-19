@@ -448,7 +448,31 @@ Generate the podcast script JSON response now.
             )
             self._classify_http_error(resp, attempt=attempt, max_attempts=max_attempts, operation=operation)
 
-        result_json = resp.json()
+        try:
+            result_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"{self.provider_name} returned malformed outer JSON: {json_err}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(source_text),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         req_id = req_id or result_json.get("id")
         choices = result_json.get("choices", [])
         raw_content = choices[0].get("message", {}).get("content", "") if choices else ""
@@ -819,7 +843,31 @@ Generate the podcast script JSON response now.
             )
             self._classify_http_error(resp, attempt=attempt, max_attempts=1, operation=operation)
 
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except Exception as json_err:
+            err = AISchemaInvalidError(
+                f"{self.provider_name} returned malformed outer JSON: {json_err}",
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                safe_detail="AI response malformed JSON",
+            )
+            record_ai_interaction(
+                job_id=job_id,
+                provider=self.provider_name.lower(),
+                model=self._model,
+                operation=operation,
+                attempt=attempt,
+                http_status=resp.status_code,
+                provider_request_id=req_id,
+                input_chars=len(prompt),
+                started_at=t0,
+                completed_at=datetime.now(UTC),
+                success=False,
+                error=str(err),
+            )
+            raise err
         usage = res_json.get("usage", {}) or {}
         p_tok = usage.get("prompt_tokens")
         c_tok = usage.get("completion_tokens")

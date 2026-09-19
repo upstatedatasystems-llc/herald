@@ -1342,3 +1342,343 @@ def test_real_expand_script_content_gap_passes_targeted_operations(mock_db):
     assert meta["attempted"] is True
     assert meta["succeeded"] is True
 
+
+# ==============================================================================
+# Suite M: Fidelity Fail-Closed Verification, Retry Telemetry & Outer JSON Normalization
+# ==============================================================================
+
+def test_gemini_fidelity_audit_http_500_never_clean(mock_db):
+    """
+    Simulate Gemini HTTP 500 on audit_script_fidelity.
+    Verify:
+    - audit_script_fidelity raises GeminiError rather than synthesizing has_material_issues=False.
+    - audit_and_repair_fidelity reports status != 'clean' (status='failed_nonfatal').
+    - failed_audits >= 1 and completed_audits == 0.
+    """
+    from herald.gemini.client import audit_script_fidelity, GeminiError
+
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-fid-500")
+    sections = [{"section_index": 1, "heading": "Sec 1", "narration": "Narration text.", "word_count": 10}]
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal Server Error"
+    mock_resp.headers = {"x-goog-request-id": "req-500"}
+
+    with patch("httpx.Client.post", return_value=mock_resp), \
+         patch("herald.config.settings.GEMINI_API_KEY", "test-key"):
+        with pytest.raises(GeminiError):
+            audit_script_fidelity(
+                source_text="Source text",
+                script_dict={"episode_title": "Test", "segments": []},
+            )
+
+    # Now execute through audit_and_repair_fidelity with GeminiProvider
+    p_inst = GeminiProvider(model="gemini-3.5-flash")
+    with patch("herald.ai.failover.create_provider", return_value=p_inst), \
+         patch("httpx.Client.post", return_value=mock_resp), \
+         patch("herald.config.settings.GEMINI_API_KEY", "test-key"):
+        _, res = audit_and_repair_fidelity(
+            job=job,
+            sections=sections,
+            source_ledger=None,
+            evidence_packet={},
+            scope=EvidenceScope.SOURCE_ONLY,
+            db=mock_db,
+            source_text="Source text",
+        )
+
+    assert res["status"] == "failed_nonfatal"
+    assert res["status"] != "clean"
+    assert res["failed_audits"] >= 1
+    assert res["completed_audits"] == 0
+    assert res["has_material_issues"] is False
+
+
+def test_gemini_fidelity_audit_malformed_json_and_empty_candidates():
+    """
+    Simulate Gemini response with malformed outer JSON and empty candidates.
+    Verify both raise AISchemaInvalidError rather than returning clean results.
+    """
+    from herald.gemini.client import audit_script_fidelity, audit_research_script
+
+    # Case A: Malformed outer JSON
+    mock_bad_json_resp = MagicMock()
+    mock_bad_json_resp.status_code = 200
+    mock_bad_json_resp.json.side_effect = ValueError("Invalid JSON outer")
+    mock_bad_json_resp.headers = {"x-goog-request-id": "req-bad-json"}
+
+    with patch("httpx.Client.post", return_value=mock_bad_json_resp), \
+         patch("herald.config.settings.GEMINI_API_KEY", "test-key"):
+        with pytest.raises(AISchemaInvalidError) as exc_info:
+            audit_script_fidelity(
+                source_text="Source text",
+                script_dict={"episode_title": "Test", "segments": []},
+            )
+        assert exc_info.value.provider == "gemini"
+
+    # Case B: Empty candidates
+    mock_empty_cand_resp = MagicMock()
+    mock_empty_cand_resp.status_code = 200
+    mock_empty_cand_resp.json.return_value = {"candidates": []}
+    mock_empty_cand_resp.headers = {"x-goog-request-id": "req-empty-cand"}
+
+    with patch("httpx.Client.post", return_value=mock_empty_cand_resp), \
+         patch("herald.config.settings.GEMINI_API_KEY", "test-key"):
+        with pytest.raises(AISchemaInvalidError) as exc_info:
+            audit_research_script(
+                source_text="Source text",
+                research_dossier={},
+                script_dict={"episode_title": "Test", "segments": []},
+            )
+        assert exc_info.value.provider == "gemini"
+
+
+def test_re_audit_failure_fails_closed(mock_db):
+    """
+    If an audit detects a material issue, repair runs successfully, but the final re-audit
+    encounters a network / HTTP failure:
+    - process must FAIL CLOSED
+    - repair_succeeded is False
+    - status is unresolved_issue_remains
+    - fidelity_blocked is True
+    """
+    from herald.gemini.schema import FidelityAuditResponse
+
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-reaudit-close")
+    sections = [{"section_index": 1, "heading": "Sec 1", "narration": "Original text.", "word_count": 10}]
+
+    mock_issue_res = FidelityAuditResponse(
+        has_material_issues=True,
+        repair_instructions="Fix factual discrepancy.",
+        unsupported_factual_claims=["claim1"],
+        incorrect_numbers_dates_names=[],
+        incorrect_entity_relationships=[],
+        material_source_misrepresentation=[],
+        important_omissions_material_meaning=[],
+        excessive_certainty=[],
+        accidental_invented_context=[],
+    )
+    repaired_resp = PodcastScriptResponse(
+        episode_title="Repaired",
+        episode_description="Repaired desc",
+        segments=[PodcastSegment(order=1, heading="Sec 1", narration="Corrected factual narration text.")],
+        warnings=[],
+    )
+
+    with patch("herald.ai.long_form.execute_with_failover") as mock_exec:
+        mock_exec.side_effect = [
+            mock_issue_res,
+            repaired_resp,
+            AIProviderError("HTTP 500 downstream on re-audit", provider="gemini"),
+        ]
+        _, res = audit_and_repair_fidelity(
+            job=job,
+            sections=[dict(s) for s in sections],
+            source_ledger=None,
+            evidence_packet={},
+            scope=EvidenceScope.SOURCE_ONLY,
+            db=mock_db,
+            source_text="Primary source text",
+        )
+
+    assert res["repair_attempted"] is True
+    assert res["repair_succeeded"] is False
+    assert res["status"] == "unresolved_issue_remains"
+    assert res["unresolved_issue"] is True
+    assert res["fidelity_blocked"] is True
+    assert res["has_unresolved_material_issues"] is True
+
+
+def test_metadata_cleanup_retry_attempt_telemetry(mock_db):
+    """
+    Simulate a malformed first response on metadata cleanup followed by a successful retry.
+    Verify:
+    - First execute call passes attempt=1
+    - Second execute call passes attempt=2
+    - Result succeeds
+    """
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-meta-att")
+    script = {
+        "episode_title": "Draft Title",
+        "segments": [{"order": 1, "heading": "Reading Part 2", "narration": "Some narration text."}],
+    }
+
+    recorded_attempts = []
+
+    def mock_gso(prompt, response_schema, job_id, operation, attempt=1, **kwargs):
+        recorded_attempts.append(attempt)
+        if attempt == 1:
+            raise AISchemaInvalidError("Malformed response on attempt 1", provider="gemini", operation=operation)
+        return MetadataCleanupResponse(
+            episode_title="Refined Title",
+            headings=[MetadataSectionHeading(order=1, heading="Distinct Topic Heading")],
+        )
+
+    provider = GeminiProvider(model="gemini-3.5-flash")
+    provider.generate_structured_output = MagicMock(side_effect=mock_gso)
+
+    with patch("herald.ai.failover.create_provider", return_value=provider):
+        cleaned, meta = cleanup_script_metadata(
+            job=job,
+            script_dict=script,
+            topic="Space Exploration",
+            scope=EvidenceScope.SOURCE_ONLY,
+            db=mock_db,
+            return_metadata=True,
+        )
+
+    assert recorded_attempts == [1, 2]
+    assert meta["attempted"] is True
+    assert meta["performed"] is True
+    assert cleaned["episode_title"] == "Refined Title"
+    assert cleaned["segments"][0]["heading"] == "Distinct Topic Heading"
+
+
+def test_targeted_gap_research_gemini_provider_telemetry(mock_db):
+    """
+    Verify targeted gap-research telemetry when executing through GeminiProvider:
+    - provider is 'gemini' (non-null, lowercase)
+    - model is non-null and matches research_model / configured_model
+    - attempt=att is passed
+    """
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-gap-telemetry")
+    sections = [
+        {
+            "section_index": 1,
+            "heading": "Section 1",
+            "purpose": "Overview",
+            "key_points": ["Fact A"],
+            "narration": "Short draft.",
+            "word_count": 20,
+            "relevant_evidence_ids": [],
+        }
+    ]
+    gap_info = {
+        "deficit": 300,
+        "total_words": 20,
+        "planned_target": 320,
+        "fill_ratio": 0.06,
+        "is_overall_underfilled": True,
+        "underfilled_sections": [{"section_index": 1, "target_budget": 320, "actual_words": 20, "deficit": 300}],
+    }
+
+    gemini_prov = GeminiProvider(model="gemini-3.5-flash", research_model="gemini-3.5-pro")
+    gemini_prov.generate_grounded_research = MagicMock(return_value={
+        "raw_text": "New grounded research facts.",
+        "grounding_metadata": {"webSearchQueries": ["query 1"]},
+        "sources": [{"title": "Source 1", "url": "https://example.com"}],
+        "items": [{"evidence_id": "SUPP_1", "title": "S1", "snippet": "Text snippet.", "url": "https://example.com"}],
+    })
+    gemini_prov.generate_script = MagicMock(return_value=PodcastScriptResponse(
+        episode_title="Expanded Episode",
+        episode_description="Clean",
+        segments=[PodcastSegment(order=1, heading="Section 1", narration="Short draft with new detailed facts.")],
+        warnings=[],
+    ))
+
+    with patch("herald.ai.failover.create_provider", return_value=gemini_prov):
+        _, meta = expand_script_content_gap(
+            job=job,
+            completed_sections=sections,
+            gap_info=gap_info,
+            topic="Deep Space",
+            evidence_packet={"items": []},
+            scope=EvidenceScope.RESEARCH,
+            db=mock_db,
+            return_metadata=True,
+        )
+
+    assert meta["attempted"] is True
+    assert meta["succeeded"] is True
+    assert meta["provider"] == "gemini"
+    assert meta["model"] == "gemini-3.5-pro"
+
+
+def test_outer_json_decode_error_normalizes_across_all_providers():
+    """
+    Simulate an HTTP 200 response with malformed body JSON across:
+    - GeminiProvider
+    - OpenAIProvider
+    - AnthropicProvider
+    - CloudflareProvider
+    - OllamaProvider
+    Verify each raises AISchemaInvalidError rather than raw json.JSONDecodeError.
+    """
+    from herald.ai.openai_provider import OpenAIProvider
+    from herald.ai.anthropic_provider import AnthropicProvider
+    from herald.ai.cloudflare_provider import CloudflareProvider
+    from herald.ai.ollama_provider import OllamaProvider
+    from pydantic import BaseModel
+
+    class DummySchema(BaseModel):
+        val: str
+
+    mock_bad_resp = MagicMock()
+    mock_bad_resp.status_code = 200
+    mock_bad_resp.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+    mock_bad_resp.headers = {"x-request-id": "req-bad"}
+    mock_bad_resp.text = "Malformed HTML or truncated JSON"
+
+    # 1. Gemini
+    gemini = GeminiProvider(model="gemini-3.5-flash")
+    with patch("httpx.Client.post", return_value=mock_bad_resp), \
+         patch("herald.config.settings.GEMINI_API_KEY", "test-key"):
+        with pytest.raises(AISchemaInvalidError) as exc:
+            gemini.generate_structured_output(prompt="hi", response_schema=DummySchema)
+        assert exc.value.provider == "gemini"
+
+    # 2. OpenAI
+    openai_p = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+    with patch("httpx.Client.post", return_value=mock_bad_resp):
+        with pytest.raises(AISchemaInvalidError) as exc:
+            openai_p.generate_structured_output(prompt="hi", response_schema=DummySchema)
+        assert exc.value.provider == "openai"
+
+    # 3. Anthropic
+    anthropic_p = AnthropicProvider(api_key="test-key", model="claude-3-5-sonnet")
+    with patch("httpx.Client.post", return_value=mock_bad_resp):
+        with pytest.raises(AISchemaInvalidError) as exc:
+            anthropic_p.generate_structured_output(prompt="hi", response_schema=DummySchema)
+        assert exc.value.provider == "anthropic"
+
+    # 4. Cloudflare
+    cf_p = CloudflareProvider(api_token="test-tok", account_id="test-acc", model="@cf/meta/llama-3")
+    with patch("httpx.Client.post", return_value=mock_bad_resp):
+        with pytest.raises(AISchemaInvalidError) as exc:
+            cf_p.generate_structured_output(prompt="hi", response_schema=DummySchema)
+        assert exc.value.provider == "cloudflare"
+
+    # 5. Ollama
+    ollama_p = OllamaProvider(model="llama3")
+    with patch("httpx.Client.post", return_value=mock_bad_resp):
+        with pytest.raises(AISchemaInvalidError) as exc:
+            ollama_p.generate_structured_output(prompt="hi", response_schema=DummySchema)
+        assert exc.value.provider == "ollama"
+
+
+def test_outer_json_decode_bounded_retry_in_failover(mock_db):
+    """
+    Simulate HTTP 200 with malformed outer JSON on attempt 1, followed by a valid response on attempt 2.
+    Verify execute_with_failover performs a bounded retry rather than aborting as a programmer ValueError.
+    """
+    job = _create_job([{"provider": "gemini", "model": "gemini-3.5-flash"}], job_id="job-retry-json")
+    attempts_seen = []
+
+    def mock_exec_fn(p_inst, attempt, src):
+        attempts_seen.append(attempt)
+        if attempt == 1:
+            raise AISchemaInvalidError("Malformed outer JSON from Gemini", provider="gemini", operation="structured_output")
+        return {"result": "success"}
+
+    res = execute_with_failover(
+        job=job,
+        operation="structured_output",
+        execute_fn=mock_exec_fn,
+        db=mock_db,
+        required_capability="structured_output",
+    )
+
+    assert attempts_seen == [1, 2]
+    assert res == {"result": "success"}
+
