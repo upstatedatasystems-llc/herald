@@ -1,98 +1,182 @@
-# Herald Architectural Reference
+# Herald Architecture
 
-## System Overview
+Herald is an open-source, self-hosted podcast generation platform with a Telegram-first interface. A job can begin with a topic seed, public URL, pasted text, or forwarded Telegram message and end as a narrated MP3 delivered back through Telegram.
 
-Herald is a podcast automation system optimized for single-core cloud deployments and edge servers. It turns articles, newsletters, notes, and documents into high-quality spoken audio delivered through Telegram.
+The current product supports four generation modes:
 
-Herald operates on a **strictly vendor-neutral AI architecture** supporting 9 providers:
-- **Google Gemini** (Full support: Brief, Standard, Google Search Grounded Research, URL Context)
-- **Groq Cloud** (Fast Llama 3.3 inference)
-- **Cloudflare Workers AI** (Serverless inference with Qwen & Gemma tuning)
-- **OpenAI** (GPT-4o, GPT-4o-mini)
-- **OpenRouter** (Unified multi-vendor routing)
-- **Mistral AI** (Mistral Large & Small)
-- **Anthropic** (Claude 3.5 Sonnet)
-- **Ollama** (Self-hosted local LLMs)
-- **Literal Mode** (Deterministic text cleaning & direct narration with **zero** external AI calls)
+- **Topic** — research synthesis from a subject, question, headline, or short prompt.
+- **Source** — structured narration bounded to the supplied source.
+- **Expanded** — source-anchored narration augmented with bounded external research.
+- **Literal** — deterministic source reading with no LLM API calls.
 
----
-
-## Logical Architecture & Multi-Provider Failover
+## System overview
 
 ```text
-[ Telegram User / Intake ]
-         │ (Send URL, text, /settings, /models)
-         ▼
-  [ Telegram Bot ] ──────► [ PostgreSQL 16 ]
-         │                     ▲ (Snapshots immutable provider chain:
-         │                     │  Primary -> Secondary -> Tertiary)
-         ▼                     │
- [ Job State Engine ] ─────────┤
-         │                     │
-         ▼                     │
-[ Deterministic Failover ] ────┤ (Sticky cursor advancement: ai_failover_index)
-  ├─ Provider Primary          │
-  ├─ Same-Provider Retry/Adapt │
-  ├─ Provider Secondary        │
-  └─ Provider Tertiary         │
-         │                     ▼
-         ▼              [ Herald Worker ]
-  [ Podcast Script ]           │ (Claims QUEUED_TTS via SELECT FOR UPDATE SKIP LOCKED)
-                               ▼
-                      [ Kokoro TTS Engine ]
-                               ▼
-                      [ FFmpeg Normalizer ]
-                               ▼
-                      [ Telegram Delivery ]
+[ Telegram user ]
+       │
+       │ topic / URL / text / forwarded message
+       ▼
+[ Telegram bot ]
+       │
+       ├── pairing and authorization
+       ├── interactive configuration
+       ├── settings / models / voices / diagnostics
+       │
+       ▼
+[ PostgreSQL ]
+       │
+       ├── job state and queue
+       ├── user preferences
+       ├── provider-chain snapshots
+       ├── state transitions
+       └── recovery / diagnostics metadata
+       │
+       ▼
+[ Herald worker ]
+       │
+       ├── URL extraction and source normalization
+       ├── research and evidence planning
+       ├── AI provider execution and failover
+       ├── long-form scripting and fidelity checks
+       ├── TTS chunk planning
+       └── audio assembly
+       │
+       ▼
+[ Kokoro TTS ] → [ FFmpeg ] → [ MP3 ]
+                              │
+                              ▼
+                         [ Telegram ]
 ```
 
----
+Telegram uses outbound long polling. The normal deployment therefore does not require an inbound webhook, public application port, domain name, or TLS certificate.
 
-## Core Invariants & Architecture Design
+## Service boundaries
 
-### 1. Immutable Chain Snapshotting, Security & Sticky Failover
-- When a job is ingested at `RECEIVED`/`EXTRACTING`, the user's ordered provider chain (Primary, Secondary, Tertiary) and configured models are resolved and frozen into `podcast_jobs.generation_settings_json` and `ai_provider_chain_json`.
-- **Zero Credentials in Snapshots**: No API keys, tokens, or credentials are ever stored in database snapshots, job configurations, or diagnostic events.
-- Before the first AI call, preflight limits (size, token limits, timeouts) are verified safely without logging sensitive source text or API keys.
-- **Unified Timeouts**: `AI_PROVIDER_TIMEOUT_SECONDS` defaults to 300 seconds across all external AI provider calls, research grounding, repair operations, and URL context extractions. `GEMINI_TIMEOUT_SECONDS` is preserved solely as a backward-compatibility alias.
-- If a provider encounters a transient failure (429 rate limit, 5xx server error, timeout), central bounded same-provider retry occurs within the failover executor.
-- If a provider encounters a fatal or exhausted error (401 invalid credentials, 403 forbidden, model unavailable, unresolvable 413), execution fails over deterministically to the next snapshotted candidate.
-- Failover is **sticky**: the winning candidate becomes `ai_effective_provider` / `ai_effective_model` and the durable cursor `ai_failover_index` advances in PostgreSQL, persisting across process restarts, worker recoveries, and downstream stages (e.g. from URL context into scripting).
-- Unclassified errors, programmer bugs, and `ValueError` result in terminal `FAIL_FINAL` termination without advancing the cursor.
+The default Docker Compose stack contains five services:
 
-### 2. Large-Source Bounded Adaptation Engine
-- When incoming text exceeds model context windows or provider payload limits (HTTP 413 / `AIContextLimitExceededError`), Herald triggers same-provider adaptation before cursor failover.
-- Uses semantic chunking along paragraph and sentence boundaries.
-- Produces structured fact-preserving distillations using the active provider's model.
-- **Canonical Integrity**: `job.source_text` is sacred and is NEVER overwritten by adapted or distilled content; adaptation operates solely on ephemeral working text.
-- Hierarchical reduction passes are bounded by `AdaptationBudget` (`max_chunks`, `max_reduction_depth`, `max_ai_calls`, `max_elapsed_seconds`). Adaptation may make several AI requests; consumed budget (`usage.ai_calls`) increments faithfully and persists across provider failovers.
-- **Literal Mode Guarantee**: Literal mode performs zero external AI calls and zero adaptation mutation.
+| Service | Responsibility |
+| --- | --- |
+| `postgres` | Durable state, queueing, preferences, transitions, and recovery metadata |
+| `herald-migration` | Applies Alembic schema migrations before application services start |
+| `telegram-bot` | User interface, pairing, intake, configuration, settings, diagnostics, and delivery controls |
+| `herald-worker` | Source processing, research, scripting, TTS orchestration, audio processing, and job recovery |
+| `kokoro` | Local Kokoro-FastAPI speech synthesis |
 
-### 3. Telegram Invariants, Model Discovery & Restart-Safe Tokens
-- `/settings` presents interactive slot menus for Voice, Default Speed, Default Mode, AI Providers, and AI Models.
-- **Configured Provider Invariants**:
-  - Unconfigured providers (missing server API credentials) CANNOT be activated or persisted.
-  - Duplicate provider selections are rejected cleanly without mutating or shifting other slots behind the user's back.
-  - Provider chain length is enforced to a maximum of 3 candidates in the persistence layer.
-  - **Literal Semantics**: Literal may ONLY be configured as Primary and can never be Secondary or Tertiary. Selecting Literal as Primary sets chain = `["literal"]` and sets default mode to Literal in the same transaction if the user was previously in an AI-required mode.
-- **Dynamic Model Discovery & Precedence**:
-  - Live/cached discovery (via remote provider listing endpoints: Groq, OpenAI, OpenRouter, Mistral) > Verified Herald catalog metadata > Controlled fallback catalog.
-  - Discovery is cached (TTL 300s) to ensure responsiveness and resilience during transient network issues.
-- **Model Callback Tokens**:
-  - Inline keyboard callbacks use provider-scoped deterministic tokens (`h3:m:set:<provider_id>:<token>`), remaining under Telegram's 64-byte callback limit.
-  - Token resolution enforces strict collision rejection: ambiguous matches across models are rejected.
+The bot and worker share the Herald work volume and persistent host log directory. PostgreSQL and Kokoro are reachable only on the Compose network unless an operator deliberately exposes them.
 
-### 4. Vendor-Neutral Core Orchestration & Diagnostic Safety
-- Core business logic (`herald/core/pipeline.py`, `apps/worker/main.py`) contains **zero** direct imports of vendor-specific SDKs or provider modules.
-- Active jobs construct providers strictly from snapshotted candidate specifications rather than global mutable singletons.
-- All interactions flow through normalized interfaces: `execute_with_failover`, `resolve_job_settings`, and typed `AIProviderError` exceptions preserving the normalized error taxonomy (`error.category`).
-- **Safe Failover Details**: Diagnostic events and error messages redact credentials/tokens, avoid dumping full response payloads or excerpts, and cap detail length to prevent secret leakage.
+## Durable job model
 
----
+Herald is built around persistent jobs rather than a single long-running request.
 
-## Historical Design Document Notice
+Each job records enough information to survive process restarts, including:
 
-> [!NOTE]
-> The original design document `Herald_Email_to_Podcast_Design.docx` is an initial design specification and is **historical / superseded** by the current vendor-neutral, multi-provider failover architecture, PostgreSQL 16 state machine, and Telegram-first workflow documented herein.
+- source and normalized intake metadata;
+- content mode, target length, and research depth;
+- the resolved AI provider/model chain;
+- current failover cursor and effective provider;
+- generation and fidelity telemetry;
+- TTS progress and audio metadata;
+- state transitions and terminal diagnostics.
 
+Workers claim queued work through PostgreSQL and use durable transitions rather than relying on process memory. This supports restart-safe processing and avoids duplicate work during normal recovery.
 
+## Interactive configuration
+
+After intake, Telegram presents a configuration card for:
+
+- content mode: Source, Expanded, Topic, or Literal;
+- target length: Auto, 10, 20, 30, 45, or 60 minutes;
+- research depth: Low, Medium, or High when the mode uses research;
+- shortcuts for user defaults and Literal;
+- explicit start or cancel.
+
+User defaults are managed through `/settings` and include voice, speed, mode, target length, research depth, confirmation preference, provider slots, and model choices.
+
+## AI provider architecture
+
+Herald has a provider-neutral execution layer. Registered provider types are:
+
+- Gemini
+- Groq
+- Cloudflare Workers AI
+- OpenAI
+- OpenRouter
+- Mistral
+- Anthropic
+- Ollama
+- Literal
+
+The server supplies credentials and baseline configuration. A paired user can then choose an allowed Primary, Secondary, and Tertiary chain from configured providers.
+
+### Snapshotting and failover
+
+At job creation, the effective provider/model chain is resolved and snapshotted into the job. Credentials are not stored in that snapshot.
+
+Execution follows the snapshotted order:
+
+1. try the current provider/model;
+2. perform bounded same-provider retry or adaptation where appropriate;
+3. advance to the next configured provider when the normalized failure is eligible for failover;
+4. persist the failover cursor so recovery after a restart resumes consistently.
+
+Literal is a special provider with no external LLM dependency. It may be Primary, but it is not used as Secondary or Tertiary failover.
+
+Provider/model capabilities are not assumed to be identical. Model discovery and capability metadata are used by the UI and execution layer where supported.
+
+## Research and long-form generation
+
+Topic and Expanded modes use the long-form engine to build evidence, plan a narrative, allocate section budgets, generate sections, and audit the finished script.
+
+Important invariants include:
+
+- canonical source text is not silently replaced by adapted text;
+- research/evidence and generated narration are tracked separately;
+- section generation is bounded by requested duration and available evidence;
+- Source mode does not invent padding merely to hit a target duration;
+- semantic fidelity checks can block a script before TTS when unresolved issues remain;
+- long inputs can be adapted within bounded call/time/depth budgets instead of being truncated blindly.
+
+Source mode stays bounded to supplied material. Expanded mode keeps the source as the anchor while allowing outside context. Topic mode treats the initial prompt as a research subject rather than as a source document.
+
+## Local TTS and audio
+
+Kokoro runs as a local service in the default stack. Herald:
+
+1. normalizes narration for speech;
+2. applies pronunciation handling and semantic chunk boundaries;
+3. synthesizes chunks through Kokoro;
+4. inserts deterministic pauses;
+5. assembles and normalizes the program with FFmpeg; and
+6. delivers the final MP3 through Telegram.
+
+The curated voice catalog currently groups American English and British English voices. Runtime voice discovery can augment the configured catalog when compatible voices are exposed by Kokoro.
+
+Voice preview samples are stored in the shared Herald work volume and can be rebuilt independently of normal podcast generation.
+
+## Observability and diagnostics
+
+Herald keeps bounded persistent logs under `./logs/` and generates sanitized terminal diagnostic bundles for completed, failed, or cancelled jobs.
+
+Diagnostics include execution state, timings, provider telemetry, and sanitized configuration metadata. API keys, Telegram tokens, Authorization headers, and other configured secrets are redacted.
+
+The paired owner can also export a requested time range with:
+
+```text
+/logs YYYY-MM-DD [HH:MM]
+```
+
+## Security boundaries
+
+Core boundaries are documented in [security.md](security.md). At a high level:
+
+- a one-time owner pairing code controls the Telegram installation;
+- only outbound Telegram polling is required;
+- submitted URLs pass through SSRF defenses;
+- untrusted source material is treated as data, not executable instructions;
+- external AI calls are bounded to configured providers;
+- credentials stay in server configuration rather than job snapshots;
+- Kokoro and FFmpeg remain local in the default deployment.
+
+## Historical note
+
+The original email-to-podcast MVP design predates the current product. Email intake, n8n orchestration, Gmail delivery, and Google Drive are not part of the current default Herald architecture. The current source of truth is the `main` branch, this documentation set, and the Herald product pages at https://upstatedatasystems.com/Herald.
