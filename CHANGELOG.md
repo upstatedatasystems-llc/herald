@@ -5,6 +5,20 @@ All notable changes to the **Herald** project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Promoted the Telegram Phase 2 productization line to the canonical `main` branch.
+- Reframed project documentation around the current product positioning: **Any topic. Your podcast.**
+- Updated GitHub documentation to match the public Herald website: topic/URL/text/forwarded-message inputs; Topic, Source, Expanded, and Literal modes; Telegram-first control; provider-neutral AI; local Kokoro narration; and self-hosted deployment.
+- Removed obsolete feature-branch install instructions from the primary documentation.
+
+### Documentation
+- Added `docs/ai-providers.md` for the current provider chain and failover model.
+- Updated architecture, deployment, operations, security, troubleshooting, Gemini, Kokoro/voice, and backup/restore documentation.
+- Clarified that `scripts/restore.sh` validates backup artifacts and does not overwrite the live database.
+- Added current voice preview cache rebuild procedures.
+
 ## [0.2.1] - 2026-09-05
 
 ### Fixed
