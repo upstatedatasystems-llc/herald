@@ -1,55 +1,103 @@
 # Herald Security Reference
 
-## 1. Credentials & Secrets Management
+Herald is self-hosted, but it is still connected to Telegram and, in AI-assisted modes, to whichever AI services the operator configures. This document describes the main trust boundaries in the current Telegram-first product.
 
-- **Zero Committed Secrets**: Secrets, passwords, API keys, OAuth tokens, and model files are strictly excluded via `.gitignore` and never committed to Git.
-- **Environment Isolation**: Production secrets are loaded exclusively via root-readable `.env` file or environment settings.
-- **Secret Redaction**: Loggers are configured to filter full source texts, API tokens, credentials, and prompt secrets.
+## Owner pairing and Telegram authorization
 
-## 2. Server-Side Request Forgery (SSRF) Protections
+Each installation is intended to be bound to an authorized Telegram owner.
 
-When a user submits an article URL, Herald's URL extraction engine (`herald/extraction/url_extractor.py`) enforces strict security protections:
+The installer generates a one-time pairing code. The owner completes pairing with:
 
-1. **Scheme Control**: Permits only `http` and `https` protocols.
-2. **DNS Resolution Inspection**: Resolves hostnames to IP addresses prior to connecting.
-3. **Prohibited Target IP Ranges**:
-   - Loopback (`127.0.0.0/8`, `::1`)
-   - Private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
-   - Link-local (`169.254.0.0/16`, `fe80::/10`)
-   - Cloud metadata endpoints (`169.254.169.254`)
-   - Localhost aliases (`localhost`, `localhost.localdomain`)
-4. **Redirect Tracking**: Inspects and re-validates target IP addresses on every HTTP redirect location up to 3 redirects max.
-5. **Resource Limits**: Enforces a 10-second request timeout and 5 MB maximum response body size limit.
+```text
+/pair <code>
+```
 
-## 3. Prompt Injection Defense
+After pairing, owner-only actions such as log export are checked against the stored owner identity.
 
-All untrusted user content (submitted text and web articles) is strictly isolated inside `<SOURCE_DATA>` sandbox tags within AI system prompts (`prompts/podcast_script/prompt.md`). The system prompt instructs the AI provider to:
+The Telegram bot uses outbound long polling. Herald does not require a public inbound Telegram webhook.
 
-- Treat content inside `<SOURCE_DATA>` strictly as reference material.
-- Ignore all commands, role changes, secret requests, or format overrides inside `<SOURCE_DATA>`.
-- Enforce schema-constrained JSON outputs validated by Pydantic before entering the TTS pipeline.
+## Credentials and secrets
 
-## 4. Container & Network Isolation
+- Do not commit `.env`.
+- Keep `.env` restricted to the installation account; the setup/acceptance tooling expects strict permissions.
+- AI API keys, the Telegram bot token, database credentials, and other secrets stay in server configuration.
+- Provider-chain job snapshots contain provider/model identifiers, not API credentials.
+- Application logging and diagnostic export apply credential and Authorization-header redaction.
 
-- Internal PostgreSQL, Herald Worker, and Kokoro TTS containers run on an unexposed internal bridge network (`herald-backend`).
-- Public ports for database and speech synthesis are closed.
-- Host management and operational tasks are accessed securely via SSH or local console.
+If a secret is accidentally exposed, rotate it at the provider; redaction is a defense-in-depth measure, not a substitute for credential hygiene.
 
-## 5. AI Preflight Telemetry & Diagnostic Redaction
+## External data flows
 
-- **Zero Secret & Source Text Leaks**: The AI preflight layer (`record_ai_preflight`) captures metadata (provider, model, token estimates, limits, attempt number, failover index) but **strictly excludes** raw source text, prompt contents, or provider API keys.
-- **Diagnostic Bundles**: Terminal failure diagnostics archives redact all internal API credentials and truncate large error responses to avoid leaking infrastructure tokens.
+The mode selected by the user determines which external systems can see submitted content.
 
-## 6. Telegram Callback Validation & Length Limits
+- **Telegram** carries user messages, bot controls, and delivered podcast files.
+- **Source, Expanded, and Topic** can send source/research/prompt material to configured AI providers as required by the pipeline.
+- **Expanded and Topic** can perform external research.
+- **Literal** makes no LLM API calls.
+- **Kokoro TTS and FFmpeg** run locally in the default deployment.
 
-- Telegram inline keyboards enforce a strict 64-byte payload limit.
-- Herald uses deterministic 10-character SHA-256 tokens (`sha256(provider_id + "\0" + model_id)[:10]`) instead of passing raw model names or parameters in callbacks.
-- Incoming callback queries are validated against the authoritative provider registry and user authorization state before processing.
+Literal therefore removes external LLM processing, but it does not remove Telegram from the interface/delivery path.
 
-## 7. Bounded Failover Chains & Quota Protection
+## URL extraction and SSRF defense
 
-- Jobs snapshot an explicit, immutable candidate chain (Primary, Secondary, Tertiary).
-- **Hard Chain Ceiling**: Failover **never** escapes the snapshotted chain and **never** dynamically invokes unconfigured or arbitrary external models.
-- Telegram settings clearly disclose cost, quota, and latency characteristics when selecting commercial vs. free/local providers.
-- Bounded retries (3 attempts max) and adaptation budgets prevent runaway billing or endless loops.
+Public URL intake is treated as untrusted.
 
+The URL extraction layer restricts schemes, resolves and inspects destinations, blocks unsafe address ranges, revalidates redirects, and applies response/time limits.
+
+Blocked classes include loopback, private, link-local, and cloud metadata targets. This protects a self-hosted Herald instance from being used as a proxy to internal services.
+
+Do not bypass the shared extraction layer for user-submitted URLs.
+
+## Prompt injection boundary
+
+Submitted text and fetched pages are untrusted data.
+
+AI prompts separate source material from Herald's system instructions and tell the model to treat instructions found inside the source as quoted content rather than commands. Structured outputs are validated before entering later pipeline stages.
+
+This boundary reduces prompt-injection risk, but external AI providers still receive the content necessary for the selected AI-assisted mode.
+
+## Provider-chain safety
+
+Herald's failover chain is explicit and bounded:
+
+- at most Primary, Secondary, and Tertiary candidates;
+- only configured providers can be selected;
+- duplicate candidates are rejected;
+- Literal cannot be Secondary or Tertiary;
+- execution does not escape the job's snapshotted chain.
+
+This avoids silently routing user content to an arbitrary provider that was not configured for the job.
+
+## Container and network boundaries
+
+The default stack keeps PostgreSQL and Kokoro on the Docker network and does not publish them as public services.
+
+Only outbound connectivity needed for Telegram, AI providers, research sources, and normal package/update operations should be allowed.
+
+Host administration should use normal secure server practices such as SSH with key authentication, firewalling, patching, and restricted sudo access.
+
+## Logs and diagnostics
+
+Herald maintains bounded logs under `./logs/` and terminal diagnostic bundles under `./logs/diagnostics/`.
+
+Diagnostic data is intended to preserve:
+
+- job IDs and state transitions;
+- timing and retry information;
+- provider/model identifiers;
+- error categories;
+- bounded execution metadata.
+
+It should not intentionally preserve plaintext API keys, Telegram tokens, Authorization headers, or other configured secrets.
+
+The `/logs` command is owner-only because even sanitized operational logs can contain sensitive context.
+
+## Local audio and retained files
+
+Work files and voice preview samples live in the shared Herald work volume. Oversized Telegram audio may be retained locally for administrator recovery when delivery cannot proceed.
+
+Treat the work volume and host filesystem as private application data.
+
+## Reporting a security issue
+
+Do not publish secrets or exploit details in a public issue. Use the project contact information on https://upstatedatasystems.com/Herald for private coordination when appropriate.
