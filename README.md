@@ -1,177 +1,233 @@
-# Herald — Telegram-First Podcast Automation System
+# Herald
 
 [![CI Workflow](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml/badge.svg)](https://github.com/upstatedatasystems-llc/herald/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Herald turns articles, newsletters, notes, and documents into high-quality spoken audio podcasts delivered directly through Telegram.
+**Open source · Self-hosted · Podcasts. Your way.**
 
-Herald operates behind NATs and firewalls using outbound Telegram long polling without requiring open ports, public IPs, domains, HTTPS certificates, Gmail, Google Drive, Google OAuth, or even an AI API key.
+## Any topic. Your podcast.
 
----
+Herald is an open-source, self-hosted podcast generation platform controlled through Telegram. Start with an idea, article, pasted text, or forwarded message. Herald can research, write, narrate, and deliver a finished podcast through Telegram on infrastructure you control.
 
-## Key Features
+Telegram is the current remote interface; the generation pipeline runs on your server. Herald uses outbound Telegram long polling, so a normal deployment does not require inbound webhooks, a public IP, a domain, or an HTTPS certificate.
 
-- **Telegram-First Interface**: Send an article URL, pasted text, or forwarded message directly to your private Telegram bot and receive the completed MP3 podcast in response.
-- **Literal Mode (Zero AI)**: Functions 100% locally on your host with **zero** LLM API calls, performing deterministic text cleaning, heading preservation, sentence-aware chunking, and Kokoro TTS narration.
-- **Vendor-Neutral AI & Failover**: Configure Primary, Secondary, and Tertiary AI providers (Google Gemini, Groq Cloud, Cloudflare Workers AI, OpenAI, OpenRouter, Mistral AI, Anthropic Claude, local Ollama, or Literal). If your primary provider experiences an outage or rate limit, Herald deterministically and stickily fails over through your secondary and tertiary choices.
-- **Large-Source Bounded Adaptation**: Long articles and reports that exceed model context windows are automatically and semantically chunked, fact-distilled, and compiled into a structured research dossier within strict configurable budget bounds.
-- **Telegram Settings & Models Browser**: Full interactive configuration via `/settings` (Voice, Speed, Default Mode, Provider Slots) and `/models` (live model catalog browser with restart-safe tokens).
-- **Automated Bootstrap Installer**: Deploy the entire stack on Ubuntu 24.04 with a single command.
-- **Secure Owner Pairing**: Prevents unauthorized access using a single-owner one-time pairing code displayed strictly in server console output / container logs (`/pair <code>`).
-- **Outbound Long Polling**: No inbound ports, webhooks, or public IP addresses required.
-- **Local Neural Speech Synthesis**: Powered by Kokoro-82M TTS and FFmpeg spoken-word loudness normalization (`loudnorm`).
-- **Durable Job Engine**: PostgreSQL-backed state machine with automatic crash recovery, lease renewals, and transport-level idempotency.
+Learn more at [upstatedatasystems.com/Herald](https://upstatedatasystems.com/Herald).
 
 ---
 
-## Quick Start (Ubuntu 24.04 LTS)
+## What you can send
 
-### 1. Create a Telegram Bot
-1. Open Telegram and message [@BotFather](https://t.me/BotFather).
-2. Send `/newbot` and follow instructions to name your bot.
-3. Copy the HTTP API token provided by BotFather.
+Herald currently supports four practical starting points:
 
-### 2. Run Bootstrap Installer
-On your Ubuntu 24.04 server (AMD64 or ARM64), run:
+- **Topic seed** — a subject, question, headline, or short concept for Herald to research and turn into an episode.
+- **Article URL** — a public web page that can be adapted as-is or expanded with outside context.
+- **Pasted text** — notes, newsletters, copied articles, reports, or other text pasted directly into Telegram.
+- **Forwarded Telegram message** — content already in Telegram that you want to use as the source for a podcast.
+
+After intake, Herald presents an interactive configuration card before generation.
+
+## Generation modes
+
+| Mode | What it does |
+| --- | --- |
+| **Topic** | Researches a subject and builds a research-backed podcast from the topic seed. |
+| **Source** | Treats the supplied material as the factual boundary and creates a structured, source-bounded episode. |
+| **Expanded** | Uses the submitted source as the anchor and adds bounded external research for context and background. |
+| **Literal** | Cleans, chunks, and narrates the supplied text locally without making LLM API calls. |
+
+For AI-assisted modes, target length can be **Auto, 10, 20, 30, 45, or 60 minutes**. Expanded and Topic modes also expose **Low, Medium, or High** research depth. Literal mode reads the full source and therefore does not use a target duration.
+
+## AI without lock-in
+
+Herald treats the model provider as a configurable component rather than the product itself.
+
+Supported provider types are:
+
+- Google Gemini
+- Groq
+- Cloudflare Workers AI
+- OpenAI
+- OpenRouter
+- Mistral
+- Anthropic
+- Ollama
+- Literal (zero-AI)
+
+A user can configure a **Primary, Secondary, and Tertiary** AI provider chain. Herald snapshots the selected chain into each job and uses deterministic, restart-safe failover when a provider cannot complete the work. Literal may be used as the Primary provider, but it is not used as a Secondary or Tertiary failover candidate.
+
+Provider and model capabilities vary. Use `/settings`, `/models`, and `/ai-check` in Telegram to inspect the configuration available on your installation.
+
+## Local narration
+
+Narration is produced locally with **Kokoro TTS**, then assembled and normalized with **FFmpeg** before Telegram delivery.
+
+The default curated voice catalog includes American and British English voices. Herald can also discover compatible voices exposed by the running Kokoro service and intersect them with the configured allowlist.
+
+---
+
+## Quick start
+
+### 1. Create a Telegram bot
+
+Open Telegram, message [@BotFather](https://t.me/BotFather), run `/newbot`, and copy the HTTP API token.
+
+### 2. Install Herald
+
+On a clean Ubuntu 24.04 LTS host running AMD64 or ARM64:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/main/install.sh | bash
 ```
 
-*(For pre-release testing on the Phase 2 feature branch:)*
-```bash
-curl -fsSL https://raw.githubusercontent.com/upstatedatasystems-llc/herald/feature/telegram-phase2-productization/install.sh | bash -s -- --ref feature/telegram-phase2-productization
-```
+The installer:
 
-The installer will:
-1. Verify Ubuntu 24.04, CPU architecture, and disk headroom.
-2. Install Docker Engine and Docker Compose v2 if missing.
-3. Prompt for your Telegram Bot Token and chosen AI provider.
-4. Launch the Docker Compose stack and run schema migrations.
-5. Run automated installation acceptance tests (`scripts/install_acceptance.sh`).
-6. Display your one-time owner pairing code.
+1. validates Ubuntu 24.04, CPU architecture, and disk headroom;
+2. installs Docker Engine and Docker Compose v2 when needed;
+3. runs the Herald setup wizard for Telegram and AI provider configuration;
+4. starts PostgreSQL, Kokoro, the Herald worker, and the Telegram bot;
+5. applies Alembic database migrations;
+6. runs installation acceptance checks; and
+7. prints a one-time Telegram owner pairing code.
 
-### 3. Pair Your Telegram Account
-1. Open a chat with your Telegram Bot.
-2. Send the pairing command displayed in the installer output:
-   ```text
-   /pair 123456
-   ```
+### 3. Pair your Telegram account
 
----
-
-## How to Use Herald
-
-Once paired, send an article URL, pasted text, or topic seed directly to your Telegram bot. Herald will extract and analyze the content, then present an **Interactive Podcast Configuration Card**:
+Send the pairing command shown by the installer to your bot:
 
 ```text
-🎙️ Configure Your Podcast
-
-Understanding Deep Neural Networks
-• Input: URL (1,450 words)
-• Mode: Source — Strictly source-bounded narration
-• Target Length: Auto (~proportional)
-• Research Depth: N/A (Not used in Source)
-
-[ Source | Expanded | Topic | Literal ]
-[ Auto | 10m | 20m ]
-[ 30m | 45m | 60m ]
-[ ⚡ Use Default ] [ 📖 Literal Reader ]
-[ 🎙️ Create Podcast ] [ ❌ Cancel ]
+/pair 123456
 ```
 
-### Content Modes
-- **Source**: Strictly source-bounded narration. Only information present in the source article or text is included, with zero external drift or ungrounded facts.
-- **Expanded**: Source is the foundation, augmented and cross-referenced with web research queries to provide broader context and background.
-- **Topic**: Comprehensive research synthesis from a topic seed, headline, or brief concept prompt.
-- **Literal**: Verbatim reading of the source text with zero AI calls.
-
-### Target Lengths (~130 WPM)
-- **Auto**: Proportional to native source length or research breadth.
-- **10 min**: ~1,300 words.
-- **20 min**: ~2,600 words.
-- **30 min**: ~3,900 words.
-- **45 min**: ~5,850 words.
-- **60 min**: ~7,800 words.
-*(Fixed durations use sequential section generation with section budgets, bounded fidelity auditing, and anti-compression pass).*
-
-### Deterministic Herald Intro/Outro Branding
-All generated episodes include application-owned, deterministic intro and outro narration synthesized via Kokoro TTS and padded with natural silence pauses:
-- **Intro**: *"This is Herald, an open-source podcast generation platform. You're listening to an approximately [N]-minute podcast about [Topic]. Enjoy."*
-- **Outro**: *"You've been listening to Herald, the open-source podcast generation platform."*
-*(Can be toggled via `BRANDING_INTRO_ENABLED` and `BRANDING_OUTRO_ENABLED` in `.env`).*
-
-### Directives (Optional top-of-message overrides)
-- `literal` — Quick one-touch shortcut to Literal reader
-- `Voice: af_bella` (Available: `af_heart`, `af_bella`, `af_sarah`, `am_adam`, `am_michael`)
-- `Speed: 1.1` (0.8x to 1.2x)
-- `Title: My Custom Episode Title`
-
+Once paired, send a topic or source and Herald will present the podcast configuration card.
 
 ---
 
-## Telegram Bot Commands
+## Telegram controls
 
-| Command | Description |
-| :--- | :--- |
-| `/start` | Welcome message, quick-start guide, and pairing status |
-| `/help` | Complete usage guide and directive reference |
-| `/download [id]` | Download completed podcast MP3 as an audio document |
-| `/diagnostics [id]` | View job diagnostics card and download redacted support bundle ZIP |
-| `/status` | Live runtime health, TTS readiness, AI provider health, queue, disk, and uptime |
-| `/ai-check` | Comprehensive AI diagnostics: tests your Primary, Secondary, and Tertiary provider chain |
-| `/models` | Interactive catalog browser for supported models across all registered AI providers |
-| `/queue` | View pending, scripting, and synthesizing podcast jobs |
-| `/settings` | Redesigned settings menu: Voice, Speed, Default Mode, Provider Slots, Models, Confirmation |
-| `/readme` | Send the project `README.md` document |
-| `/pair <code>` | Pair your Telegram account as the authorized instance owner |
+| Command | Purpose |
+| --- | --- |
+| `/start` | Quick-start guide and pairing status |
+| `/help` | Full usage guide and directive reference |
+| `/settings` | Voice, speed, default mode, target length, research depth, provider chain, models, and confirmation preference |
+| `/voices` | Browse the curated voice catalog |
+| `/models` | Browse supported models for registered providers |
+| `/status` | Runtime health, TTS readiness, AI status, queue, disk, and uptime |
+| `/ai-check` | Test configured AI provider connections (`/ai_check` is also accepted) |
+| `/queue` | View pending and processing jobs |
+| `/download [id]` | Retrieve the latest or a specific completed MP3 |
+| `/diagnostics [id]` | View job diagnostics and retrieve a redacted support bundle |
+| `/logs YYYY-MM-DD [HH:MM]` | Owner-only export of Herald logs and diagnostics from the requested time |
+| `/readme` | Send the project README through Telegram |
+| `/pair <code>` | Pair the authorized owner account |
 
----
-
-## Management & Operations
-
-Herald includes dedicated operational scripts in `scripts/`:
-
-| Action | Command |
-| :--- | :--- |
-| **Acceptance Test** | `./scripts/install_acceptance.sh` |
-| **System Status** | `python3 scripts/status.py` or `docker compose ps` |
-| **Live Logs** | `docker compose logs -f --tail=100` |
-| **Backup State** | `./scripts/backup.sh` |
-| **Restore State** | `./scripts/restore.sh <backup-dir>` |
-| **Warm Reset** | `./scripts/reset-herald.sh --warm` *(resets DB/volumes, keeps .env & images)* |
-| **Cold Reset** | `./scripts/reset-herald.sh --cold` *(resets DB/volumes & built images, keeps .env)* |
-| **Update Stack** | `./install.sh --update` |
-| **Reinstall** | `./install.sh --reinstall` |
+Per-request directives such as `Voice:`, `Speed:`, `Title:`, `Mode:`, `Length:`, and `Research:` can be placed at the top of submitted content.
 
 ---
 
-## Observability, Logging & Diagnostics
+## Current architecture
 
-Herald maintains bounded, persistent host logging under `./logs/`:
-
+```text
+Telegram
+   │
+   ▼
+Telegram bot ───────────────┐
+   │                        │
+   ▼                        ▼
+Intake + configuration   PostgreSQL
+   │                        ▲
+   ▼                        │
+Source extraction / research│
+   │                        │
+   ▼                        │
+AI provider chain (optional)│
+   │                        │
+   ▼                        │
+Podcast script ─────────────┤
+   │                        │
+   ▼                        │
+Herald worker ──────────────┘
+   │
+   ▼
+Kokoro TTS
+   │
+   ▼
+FFmpeg
+   │
+   ▼
+MP3 → Telegram
 ```
-logs/
-├── install-YYYYMMDD-HHMMSS.log      # Complete bootstrap/update/reinstall installation transcripts
-├── telegram-bot.log                 # Active Telegram bot application log (max 5 MB)
-├── telegram-bot.log.1               # Rotated backup log
-├── herald-worker.log                # Active worker application log (max 5 MB)
-├── herald-worker.log.1              # Rotated backup log
-└── diagnostics/
-    └── <job_id>_<STATUS>.zip        # Sanitized terminal job diagnostic bundles
+
+PostgreSQL stores durable job state, queueing, user preferences, provider-chain snapshots, transitions, and recovery metadata. The worker handles generation and local audio production. Terminal jobs produce bounded, redacted diagnostic bundles for troubleshooting.
+
+The default Docker Compose stack contains:
+
+- `postgres`
+- `herald-migration`
+- `herald-worker`
+- `telegram-bot`
+- `kokoro`
+
+---
+
+## Operations
+
+Common host-side commands:
+
+```bash
+# Validate the installation
+./scripts/install_acceptance.sh
+
+# Runtime status
+python3 scripts/status.py
+docker compose ps
+
+# Logs
+docker compose logs -f --tail=100
+
+# Backup database state
+./scripts/backup.sh
+
+# Disposable backup/restore verification
+make restore-test
+
+# Update to the latest main branch
+./install.sh --update
 ```
 
-### Key Observability Features:
-- **Application Log Rotation**: `telegram-bot` and `herald-worker` each log to rotating files with a 5 MB ceiling and 1 backup file (~20 MB maximum disk usage total across both services).
-- **Docker Daemon Logging Bounding**: Container stdout/stderr is capped using Docker's `json-file` driver (`max-size: 10m`, `max-file: 3`).
-- **Secret Redaction**: Configured API keys, tokens, Authorization headers, and credentials are automatically scrubbed from application logs and diagnostic bundles.
-- **Automatic Diagnostics Bundles**: On reaching any terminal state (`COMPLETE`, `FAILED_FINAL`, `CANCELLED`), a sanitized ZIP archive containing full execution telemetry, state transitions, timings, AI evidence, and configuration is generated under `logs/diagnostics/`.
-- **Diagnostics Retention**: Retained for 30 days by default (`DIAGNOSTICS_RETENTION_DAYS=30`), automatically cleaned up daily by `herald-worker`.
-- **Reset & Reinstall Resilience**: Host logs in `./logs/` survive both warm and cold resets (`scripts/reset-herald.sh`), as well as reinstallations (`install.sh --reinstall`).
+Herald also writes bounded persistent application logs under `./logs/`, including rotating worker and Telegram logs plus terminal diagnostic ZIPs under `./logs/diagnostics/`.
+
+See [docs/operations.md](docs/operations.md) for the runbook.
+
+---
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Deployment](docs/deployment.md)
+- [AI providers and failover](docs/ai-providers.md)
+- [Kokoro and voices](docs/kokoro-setup.md)
+- [Operations](docs/operations.md)
+- [Backup and restore validation](docs/backup-restore.md)
+- [Security](docs/security.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Gemini-specific setup](docs/gemini-setup.md)
+
+---
+
+## Privacy posture
+
+Herald is self-hosted, but external services still matter:
+
+- Telegram carries submitted messages, bot controls, and delivered podcast files.
+- AI-assisted modes may send source or research material to the configured AI providers.
+- Literal mode makes no LLM API calls, while still using Telegram as the remote interface.
+- Kokoro speech synthesis and FFmpeg audio processing run locally in the default deployment.
+
+Review [docs/security.md](docs/security.md) and the [Herald Privacy Policy](https://upstatedatasystems.com/Herald/privacy) for more detail.
 
 ---
 
 ## License
 
-[MIT License](LICENSE) — Copyright (c) 2026 Upstate Data Systems LLC.
+Herald is released under the [MIT License](LICENSE).
 
+Copyright © 2026 Upstate Data Systems LLC.
