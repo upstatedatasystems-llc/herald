@@ -1,123 +1,213 @@
-# Operations & Operational Runbook
+# Herald Operations Runbook
 
-This guide covers maintenance, diagnostics, backups, acceptance testing, and safe reset procedures for Herald.
+This runbook covers normal health checks, logs, diagnostics, backups, voice preview maintenance, service lifecycle, and updates.
 
----
+## Health and acceptance
 
-## 1. System Health & Acceptance
-
-### Installation Acceptance Validation
-Verify the entire runtime stack without exposing credentials:
+Run the installation acceptance suite:
 
 ```bash
 ./scripts/install_acceptance.sh
 ```
 
-Returns `0` when:
-- `.env` exists with strict `0600` permissions.
-- Required credentials are non-empty and not default placeholders.
-- `postgres` and `kokoro` containers are healthy.
-- `herald-worker` and `telegram-bot` daemons are running.
-- `herald-migration` exited successfully with code 0.
-- PostgreSQL database revision authoritatively matches the dynamic Alembic head revision.
-- AI provider failover chain credentials and invariants are satisfied.
-
-### Status & Queue Monitoring
-Inspect queue depth and job counts:
+Runtime status:
 
 ```bash
 python3 scripts/status.py
-```
-or via Docker Compose:
-```bash
 docker compose ps
 ```
 
----
+From Telegram, the paired owner can also use:
 
-## 2. Reviewing Container Logs
+```text
+/status
+/queue
+/ai-check
+```
 
-Tail logs for all services:
+`/status` reports the running application's health view, while `/ai-check` performs fresh AI provider connectivity checks.
+
+## Logs
+
+Follow all container logs:
+
 ```bash
 docker compose logs -f --tail=100
 ```
 
-Tail logs for a specific service:
+Individual services:
+
 ```bash
-# Telegram Bot daemon
 docker compose logs -f telegram-bot
-
-# Worker & TTS synthesis pipeline
 docker compose logs -f herald-worker
-
-# Kokoro TTS engine
 docker compose logs -f kokoro
-
-# PostgreSQL database
 docker compose logs -f postgres
 ```
 
----
+Herald also writes bounded host logs under:
 
-## 3. Safe Backups and Restores
+```text
+./logs/
+├── telegram-bot.log
+├── telegram-bot.log.1
+├── herald-worker.log
+├── herald-worker.log.1
+└── diagnostics/
+```
 
-### Backup System State
-Creates a timestamped snapshot of the PostgreSQL database and version manifest:
+The application logs rotate independently of Docker's own bounded `json-file` logging.
+
+### Owner log export from Telegram
+
+The paired owner can request a sanitized time-bounded ZIP:
+
+```text
+/logs YYYY-MM-DD [HH:MM]
+```
+
+The configured Herald timezone is used to interpret the requested start time. The export includes matching application logs and diagnostic bundles for the requested period.
+
+## Job diagnostics
+
+Use:
+
+```text
+/diagnostics
+/diagnostics <job-id>
+```
+
+Terminal jobs generate sanitized diagnostic archives under `./logs/diagnostics/`. These are retained according to `DIAGNOSTICS_RETENTION_DAYS`.
+
+Use diagnostics before reaching for direct database edits. They capture state transitions, provider activity, timing, failure classification, and other execution telemetry without intentionally including configured secrets.
+
+## Voice preview cache
+
+Voice selection and actual podcast TTS can work even when preview samples are missing. If Telegram reports that voice preview is unavailable, rebuild the preview cache while podcast synthesis is idle:
+
+```bash
+docker compose exec -T telegram-bot   python -m herald.services.voice_manager --prewarm
+```
+
+Force regeneration if the cache or manifest is stale:
+
+```bash
+docker compose exec -T telegram-bot   python -m herald.services.voice_manager --prewarm --force
+```
+
+Preview audio is stored in the shared work volume under `/data/herald/voice_samples/`.
+
+Podcast TTS takes priority over preview generation, so perform a bulk prewarm when no active synthesis job is running.
+
+## Backups
+
+Create a database backup:
 
 ```bash
 ./scripts/backup.sh
 ```
-Snapshots are saved to `./backups/backup_<YYYYMMDD_HHMMSS>/` with SHA256 checksums.
 
-### Restore System State
-Restore a database backup into a running or freshly initialized stack:
+or:
 
 ```bash
-./scripts/restore.sh ./backups/backup_20260904_120000
+make backup
 ```
 
----
+Verify the backup/restore path using a disposable test database:
 
-## 4. Safe System Reset & Reinstall Tooling
+```bash
+make restore-test
+```
 
-Herald includes `scripts/reset-herald.sh` to safely manage application state and testing environments.
+See [backup-restore.md](backup-restore.md) before attempting production recovery. The current `scripts/restore.sh` validates a backup artifact; it does not overwrite the live database.
 
-> [!WARNING]
-> Resetting destroys PostgreSQL jobs, pairing state, user preferences, and work-volume audio artifacts.
-> Always run `./scripts/backup.sh` before resetting if you need to retain data.
+## Service lifecycle
 
-### Warm Reset (Application State Only)
-Stops containers and removes Compose volumes (`postgres_data`, `work_data`). Preserves `.env` and built container images:
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+Start the stack:
+
+```bash
+docker compose up -d
+```
+
+Restart application services:
+
+```bash
+docker compose restart telegram-bot herald-worker
+```
+
+Rebuild after source changes:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Apply migrations explicitly:
+
+```bash
+docker compose run --rm herald-migration
+```
+
+## Updates
+
+Use the installer-managed update path for normal upgrades:
+
+```bash
+./install.sh --update
+```
+
+After an update, verify:
+
+```bash
+./scripts/install_acceptance.sh
+docker compose ps
+```
+
+Then run `/status` and `/ai-check` from Telegram.
+
+## Reset procedures
+
+Warm reset:
 
 ```bash
 ./scripts/reset-herald.sh --warm
 ```
 
-### Cold Reset (Clean Build State)
-Stops containers, removes Compose volumes, and removes locally built Herald container images (`herald-worker`, `herald-migration`, `telegram-bot`). Preserves `.env` and upstream images (`postgres:16-alpine`, `ghcr.io/remsky/kokoro-fastapi-cpu:v0.7.1`):
+Cold reset:
 
 ```bash
 ./scripts/reset-herald.sh --cold
 ```
 
-### Deleting Configuration (.env)
-To explicitly delete `.env` during a reset (requires typed confirmation or `-y`):
+Delete `.env` as well:
 
 ```bash
 ./scripts/reset-herald.sh --cold --remove-env
 ```
 
----
+Resetting destroys PostgreSQL jobs, pairing state, preferences, and work-volume artifacts. Back up first when that state matters.
 
-## 5. Service Lifecycle Management
+## Routine operational checks
+
+A simple maintenance pass is:
 
 ```bash
-# Stop all services
-docker compose down
-
-# Start all core services
-docker compose up -d postgres kokoro herald-migration herald-worker telegram-bot
-
-# Rebuild and restart services after code changes
-docker compose build && docker compose up -d
+cd ~/herald
+docker compose ps
+python3 scripts/status.py
+./scripts/install_acceptance.sh
 ```
+
+Then check Telegram:
+
+```text
+/status
+/ai-check
+```
+
+Investigate any failure with `/diagnostics`, `/logs`, and the service logs before changing persistent state.
